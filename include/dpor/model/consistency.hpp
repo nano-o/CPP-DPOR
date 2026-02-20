@@ -37,15 +37,15 @@ struct ConsistencyResult {
 };
 
 template <typename ValueT>
-class P2PConsistencyCheckerT {
+class AsyncConsistencyCheckerT {
  public:
   [[nodiscard]] ConsistencyResult check(const ExecutionGraphT<ValueT>&) const {
     return ConsistencyResult::failure(
         ConsistencyIssueCode::UnimplementedCheck,
-        "P2P consistency checking is not implemented yet.");
+        "Async consistency checking is not implemented yet.");
   }
 };
 
-using P2PConsistencyChecker = P2PConsistencyCheckerT<Value>;
+using AsyncConsistencyChecker = AsyncConsistencyCheckerT<Value>;
 
 }  // namespace dpor::model

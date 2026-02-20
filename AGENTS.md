@@ -10,7 +10,7 @@ The Must paper is our semantic north star for:
 
 - execution graphs (`E`, `po`, `rf`)
 - well-formedness and consistency concepts
-- p2p communication semantics and later DPOR exploration strategy
+- async communication semantics and later DPOR exploration strategy
 
 ## Important Constraint: Existing Codebases
 
@@ -42,7 +42,7 @@ This is required to preserve DPOR soundness/completeness assumptions.
 ## Current Scope
 
 - prioritize correctness and clarity over optimization
-- focus first on p2p communication model support
+- focus first on async communication model support
 - add genericity where it improves integration with real systems (not genericity for its own sake)
 
 ## Prototype Policy

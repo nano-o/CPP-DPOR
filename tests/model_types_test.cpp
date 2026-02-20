@@ -83,9 +83,9 @@ TEST_CASE("execution graph tracks po and rf relations", "[model][graph]") {
   REQUIRE(graph.event(recv_id).index == 0);
 }
 
-TEST_CASE("p2p consistency checker is currently a stub", "[model][consistency]") {
+TEST_CASE("async consistency checker is currently a stub", "[model][consistency]") {
   const dpor::model::ExecutionGraph graph;
-  const dpor::model::P2PConsistencyChecker checker;
+  const dpor::model::AsyncConsistencyChecker checker;
   const auto result = checker.check(graph);
 
   REQUIRE_FALSE(result.is_consistent());
@@ -145,7 +145,7 @@ TEST_CASE("custom message payload keeps typed fields", "[model][graph][consisten
   REQUIRE(receive->accepts(Message{.kind = "append_entries", .term = 4}));
   REQUIRE_FALSE(receive->accepts(Message{.kind = "request_vote", .term = 4}));
 
-  const dpor::model::P2PConsistencyCheckerT<Message> checker;
+  const dpor::model::AsyncConsistencyCheckerT<Message> checker;
   const auto result = checker.check(graph);
   REQUIRE_FALSE(result.is_consistent());
   REQUIRE(result.issues.front().code == dpor::model::ConsistencyIssueCode::UnimplementedCheck);
