@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -53,23 +54,13 @@ TEST_CASE("event helper predicates classify labels", "[model][event]") {
 TEST_CASE("execution graph tracks po and rf relations", "[model][graph]") {
   dpor::model::ExecutionGraph graph;
 
-  const auto send_0_id = graph.add_event(dpor::model::Event{
-      .thread = 1,
-      .index = 0,
-      .label = dpor::model::SendLabel{.destination = 2, .value = "x"},
-  });
-  const auto send_1_id = graph.add_event(dpor::model::Event{
-      .thread = 1,
-      .index = 1,
-      .label = dpor::model::SendLabel{.destination = 2, .value = "y"},
-  });
-  const auto recv_id = graph.add_event(dpor::model::Event{
-      .thread = 2,
-      .index = 0,
-      .label = dpor::model::make_receive_label_from_values<dpor::model::Value>(
+  const auto send_0_id = graph.add_event(1, dpor::model::SendLabel{.destination = 2, .value = "x"});
+  const auto send_1_id = graph.add_event(1, dpor::model::SendLabel{.destination = 2, .value = "y"});
+  const auto recv_id = graph.add_event(
+      2,
+      dpor::model::make_receive_label_from_values<dpor::model::Value>(
           dpor::model::ReceiveMode::Blocking,
-          {"x", "y"}),
-  });
+          {"x", "y"}));
 
   graph.set_reads_from(recv_id, send_1_id);
 
@@ -87,6 +78,9 @@ TEST_CASE("execution graph tracks po and rf relations", "[model][graph]") {
   REQUIRE_FALSE(po.contains(send_1_id, send_0_id));
   REQUIRE(rf.contains(send_1_id, recv_id));
   REQUIRE(po_then_rf.contains(send_0_id, recv_id));
+  REQUIRE(graph.event(send_0_id).index == 0);
+  REQUIRE(graph.event(send_1_id).index == 1);
+  REQUIRE(graph.event(recv_id).index == 0);
 }
 
 TEST_CASE("p2p consistency checker is currently a stub", "[model][consistency]") {
@@ -102,18 +96,13 @@ TEST_CASE("p2p consistency checker is currently a stub", "[model][consistency]")
 TEST_CASE("execution graph supports custom value type", "[model][graph]") {
   dpor::model::ExecutionGraphT<Payload> graph;
 
-  const auto send_id = graph.add_event(dpor::model::EventT<Payload>{
-      .thread = 1,
-      .index = 0,
-      .label = dpor::model::SendLabelT<Payload>{.destination = 2, .value = Payload{.id = 7}},
-  });
-  const auto recv_id = graph.add_event(dpor::model::EventT<Payload>{
-      .thread = 2,
-      .index = 0,
-      .label = dpor::model::make_receive_label<Payload>(
+  const auto send_id =
+      graph.add_event(1, dpor::model::SendLabelT<Payload>{.destination = 2, .value = Payload{.id = 7}});
+  const auto recv_id = graph.add_event(
+      2,
+      dpor::model::make_receive_label<Payload>(
           dpor::model::ReceiveMode::Blocking,
-          [](const Payload& payload) { return payload.id == 7; }),
-  });
+          [](const Payload& payload) { return payload.id == 7; }));
 
   graph.set_reads_from(recv_id, send_id);
 
@@ -130,23 +119,19 @@ TEST_CASE("execution graph supports custom value type", "[model][graph]") {
 TEST_CASE("custom message payload keeps typed fields", "[model][graph][consistency]") {
   dpor::model::ExecutionGraphT<Message> graph;
 
-  const auto send_id = graph.add_event(dpor::model::EventT<Message>{
-      .thread = 3,
-      .index = 1,
-      .label = dpor::model::SendLabelT<Message>{
+  const auto send_id = graph.add_event(
+      3,
+      dpor::model::SendLabelT<Message>{
           .destination = 4,
           .value = Message{.kind = "append_entries", .term = 9},
-      },
-  });
-  const auto recv_id = graph.add_event(dpor::model::EventT<Message>{
-      .thread = 4,
-      .index = 1,
-      .label = dpor::model::make_receive_label<Message>(
+      });
+  const auto recv_id = graph.add_event(
+      4,
+      dpor::model::make_receive_label<Message>(
           dpor::model::ReceiveMode::Blocking,
           [](const Message& candidate) {
             return validate_message(candidate) == ValidationResult::Ok;
-          }),
-  });
+          }));
 
   graph.set_reads_from(recv_id, send_id);
 
@@ -164,4 +149,17 @@ TEST_CASE("custom message payload keeps typed fields", "[model][graph][consisten
   const auto result = checker.check(graph);
   REQUIRE_FALSE(result.is_consistent());
   REQUIRE(result.issues.front().code == dpor::model::ConsistencyIssueCode::UnimplementedCheck);
+}
+
+TEST_CASE("execution graph supports explicit index insertion for replay", "[model][graph]") {
+  dpor::model::ExecutionGraph graph;
+
+  const auto e0 = graph.add_event_with_index(7, 3, dpor::model::SendLabel{.destination = 8, .value = "a"});
+  const auto e1 = graph.add_event_with_index(7, 4, dpor::model::SendLabel{.destination = 8, .value = "b"});
+
+  REQUIRE(graph.event(e0).index == 3);
+  REQUIRE(graph.event(e1).index == 4);
+  REQUIRE_THROWS_AS(
+      graph.add_event_with_index(7, 4, dpor::model::SendLabel{.destination = 8, .value = "c"}),
+      std::invalid_argument);
 }

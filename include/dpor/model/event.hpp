@@ -34,6 +34,12 @@ enum class ReceiveMode {
 
 template <typename ValueT>
 using ReceiveMatchFnT = std::function<bool(const ValueT&)>;
+// Warning:
+// `std::function` keeps matcher semantics flexible but makes matcher identity
+// opaque. As a result, `ReceiveLabelT` equality is not structurally meaningful,
+// and stateful/mutable captures can produce surprising behavior if not kept
+// deterministic. This matters for future memoization/reduction features (e.g.,
+// sleep sets), where stable matcher identity may be required.
 
 template <typename ValueT>
 struct ReceiveLabelT {
@@ -72,6 +78,7 @@ using EventLabelT = std::variant<
 template <typename ValueT>
 struct EventT {
   ThreadId thread{};
+  // Typically assigned by ExecutionGraph insertion APIs, not by callers.
   EventIndex index{};
   EventLabelT<ValueT> label{};
 };

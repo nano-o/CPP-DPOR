@@ -44,3 +44,11 @@ This is required to preserve DPOR soundness/completeness assumptions.
 - prioritize correctness and clarity over optimization
 - focus first on p2p communication model support
 - add genericity where it improves integration with real systems (not genericity for its own sake)
+
+## Prototype Policy
+
+This codebase is currently a prototype.
+
+- there is no backward-compatibility commitment
+- prioritize clean iteration over preserving old APIs
+- when better structure is identified, prefer replacing APIs instead of layering compatibility shims

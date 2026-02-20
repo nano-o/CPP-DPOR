@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -34,8 +35,37 @@ class ExecutionGraphT {
   using ReadsFromSource = std::optional<EventId>;
   using ReadsFromRelation = std::unordered_map<EventId, ReadsFromSource>;
 
-  [[nodiscard]] EventId add_event(Event event) {
-    events_.push_back(std::move(event));
+  // Normal insertion path: assign event index automatically per thread.
+  [[nodiscard]] EventId add_event(ThreadId thread, EventLabelT<ValueT> label) {
+    const auto index = next_event_index(thread);
+    return add_event_with_index(thread, index, std::move(label));
+  }
+
+  // Replay/import path when event indices come from external traces.
+  [[nodiscard]] EventId add_event_with_index(
+      ThreadId thread,
+      EventIndex index,
+      EventLabelT<ValueT> label) {
+    auto& used_indices = used_event_indices_by_thread_[thread];
+    if (used_indices.find(index) != used_indices.end()) {
+      throw std::invalid_argument("event index already used in this thread");
+    }
+    used_indices.insert(index);
+
+    auto& next_index = next_event_index_by_thread_[thread];
+    if (index >= next_index) {
+      if (index == std::numeric_limits<EventIndex>::max()) {
+        next_index = index;
+      } else {
+        next_index = static_cast<EventIndex>(index + 1);
+      }
+    }
+
+    events_.push_back(Event{
+        .thread = thread,
+        .index = index,
+        .label = std::move(label),
+    });
     return events_.size() - 1U;
   }
 
@@ -134,6 +164,21 @@ class ExecutionGraphT {
   }
 
  private:
+  [[nodiscard]] EventIndex next_event_index(ThreadId thread) {
+    constexpr auto kMaxIndex = std::numeric_limits<EventIndex>::max();
+    auto& next_index = next_event_index_by_thread_[thread];
+    auto& used_indices = used_event_indices_by_thread_[thread];
+
+    while (used_indices.find(next_index) != used_indices.end()) {
+      if (next_index == kMaxIndex) {
+        throw std::overflow_error("no available event index for thread");
+      }
+      ++next_index;
+    }
+
+    return next_index;
+  }
+
   // Produces per-thread event sequences sorted by declared per-thread index.
   // These sequences are the canonical input for ProgramOrderRelation.
   [[nodiscard]] std::vector<std::vector<NodeId>> derive_thread_event_sequences() const {
@@ -172,6 +217,8 @@ class ExecutionGraphT {
 
   std::vector<Event> events_{};
   ReadsFromRelation reads_from_{};
+  std::unordered_map<ThreadId, EventIndex> next_event_index_by_thread_{};
+  std::unordered_map<ThreadId, std::unordered_set<EventIndex>> used_event_indices_by_thread_{};
 };
 
 using ExecutionGraph = ExecutionGraphT<Value>;
