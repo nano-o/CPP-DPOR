@@ -1,9 +1,24 @@
 #pragma once
 
-#include "dpor/model/event.hpp"
+// Execution-graph design rationale:
+// - Keep event storage canonical (`events_`) and lightweight.
+// - Store reads-from choices directly as receive -> optional send (`reads_from_`),
+//   which matches exploration decisions and supports `⊥` for non-blocking receives.
+// - Derive program order from per-thread `(thread, index)` metadata instead of
+//   materializing all transitive PO edges; this keeps representation compact and
+//   avoids duplicated state.
+// - Export `po`/`rf` through the generic relation layer so downstream DPOR logic
+//   can use common algebra (`compose`, closure, cycle checks) independently of
+//   how each relation is represented internally.
 
+#include "dpor/model/event.hpp"
+#include "dpor/model/relation.hpp"
+
+#include <algorithm>
 #include <cstddef>
+#include <map>
 #include <optional>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -16,17 +31,12 @@ class ExecutionGraphT {
  public:
   using EventId = std::size_t;
   using Event = EventT<ValueT>;
-  using ProgramOrderEdge = std::pair<EventId, EventId>;
   using ReadsFromSource = std::optional<EventId>;
   using ReadsFromRelation = std::unordered_map<EventId, ReadsFromSource>;
 
   [[nodiscard]] EventId add_event(Event event) {
     events_.push_back(std::move(event));
     return events_.size() - 1U;
-  }
-
-  void add_program_order_edge(EventId from, EventId to) {
-    program_order_.emplace_back(from, to);
   }
 
   void set_reads_from(EventId receive_event_id, ReadsFromSource source) {
@@ -45,12 +55,42 @@ class ExecutionGraphT {
     return events_;
   }
 
-  [[nodiscard]] const std::vector<ProgramOrderEdge>& program_order() const noexcept {
-    return program_order_;
-  }
-
   [[nodiscard]] const ReadsFromRelation& reads_from() const noexcept {
     return reads_from_;
+  }
+
+  [[nodiscard]] ProgramOrderRelation po_relation() const {
+    return ProgramOrderRelation(events_.size(), derive_thread_event_sequences());
+  }
+
+  // Builds an explicit send->receive relation view from stored receive->source
+  // assignments. `nullopt` sources (⊥) are intentionally omitted from edges.
+  [[nodiscard]] ExplicitRelation rf_relation() const {
+    ExplicitRelation relation(events_.size());
+
+    for (const auto& [receive_id, source] : reads_from_) {
+      if (!is_valid_event_id(receive_id)) {
+        throw std::invalid_argument("reads-from relation refers to an unknown receive event id");
+      }
+      if (!is_receive(events_[receive_id])) {
+        throw std::invalid_argument("reads-from relation target event is not a receive");
+      }
+
+      if (!source.has_value()) {
+        continue;
+      }
+
+      if (!is_valid_event_id(*source)) {
+        throw std::invalid_argument("reads-from relation source refers to an unknown send event id");
+      }
+      if (!is_send(events_[*source])) {
+        throw std::invalid_argument("reads-from relation source event is not a send");
+      }
+
+      relation.add_edge(*source, receive_id);
+    }
+
+    return relation;
   }
 
   [[nodiscard]] std::vector<EventId> receive_event_ids() const {
@@ -94,8 +134,43 @@ class ExecutionGraphT {
   }
 
  private:
+  // Produces per-thread event sequences sorted by declared per-thread index.
+  // These sequences are the canonical input for ProgramOrderRelation.
+  [[nodiscard]] std::vector<std::vector<NodeId>> derive_thread_event_sequences() const {
+    std::map<ThreadId, std::vector<EventId>> event_ids_by_thread;
+    for (EventId id = 0; id < events_.size(); ++id) {
+      event_ids_by_thread[events_[id].thread].push_back(id);
+    }
+
+    std::vector<std::vector<NodeId>> thread_sequences;
+    thread_sequences.reserve(event_ids_by_thread.size());
+
+    for (auto& [_, event_ids] : event_ids_by_thread) {
+      std::sort(event_ids.begin(), event_ids.end(), [&](const EventId lhs, const EventId rhs) {
+        const auto lhs_index = events_[lhs].index;
+        const auto rhs_index = events_[rhs].index;
+        if (lhs_index != rhs_index) {
+          return lhs_index < rhs_index;
+        }
+        return lhs < rhs;
+      });
+
+      for (std::size_t i = 1; i < event_ids.size(); ++i) {
+        const auto previous = event_ids[i - 1];
+        const auto current = event_ids[i];
+        if (events_[previous].index == events_[current].index) {
+          throw std::invalid_argument(
+              "two events in the same thread have the same event index; program order is ambiguous");
+        }
+      }
+
+      thread_sequences.emplace_back(event_ids.begin(), event_ids.end());
+    }
+
+    return thread_sequences;
+  }
+
   std::vector<Event> events_{};
-  std::vector<ProgramOrderEdge> program_order_{};
   ReadsFromRelation reads_from_{};
 };
 

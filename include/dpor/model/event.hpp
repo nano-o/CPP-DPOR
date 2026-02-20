@@ -1,5 +1,17 @@
 #pragma once
 
+// Event layer design rationale:
+// - Mirror Must-style execution-graph entities (send/receive/nondet/block/error)
+//   while remaining practical for existing codebases.
+// - Keep payload type generic (`ValueT`) so integrations can use native message
+//   structures from the system under test.
+// - Keep thread/index identifiers simple and concrete for now; they are internal
+//   bookkeeping fields that benefit from stable, lightweight types.
+// - Model receive compatibility via a predicate (`matches`) instead of only
+//   explicit value sets, enabling post-hoc adapters that call existing logic.
+// - Provide default aliases (`Event`, `SendLabel`, ...) so common usage stays
+//   concise when `std::string` payloads are sufficient.
+
 #include <algorithm>
 #include <concepts>
 #include <cstdint>
@@ -26,6 +38,7 @@ using ReceiveMatchFnT = std::function<bool(const ValueT&)>;
 template <typename ValueT>
 struct ReceiveLabelT {
   ReceiveMode mode{ReceiveMode::Blocking};
+  // Predicate deciding whether this receive may consume a candidate payload.
   ReceiveMatchFnT<ValueT> matches{[](const ValueT&) { return true; }};
 
   [[nodiscard]] bool accepts(const ValueT& value) const {

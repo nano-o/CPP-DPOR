@@ -53,28 +53,40 @@ TEST_CASE("event helper predicates classify labels", "[model][event]") {
 TEST_CASE("execution graph tracks po and rf relations", "[model][graph]") {
   dpor::model::ExecutionGraph graph;
 
-  const auto send_id = graph.add_event(dpor::model::Event{
+  const auto send_0_id = graph.add_event(dpor::model::Event{
       .thread = 1,
       .index = 0,
       .label = dpor::model::SendLabel{.destination = 2, .value = "x"},
+  });
+  const auto send_1_id = graph.add_event(dpor::model::Event{
+      .thread = 1,
+      .index = 1,
+      .label = dpor::model::SendLabel{.destination = 2, .value = "y"},
   });
   const auto recv_id = graph.add_event(dpor::model::Event{
       .thread = 2,
       .index = 0,
       .label = dpor::model::make_receive_label_from_values<dpor::model::Value>(
           dpor::model::ReceiveMode::Blocking,
-          {"x"}),
+          {"x", "y"}),
   });
 
-  graph.add_program_order_edge(send_id, recv_id);
-  graph.set_reads_from(recv_id, send_id);
+  graph.set_reads_from(recv_id, send_1_id);
 
-  REQUIRE(graph.event(send_id).thread == 1);
-  REQUIRE(graph.program_order().size() == 1);
+  REQUIRE(graph.event(send_0_id).thread == 1);
   REQUIRE(graph.reads_from().size() == 1);
-  REQUIRE(graph.send_event_ids().size() == 1);
+  REQUIRE(graph.send_event_ids().size() == 2);
   REQUIRE(graph.receive_event_ids().size() == 1);
-  REQUIRE(graph.unread_send_event_ids().empty());
+  REQUIRE(graph.unread_send_event_ids() == std::vector<dpor::model::NodeId>{send_0_id});
+
+  const auto po = graph.po_relation();
+  const auto rf = graph.rf_relation();
+  const auto po_then_rf = dpor::model::compose(po, rf);
+
+  REQUIRE(po.contains(send_0_id, send_1_id));
+  REQUIRE_FALSE(po.contains(send_1_id, send_0_id));
+  REQUIRE(rf.contains(send_1_id, recv_id));
+  REQUIRE(po_then_rf.contains(send_0_id, recv_id));
 }
 
 TEST_CASE("p2p consistency checker is currently a stub", "[model][consistency]") {
