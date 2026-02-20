@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -26,6 +27,17 @@ ValidationResult validate_message(const Message& message) {
     return ValidationResult::Ok;
   }
   return ValidationResult::Invalid;
+}
+
+bool has_issue(
+    const dpor::model::ConsistencyResult& result,
+    const dpor::model::ConsistencyIssueCode code) {
+  return std::any_of(
+      result.issues.begin(),
+      result.issues.end(),
+      [code](const dpor::model::ConsistencyIssue& issue) {
+        return issue.code == code;
+      });
 }
 }  // namespace
 
@@ -80,14 +92,155 @@ TEST_CASE("execution graph tracks po and rf relations", "[model][graph]") {
   REQUIRE(graph.event(recv_id).index == 0);
 }
 
-TEST_CASE("async consistency checker is currently a stub", "[model][consistency]") {
-  const dpor::model::ExecutionGraph graph;
+TEST_CASE("async consistency checker accepts well-formed graph", "[model][consistency]") {
+  dpor::model::ExecutionGraph graph;
+  const auto send_id = graph.add_event(1, dpor::model::SendLabel{.destination = 2, .value = "ok"});
+  const auto recv_id = graph.add_event(
+      2,
+      dpor::model::make_receive_label_from_values<dpor::model::Value>(
+          {"ok"}));
+  graph.set_reads_from(recv_id, send_id);
+
+  const dpor::model::AsyncConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE(result.is_consistent());
+  REQUIRE(result.issues.empty());
+}
+
+TEST_CASE("async consistency checker reports invalid reads-from endpoints", "[model][consistency]") {
+  dpor::model::ExecutionGraph graph;
+  const auto send_id = graph.add_event(1, dpor::model::SendLabel{.destination = 2, .value = "x"});
+  const auto recv_id = graph.add_event(
+      2,
+      dpor::model::make_receive_label_from_values<dpor::model::Value>(
+          {"x"}));
+
+  graph.set_reads_from(recv_id, 999);
+  graph.set_reads_from(888, send_id);
+
   const dpor::model::AsyncConsistencyChecker checker;
   const auto result = checker.check(graph);
 
   REQUIRE_FALSE(result.is_consistent());
-  REQUIRE(result.issues.size() == 1);
-  REQUIRE(result.issues.front().code == dpor::model::ConsistencyIssueCode::UnimplementedCheck);
+  REQUIRE(has_issue(result, dpor::model::ConsistencyIssueCode::InvalidEventReference));
+}
+
+TEST_CASE("async consistency checker requires every receive to read exactly one send", "[model][consistency]") {
+  dpor::model::ExecutionGraph graph;
+  const auto recv_id = graph.add_event(
+      2,
+      dpor::model::make_receive_label_from_values<dpor::model::Value>(
+          {"x"}));
+
+  const dpor::model::AsyncConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE_FALSE(result.is_consistent());
+  REQUIRE(has_issue(result, dpor::model::ConsistencyIssueCode::MissingReadsFromForReceive));
+  REQUIRE(graph.event(recv_id).thread == 2);
+}
+
+TEST_CASE("async consistency checker validates reads-from endpoint kinds", "[model][consistency]") {
+  dpor::model::ExecutionGraph graph;
+  const auto send_id = graph.add_event(1, dpor::model::SendLabel{.destination = 2, .value = "x"});
+  const auto recv_0 = graph.add_event(
+      2,
+      dpor::model::make_receive_label_from_values<dpor::model::Value>(
+          {"x"}));
+  const auto recv_1 = graph.add_event(
+      2,
+      dpor::model::make_receive_label_from_values<dpor::model::Value>(
+          {"x"}));
+
+  graph.set_reads_from(send_id, send_id);
+  graph.set_reads_from(recv_0, recv_1);
+  graph.set_reads_from(recv_1, send_id);
+
+  const dpor::model::AsyncConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE_FALSE(result.is_consistent());
+  REQUIRE(has_issue(result, dpor::model::ConsistencyIssueCode::ReadsFromTargetNotReceive));
+  REQUIRE(has_issue(result, dpor::model::ConsistencyIssueCode::ReadsFromSourceNotSend));
+}
+
+TEST_CASE("async consistency checker reports destination and value mismatches", "[model][consistency]") {
+  dpor::model::ExecutionGraph graph;
+  const auto send_bad_dst = graph.add_event(1, dpor::model::SendLabel{.destination = 7, .value = "x"});
+  const auto recv_bad_dst = graph.add_event(
+      2,
+      dpor::model::make_receive_label_from_values<dpor::model::Value>(
+          {"x"}));
+  const auto send_bad_value = graph.add_event(1, dpor::model::SendLabel{.destination = 3, .value = "y"});
+  const auto recv_bad_value = graph.add_event(
+      3,
+      dpor::model::make_receive_label_from_values<dpor::model::Value>(
+          {"x"}));
+
+  graph.set_reads_from(recv_bad_dst, send_bad_dst);
+  graph.set_reads_from(recv_bad_value, send_bad_value);
+
+  const dpor::model::AsyncConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE_FALSE(result.is_consistent());
+  REQUIRE(has_issue(result, dpor::model::ConsistencyIssueCode::ReceiveDestinationMismatch));
+  REQUIRE(has_issue(result, dpor::model::ConsistencyIssueCode::ReceiveValueMismatch));
+}
+
+TEST_CASE("async consistency checker reports sends consumed by multiple receives", "[model][consistency]") {
+  dpor::model::ExecutionGraph graph;
+  const auto send_id = graph.add_event(1, dpor::model::SendLabel{.destination = 2, .value = "x"});
+  const auto recv_0 = graph.add_event(
+      2,
+      dpor::model::make_receive_label_from_values<dpor::model::Value>(
+          {"x"}));
+  const auto recv_1 = graph.add_event(
+      2,
+      dpor::model::make_receive_label_from_values<dpor::model::Value>(
+          {"x"}));
+
+  graph.set_reads_from(recv_0, send_id);
+  graph.set_reads_from(recv_1, send_id);
+
+  const dpor::model::AsyncConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE_FALSE(result.is_consistent());
+  REQUIRE(has_issue(result, dpor::model::ConsistencyIssueCode::SendConsumedMultipleTimes));
+}
+
+TEST_CASE("async consistency checker reports causal cycles", "[model][consistency]") {
+  dpor::model::ExecutionGraph graph;
+
+  const auto recv_t1 = graph.add_event_with_index(
+      1,
+      0,
+      dpor::model::make_receive_label_from_values<dpor::model::Value>(
+          {"b"}));
+  const auto send_t1 = graph.add_event_with_index(
+      1,
+      1,
+      dpor::model::SendLabel{.destination = 2, .value = "a"});
+  const auto recv_t2 = graph.add_event_with_index(
+      2,
+      0,
+      dpor::model::make_receive_label_from_values<dpor::model::Value>(
+          {"a"}));
+  const auto send_t2 = graph.add_event_with_index(
+      2,
+      1,
+      dpor::model::SendLabel{.destination = 1, .value = "b"});
+
+  graph.set_reads_from(recv_t1, send_t2);
+  graph.set_reads_from(recv_t2, send_t1);
+
+  const dpor::model::AsyncConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE_FALSE(result.is_consistent());
+  REQUIRE(has_issue(result, dpor::model::ConsistencyIssueCode::CausalCycle));
 }
 
 TEST_CASE("execution graph supports custom value type", "[model][graph]") {
@@ -142,8 +295,8 @@ TEST_CASE("custom message payload keeps typed fields", "[model][graph][consisten
 
   const dpor::model::AsyncConsistencyCheckerT<Message> checker;
   const auto result = checker.check(graph);
-  REQUIRE_FALSE(result.is_consistent());
-  REQUIRE(result.issues.front().code == dpor::model::ConsistencyIssueCode::UnimplementedCheck);
+  REQUIRE(result.is_consistent());
+  REQUIRE(result.issues.empty());
 }
 
 TEST_CASE("execution graph supports explicit index insertion for replay", "[model][graph]") {
