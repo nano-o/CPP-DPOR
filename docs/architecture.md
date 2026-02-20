@@ -15,3 +15,4 @@ This scaffold starts with a minimal API and is organized to scale toward a full 
 - Avoid global state in exploration logic.
 - Make exploration deterministic when seeded.
 - Separate model extraction from reduction/exploration.
+- In the current prototype scope, model receives as blocking only (no non-blocking receives).

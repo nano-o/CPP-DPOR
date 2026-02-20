@@ -27,11 +27,6 @@ using ThreadId = std::uint32_t;
 using EventIndex = std::uint32_t;
 using Value = std::string;
 
-enum class ReceiveMode {
-  Blocking,
-  NonBlocking,
-};
-
 template <typename ValueT>
 using ReceiveMatchFnT = std::function<bool(const ValueT&)>;
 // Warning:
@@ -43,7 +38,6 @@ using ReceiveMatchFnT = std::function<bool(const ValueT&)>;
 
 template <typename ValueT>
 struct ReceiveLabelT {
-  ReceiveMode mode{ReceiveMode::Blocking};
   // Predicate deciding whether this receive may consume a candidate payload.
   ReceiveMatchFnT<ValueT> matches{[](const ValueT&) { return true; }};
 
@@ -97,10 +91,8 @@ template <typename ValueT>
 
 template <typename ValueT>
 [[nodiscard]] inline ReceiveLabelT<ValueT> make_receive_label(
-    ReceiveMode mode,
     ReceiveMatchFnT<ValueT> matcher = match_any_value<ValueT>()) {
   return ReceiveLabelT<ValueT>{
-      .mode = mode,
       .matches = std::move(matcher),
   };
 }
@@ -108,10 +100,8 @@ template <typename ValueT>
 template <typename ValueT>
   requires std::equality_comparable<ValueT>
 [[nodiscard]] inline ReceiveLabelT<ValueT> make_receive_label_from_values(
-    ReceiveMode mode,
     std::vector<ValueT> accepted_values) {
   return make_receive_label<ValueT>(
-      mode,
       [accepted_values = std::move(accepted_values)](const ValueT& candidate) {
         return std::find(accepted_values.begin(), accepted_values.end(), candidate) !=
                accepted_values.end();

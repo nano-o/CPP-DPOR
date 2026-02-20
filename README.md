@@ -9,6 +9,11 @@ See the Must paper in docs/.
 - Make algorithm internals easy to evolve.
 - Ship as a reusable CMake package (`dpor::dpor`).
 
+## Current model assumptions
+
+- Receives are modeled as blocking only.
+- Non-blocking receive behavior is currently out of scope.
+
 ## Build
 
 ```bash

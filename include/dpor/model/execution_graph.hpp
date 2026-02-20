@@ -2,8 +2,8 @@
 
 // Execution-graph design rationale:
 // - Keep event storage canonical (`events_`) and lightweight.
-// - Store reads-from choices directly as receive -> optional send (`reads_from_`),
-//   which matches exploration decisions and supports `⊥` for non-blocking receives.
+// - Store reads-from choices directly as receive -> send (`reads_from_`),
+//   which matches exploration decisions and keeps the relation explicit.
 // - Derive program order from per-thread `(thread, index)` metadata instead of
 //   materializing all transitive PO edges; this keeps representation compact and
 //   avoids duplicated state.
@@ -18,7 +18,6 @@
 #include <cstddef>
 #include <limits>
 #include <map>
-#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -32,7 +31,7 @@ class ExecutionGraphT {
  public:
   using EventId = std::size_t;
   using Event = EventT<ValueT>;
-  using ReadsFromSource = std::optional<EventId>;
+  using ReadsFromSource = EventId;
   using ReadsFromRelation = std::unordered_map<EventId, ReadsFromSource>;
 
   // Normal insertion path: assign event index automatically per thread.
@@ -94,7 +93,7 @@ class ExecutionGraphT {
   }
 
   // Builds an explicit send->receive relation view from stored receive->source
-  // assignments. `nullopt` sources (⊥) are intentionally omitted from edges.
+  // assignments.
   [[nodiscard]] ExplicitRelation rf_relation() const {
     ExplicitRelation relation(events_.size());
 
@@ -106,18 +105,14 @@ class ExecutionGraphT {
         throw std::invalid_argument("reads-from relation target event is not a receive");
       }
 
-      if (!source.has_value()) {
-        continue;
-      }
-
-      if (!is_valid_event_id(*source)) {
+      if (!is_valid_event_id(source)) {
         throw std::invalid_argument("reads-from relation source refers to an unknown send event id");
       }
-      if (!is_send(events_[*source])) {
+      if (!is_send(events_[source])) {
         throw std::invalid_argument("reads-from relation source event is not a send");
       }
 
-      relation.add_edge(*source, receive_id);
+      relation.add_edge(source, receive_id);
     }
 
     return relation;
@@ -149,9 +144,7 @@ class ExecutionGraphT {
     std::unordered_set<EventId> consumed_send_ids;
     consumed_send_ids.reserve(reads_from_.size());
     for (const auto& [_, source] : reads_from_) {
-      if (source.has_value()) {
-        consumed_send_ids.insert(*source);
-      }
+      consumed_send_ids.insert(source);
     }
 
     std::vector<EventId> unread;

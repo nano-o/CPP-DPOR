@@ -3,7 +3,6 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -35,7 +34,6 @@ TEST_CASE("event helper predicates classify labels", "[model][event]") {
       .thread = 1,
       .index = 0,
       .label = dpor::model::make_receive_label_from_values<dpor::model::Value>(
-          dpor::model::ReceiveMode::Blocking,
           {"v1", "v2"}),
   };
 
@@ -59,7 +57,6 @@ TEST_CASE("execution graph tracks po and rf relations", "[model][graph]") {
   const auto recv_id = graph.add_event(
       2,
       dpor::model::make_receive_label_from_values<dpor::model::Value>(
-          dpor::model::ReceiveMode::Blocking,
           {"x", "y"}));
 
   graph.set_reads_from(recv_id, send_1_id);
@@ -101,7 +98,6 @@ TEST_CASE("execution graph supports custom value type", "[model][graph]") {
   const auto recv_id = graph.add_event(
       2,
       dpor::model::make_receive_label<Payload>(
-          dpor::model::ReceiveMode::Blocking,
           [](const Payload& payload) { return payload.id == 7; }));
 
   graph.set_reads_from(recv_id, send_id);
@@ -128,7 +124,6 @@ TEST_CASE("custom message payload keeps typed fields", "[model][graph][consisten
   const auto recv_id = graph.add_event(
       4,
       dpor::model::make_receive_label<Message>(
-          dpor::model::ReceiveMode::Blocking,
           [](const Message& candidate) {
             return validate_message(candidate) == ValidationResult::Ok;
           }));
