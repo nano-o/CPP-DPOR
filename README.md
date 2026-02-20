@@ -27,6 +27,14 @@ cmake --build --preset debug-fetch-catch2
 ctest --preset debug-fetch-catch2
 ```
 
+## Editor setup (clangd)
+
+All presets export `compile_commands.json`. Symlink it to the project root so clangd can find it:
+
+```bash
+ln -sf build/debug/compile_commands.json .
+```
+
 ## Install
 
 ```bash
