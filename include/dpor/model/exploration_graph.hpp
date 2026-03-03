@@ -23,6 +23,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <queue>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -31,6 +33,14 @@
 #include <vector>
 
 namespace dpor::model {
+
+struct PorfCache {
+  std::vector<std::vector<std::size_t>> clocks;
+  std::vector<std::size_t> position_in_thread;
+  std::unordered_map<ThreadId, std::size_t> thread_clock_index;
+  std::size_t num_threads{0};
+  bool has_cycle{false};
+};
 
 template <typename ValueT>
 class ExplorationGraphT {
@@ -47,11 +57,13 @@ class ExplorationGraphT {
     const auto id = graph_.add_event(thread, std::move(label));
     insertion_order_.push_back(id);
     insertion_position_[id] = insertion_order_.size() - 1U;
+    porf_cache_ = nullptr;
     return id;
   }
 
   void set_reads_from(EventId receive_id, EventId source_id) {
     graph_.set_reads_from(receive_id, source_id);
+    porf_cache_ = nullptr;
   }
 
   [[nodiscard]] const Event& event(EventId id) const {
@@ -225,7 +237,7 @@ class ExplorationGraphT {
   // Returns a copy with the rf assignment for recv changed to send.
   [[nodiscard]] ExplorationGraphT with_rf(EventId recv, EventId send) const {
     auto copy = *this;
-    copy.graph_.set_reads_from(recv, send);
+    copy.set_reads_from(recv, send);
     return copy;
   }
 
@@ -244,11 +256,23 @@ class ExplorationGraphT {
 
   // Check if (from, to) is in (po ∪ rf)+.
   [[nodiscard]] bool porf_contains(EventId from, EventId to) const {
-    const auto po = po_relation();
-    const auto rf = rf_relation();
-    const auto porf = relation_union(po, rf);
-    const auto porf_plus = transitive_closure(porf);
-    return porf_plus.contains(from, to);
+    if (!is_valid_event_id(from) || !is_valid_event_id(to)) {
+      throw std::out_of_range("event id not found in exploration graph");
+    }
+    ensure_porf_cache();
+    if (porf_cache_->has_cycle) {
+      return porf_contains_fallback(from, to);
+    }
+    if (from == to) {
+      return false;  // Acyclic graph: no self-loops in strict transitive closure.
+    }
+    const auto& cache = *porf_cache_;
+    const auto ci_it = cache.thread_clock_index.find(event(from).thread);
+    if (ci_it == cache.thread_clock_index.end()) {
+      return false;
+    }
+    const auto ci = ci_it->second;
+    return cache.clocks[to][ci] >= cache.position_in_thread[from] + 1;
   }
 
   // Returns receive event IDs in the destination thread of the given send.
@@ -271,53 +295,8 @@ class ExplorationGraphT {
 
   // Lightweight causal cycle check on (po ∪ rf).
   [[nodiscard]] bool has_causal_cycle() const {
-    const auto n = event_count();
-    if (n == 0) {
-      return false;
-    }
-
-    // Build adjacency: po edges + rf edges.
-    std::vector<std::vector<EventId>> successors(n);
-
-    const auto po = po_relation();
-    for (EventId from = 0; from < n; ++from) {
-      po.for_each_successor(from, [&](const NodeId to) {
-        successors[from].push_back(to);
-      });
-    }
-
-    for (const auto& [recv_id, source_id] : reads_from()) {
-      if (source_id < n && recv_id < n) {
-        successors[source_id].push_back(recv_id);
-      }
-    }
-
-    // DFS-based cycle detection.
-    // 0 = unvisited, 1 = visiting (on stack), 2 = visited.
-    std::vector<std::uint8_t> visit_state(n, 0U);
-
-    const auto dfs = [&](const auto& self, const EventId node) -> bool {
-      visit_state[node] = 1U;
-      for (const EventId successor : successors[node]) {
-        const auto state = visit_state[successor];
-        if (state == 1U) {
-          return true;
-        }
-        if (state == 0U && self(self, successor)) {
-          return true;
-        }
-      }
-      visit_state[node] = 2U;
-      return false;
-    };
-
-    for (EventId id = 0; id < n; ++id) {
-      if (visit_state[id] == 0U && dfs(dfs, id)) {
-        return true;
-      }
-    }
-
-    return false;
+    ensure_porf_cache();
+    return porf_cache_->has_cycle;
   }
 
   // Access to underlying execution graph (for consistency checker etc.)
@@ -329,6 +308,155 @@ class ExplorationGraphT {
   ExecutionGraphT<ValueT> graph_{};
   std::vector<EventId> insertion_order_{};
   std::unordered_map<EventId, std::size_t> insertion_position_{};
+  mutable std::shared_ptr<PorfCache> porf_cache_{};
+
+  void ensure_porf_cache() const {
+    if (porf_cache_) {
+      return;
+    }
+
+    const auto n = event_count();
+    auto cache = std::make_shared<PorfCache>();
+
+    if (n == 0) {
+      porf_cache_ = std::move(cache);
+      return;
+    }
+
+    // Build per-thread event lists (sorted by event index for po order).
+    std::unordered_map<ThreadId, std::vector<std::pair<EventIndex, EventId>>> thread_events;
+    for (EventId id = 0; id < n; ++id) {
+      const auto& evt = event(id);
+      thread_events[evt.thread].emplace_back(evt.index, id);
+    }
+
+    // Assign dense clock indices per thread.
+    for (auto& [tid, evts] : thread_events) {
+      std::sort(evts.begin(), evts.end());
+      cache->thread_clock_index[tid] = cache->num_threads++;
+    }
+
+    // Compute position_in_thread for each event.
+    cache->position_in_thread.resize(n, 0);
+    for (const auto& [tid, evts] : thread_events) {
+      for (std::size_t pos = 0; pos < evts.size(); ++pos) {
+        cache->position_in_thread[evts[pos].second] = pos;
+      }
+    }
+
+    // Build adjacency list + in-degree array.
+    std::vector<std::vector<EventId>> successors(n);
+    std::vector<std::size_t> in_degree(n, 0);
+
+    // po edges: consecutive events within each thread.
+    for (const auto& [tid, evts] : thread_events) {
+      for (std::size_t i = 1; i < evts.size(); ++i) {
+        const auto pred = evts[i - 1].second;
+        const auto succ = evts[i].second;
+        successors[pred].push_back(succ);
+        ++in_degree[succ];
+      }
+    }
+
+    // rf edges: send -> recv (with same validation as rf_relation()).
+    for (const auto& [recv_id, source_id] : reads_from()) {
+      if (!is_valid_event_id(recv_id)) {
+        throw std::invalid_argument("reads-from relation refers to an unknown receive event id");
+      }
+      if (!is_receive(event(recv_id))) {
+        throw std::invalid_argument("reads-from relation target event is not a receive");
+      }
+      if (!is_valid_event_id(source_id)) {
+        throw std::invalid_argument("reads-from relation source refers to an unknown send event id");
+      }
+      if (!is_send(event(source_id))) {
+        throw std::invalid_argument("reads-from relation source event is not a send");
+      }
+      successors[source_id].push_back(recv_id);
+      ++in_degree[recv_id];
+    }
+
+    // Kahn's topological sort.
+    std::queue<EventId> ready;
+    for (EventId id = 0; id < n; ++id) {
+      if (in_degree[id] == 0) {
+        ready.push(id);
+      }
+    }
+
+    std::vector<EventId> topo_order;
+    topo_order.reserve(n);
+    while (!ready.empty()) {
+      const auto node = ready.front();
+      ready.pop();
+      topo_order.push_back(node);
+      for (const auto succ : successors[node]) {
+        if (--in_degree[succ] == 0) {
+          ready.push(succ);
+        }
+      }
+    }
+
+    if (topo_order.size() < n) {
+      cache->has_cycle = true;
+      porf_cache_ = std::move(cache);
+      return;
+    }
+
+    // Compute vector clocks in topological order.
+    const auto width = cache->num_threads;
+    cache->clocks.resize(n, std::vector<std::size_t>(width, 0));
+
+    // Pre-compute rf target mapping: recv_id -> source_id.
+    // All edges are already validated by the adjacency-building loop above.
+    std::unordered_map<EventId, EventId> rf_source;
+    for (const auto& [recv_id, source_id] : reads_from()) {
+      rf_source[recv_id] = source_id;
+    }
+
+    // Pre-compute po predecessor: for each event that has a po predecessor.
+    std::unordered_map<EventId, EventId> po_pred;
+    for (const auto& [tid, evts] : thread_events) {
+      for (std::size_t i = 1; i < evts.size(); ++i) {
+        po_pred[evts[i].second] = evts[i - 1].second;
+      }
+    }
+
+    for (const auto id : topo_order) {
+      auto& clock = cache->clocks[id];
+
+      // Start with po-predecessor's clock.
+      auto po_it = po_pred.find(id);
+      if (po_it != po_pred.end()) {
+        clock = cache->clocks[po_it->second];
+      }
+
+      // Join with rf source's clock (pointwise max).
+      auto rf_it = rf_source.find(id);
+      if (rf_it != rf_source.end()) {
+        const auto& src_clock = cache->clocks[rf_it->second];
+        for (std::size_t i = 0; i < width; ++i) {
+          clock[i] = std::max(clock[i], src_clock[i]);
+        }
+      }
+
+      // Set own position.
+      const auto& evt = event(id);
+      auto ci = cache->thread_clock_index[evt.thread];
+      clock[ci] = cache->position_in_thread[id] + 1;
+    }
+
+    porf_cache_ = std::move(cache);
+  }
+
+  // BFS fallback for porf_contains when graph has a cycle.
+  [[nodiscard]] bool porf_contains_fallback(EventId from, EventId to) const {
+    const auto po = po_relation();
+    const auto rf = rf_relation();
+    const auto porf = relation_union(po, rf);
+    const auto porf_plus = transitive_closure(porf);
+    return porf_plus.contains(from, to);
+  }
 };
 
 using ExplorationGraph = ExplorationGraphT<Value>;

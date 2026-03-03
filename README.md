@@ -59,9 +59,37 @@ target_link_libraries(my_target PRIVATE dpor::dpor)
 
 If installed to a non-default prefix, add it to `CMAKE_PREFIX_PATH`.
 
+## Performance: lazy PorfCache with vector clocks
+
+`ExplorationGraphT` uses a lazy, shared vector-clock cache (`PorfCache`) to
+accelerate two hot-path queries:
+
+| Operation | Without cache | With cache |
+|---|---|---|
+| `porf_contains(from, to)` | O(N+E) per call | O(1) amortized |
+| `has_causal_cycle()` | O(N+E) per call | O(1) amortized |
+
+The cache is built on first query via Kahn's topological sort and stores a
+per-event vector clock (one entry per thread). Subsequent `porf_contains` calls
+compare a single clock entry. Cycle detection is a byproduct of the topological
+sort (incomplete sort = cycle).
+
+Key properties:
+
+- **Lazy**: the cache is only built when `porf_contains` or `has_causal_cycle`
+  is first called.
+- **Shared across copies**: the cache is held via `std::shared_ptr`, so
+  graph copies (from `with_rf`, `with_nd_value`, etc.) share the parent's
+  cache until they mutate.
+- **Auto-invalidated**: any call to `add_event` or `set_reads_from` resets
+  the cache to null, triggering a rebuild on the next query.
+- **Cycle-safe**: if the graph contains a causal cycle, `porf_contains` falls
+  back to the original BFS/transitive-closure implementation.
+
 ## Layout
 
 - `include/dpor/api`: public, stable headers
+- `include/dpor/model`: core model types (events, relations, execution/exploration graphs)
 - `src`: implementation details
 - `tests`: unit/integration tests with CTest
 - `examples`: minimal usage examples

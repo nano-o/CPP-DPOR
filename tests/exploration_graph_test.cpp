@@ -253,3 +253,176 @@ TEST_CASE("two-thread cycle detected as causal cycle", "[model][exploration_grap
   // r1 -po-> s1 -rf-> r2 -po-> s2 -rf-> r1: cycle
   REQUIRE(g.has_causal_cycle());
 }
+
+// --- PorfCache tests ---
+
+TEST_CASE("multi-hop porf reachability via rf and po", "[model][exploration_graph][porf_cache]") {
+  ExplorationGraph g;
+  // T1: send -> T2
+  const auto t1_send = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
+  // T2: recv, then send -> T3
+  const auto t2_recv = g.add_event(2, make_receive_label<Value>());
+  const auto t2_send = g.add_event(2, SendLabel{.destination = 3, .value = "b"});
+  // T3: recv
+  const auto t3_recv = g.add_event(3, make_receive_label<Value>());
+
+  g.set_reads_from(t2_recv, t1_send);
+  g.set_reads_from(t3_recv, t2_send);
+
+  // t1_send -rf-> t2_recv -po-> t2_send -rf-> t3_recv
+  REQUIRE(g.porf_contains(t1_send, t3_recv));
+  REQUIRE(g.porf_contains(t1_send, t2_recv));
+  REQUIRE(g.porf_contains(t1_send, t2_send));
+  REQUIRE(g.porf_contains(t2_send, t3_recv));
+
+  // Not reachable in reverse direction.
+  REQUIRE_FALSE(g.porf_contains(t3_recv, t1_send));
+  REQUIRE_FALSE(g.porf_contains(t2_recv, t1_send));
+
+  // Self is not reachable (acyclic graph).
+  REQUIRE_FALSE(g.porf_contains(t1_send, t1_send));
+}
+
+TEST_CASE("cycle detection via with_rf", "[model][exploration_graph][porf_cache]") {
+  ExplorationGraph g;
+  // T1: recv, send -> T2
+  const auto r1 = g.add_event(1, make_receive_label<Value>());
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
+
+  // T2: recv, send -> T1
+  const auto r2 = g.add_event(2, make_receive_label<Value>());
+  const auto s2 = g.add_event(2, SendLabel{.destination = 1, .value = "b"});
+
+  // First: only one rf edge, no cycle.
+  g.set_reads_from(r2, s1);
+  REQUIRE_FALSE(g.has_causal_cycle());
+
+  // with_rf adds the back edge creating a cycle.
+  const auto cyclic = g.with_rf(r1, s2);
+  REQUIRE(cyclic.has_causal_cycle());
+
+  // Original is still acyclic.
+  REQUIRE_FALSE(g.has_causal_cycle());
+}
+
+TEST_CASE("cache invalidation on set_reads_from", "[model][exploration_graph][porf_cache]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
+  const auto r = g.add_event(2, make_receive_label<Value>());
+
+  g.set_reads_from(r, s1);
+  // s1 -rf-> r, so s1 reaches r.
+  REQUIRE(g.porf_contains(s1, r));
+  // s2 is po-after s1, so s1 -po-> s2, but s2 does NOT reach r.
+  REQUIRE_FALSE(g.porf_contains(s2, r));
+
+  // Change rf to point at s2 instead.
+  g.set_reads_from(r, s2);
+  // Now s2 -rf-> r.
+  REQUIRE(g.porf_contains(s2, r));
+  // s1 -po-> s2 -rf-> r, so s1 still reaches r.
+  REQUIRE(g.porf_contains(s1, r));
+}
+
+TEST_CASE("restrict preserves porf reachability on subset", "[model][exploration_graph][porf_cache]") {
+  ExplorationGraph g;
+  const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r = g.add_event(2, make_receive_label<Value>());
+  const auto s2 = g.add_event(2, SendLabel{.destination = 3, .value = "y"});
+  g.set_reads_from(r, s);
+
+  // Full graph: s -rf-> r -po-> s2.
+  REQUIRE(g.porf_contains(s, s2));
+
+  // Restrict to {s, r}: s2 is removed.
+  std::unordered_set<ExplorationGraph::EventId> keep{s, r};
+  const auto restricted = g.restrict(keep);
+  REQUIRE(restricted.event_count() == 2);
+  // In restricted graph: event 0 (was s) -rf-> event 1 (was r).
+  REQUIRE(restricted.porf_contains(0, 1));
+  REQUIRE_FALSE(restricted.porf_contains(1, 0));
+}
+
+TEST_CASE("with_rf invalidation produces distinct reachability", "[model][exploration_graph][porf_cache]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
+  const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "b"});
+  const auto r = g.add_event(2, make_receive_label<Value>());
+
+  g.set_reads_from(r, s1);
+  // Original: s1 -rf-> r.
+  REQUIRE(g.porf_contains(s1, r));
+
+  // Copy with rf changed to s2.
+  const auto copy = g.with_rf(r, s2);
+  // Copy: s2 -rf-> r.
+  REQUIRE(copy.porf_contains(s2, r));
+  // s1 -po-> s2 -rf-> r in copy.
+  REQUIRE(copy.porf_contains(s1, r));
+
+  // Original is unchanged.
+  REQUIRE(g.porf_contains(s1, r));
+}
+
+// --- Malformed reads-from regression tests ---
+
+TEST_CASE(
+    "porf_contains rejects reads-from edges whose target is not a receive",
+    "[model][exploration_graph][porf_cache][regression]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
+  const auto s2 = g.add_event(2, SendLabel{.destination = 1, .value = "b"});
+
+  // Malformed edge: reads-from target must be a receive event.
+  g.set_reads_from(s2, s1);
+
+  // Baseline relation construction rejects this graph.
+  REQUIRE_THROWS_AS(g.rf_relation(), std::invalid_argument);
+  // porf_contains should surface the same malformed-rf error.
+  REQUIRE_THROWS_AS(g.porf_contains(s1, s2), std::invalid_argument);
+}
+
+TEST_CASE(
+    "porf_contains rejects reads-from edges with out-of-range endpoints",
+    "[model][exploration_graph][porf_cache][regression]") {
+  ExplorationGraph g;
+  const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r = g.add_event(2, make_receive_label<Value>());
+
+  g.set_reads_from(r, s);
+  // Malformed edge: invalid receive id.
+  g.set_reads_from(999, s);
+
+  // Baseline relation construction rejects this graph.
+  REQUIRE_THROWS_AS(g.rf_relation(), std::invalid_argument);
+  // porf_contains should surface the same malformed-rf error.
+  REQUIRE_THROWS_AS(g.porf_contains(s, r), std::invalid_argument);
+}
+
+TEST_CASE(
+    "has_causal_cycle rejects malformed reads-from edges",
+    "[model][exploration_graph][porf_cache][regression]") {
+  ExplorationGraph g;
+  const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+
+  // Malformed edge: invalid receive id.
+  g.set_reads_from(12345, s);
+
+  // Baseline relation construction rejects this graph.
+  REQUIRE_THROWS_AS(g.rf_relation(), std::invalid_argument);
+  // has_causal_cycle should surface the same malformed-rf error.
+  REQUIRE_THROWS_AS(g.has_causal_cycle(), std::invalid_argument);
+}
+
+TEST_CASE(
+    "porf_contains rejects invalid event ids",
+    "[model][exploration_graph][porf_cache][regression]") {
+  ExplorationGraph g;
+  const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r = g.add_event(2, make_receive_label<Value>());
+  g.set_reads_from(r, s);
+
+  REQUIRE_THROWS_AS(g.porf_contains(s, 999), std::out_of_range);
+  REQUIRE_THROWS_AS(g.porf_contains(999, r), std::out_of_range);
+}
