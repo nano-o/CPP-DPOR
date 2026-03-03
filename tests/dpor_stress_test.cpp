@@ -318,12 +318,13 @@ std::string spec_to_string(const ProgramSpec& spec) {
   return oss.str();
 }
 
-std::vector<ProgramSpec> generate_stress_specs(std::size_t target_count) {
+std::vector<ProgramSpec> generate_stress_specs(
+    std::size_t target_count, std::uint32_t seed = 0xC0FFEEu) {
   std::vector<ProgramSpec> specs;
   std::set<std::string> seen_specs;
 
   constexpr std::array<const char*, 3> kValues = {"a", "b", "c"};
-  std::mt19937 rng(0xC0FFEEu);
+  std::mt19937 rng(seed);
   std::uniform_int_distribution<int> receiver_dist(1, 3);
   std::uniform_int_distribution<int> value_dist(0, 2);
   std::uniform_int_distribution<int> receiver_pattern_dist(0, 7);
@@ -615,4 +616,24 @@ TEST_CASE("Algorithm 1 stress: trace-dependent receive predicates remain complet
   require_dpor_matches_oracle(
       program,
       "T1=[ND({a,b}),S(3,trace[0])]; T2=[S(3,b),S(3,a)]; T3=[R(*),R(x==trace[0])]");
+}
+
+TEST_CASE("Algorithm 1 fuzz: DPOR matches oracle across many random seeds",
+    "[algo][dpor][fuzz][paper]") {
+  constexpr std::size_t kRounds = 20;
+  constexpr std::size_t kSpecsPerRound = 36;
+
+  for (std::size_t round = 0; round < kRounds; ++round) {
+    const auto seed = static_cast<std::uint32_t>(round * 0x9E3779B9u);
+    const auto specs = generate_stress_specs(kSpecsPerRound, seed);
+
+    INFO("fuzz round " << round << " (seed=0x" << std::hex << seed << std::dec
+         << ", specs=" << specs.size() << ")");
+    REQUIRE(specs.size() <= kSpecsPerRound);
+
+    for (const auto& spec : specs) {
+      const auto program = build_program_from_spec(spec);
+      require_dpor_matches_oracle(program, spec_to_string(spec));
+    }
+  }
 }
