@@ -83,13 +83,24 @@ inline Message deserialize(const std::string& data) {
     std::size_t from{};
     std::string vote_str;
     iss >> from >> vote_str;
-    return VoteMsg{from, vote_str == "YES" ? Vote::Yes : Vote::No};
+    if (vote_str == "YES") {
+      return VoteMsg{from, Vote::Yes};
+    }
+    if (vote_str == "NO") {
+      return VoteMsg{from, Vote::No};
+    }
+    throw std::invalid_argument("unknown vote value: " + vote_str);
   }
   if (tag == "DECISION") {
     std::string dec_str;
     iss >> dec_str;
-    return DecisionMsg{dec_str == "COMMIT" ? Decision::Commit
-                                           : Decision::Abort};
+    if (dec_str == "COMMIT") {
+      return DecisionMsg{Decision::Commit};
+    }
+    if (dec_str == "ABORT") {
+      return DecisionMsg{Decision::Abort};
+    }
+    throw std::invalid_argument("unknown decision value: " + dec_str);
   }
   if (tag == "ACK") {
     std::size_t from{};

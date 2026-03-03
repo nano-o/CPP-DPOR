@@ -16,6 +16,7 @@
 #include "dpor/model/event.hpp"
 
 #include <condition_variable>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -41,6 +42,7 @@ using Program = dpor::algo::Program;
 // Exception used internally to terminate the protocol thread when a crash
 // is injected during fast-forward.
 struct CrashInjected {};
+struct StepBoundaryReached {};
 
 class SimEnvironment : public tpc::Environment {
  public:
@@ -83,7 +85,7 @@ class SimEnvironment : public tpc::Environment {
         protocol_ready_ = true;
         cv_.notify_all();
         cv_.wait(lock, [this] { return dpor_ready_; });
-        return;  // Thread will be torn down.
+        throw StepBoundaryReached{};
       }
     }
 
@@ -104,6 +106,7 @@ class SimEnvironment : public tpc::Environment {
 
     // Wait for DPOR thread to acknowledge (it will tear down the thread).
     cv_.wait(lock, [this] { return dpor_ready_; });
+    throw StepBoundaryReached{};
   }
 
   tpc::Message receive() override {
@@ -123,10 +126,7 @@ class SimEnvironment : public tpc::Environment {
 
     // Wait for DPOR thread to acknowledge (never returns to protocol).
     cv_.wait(lock, [this] { return dpor_ready_; });
-
-    // Unreachable in practice -- the OS thread gets detached/joined.
-    // Return a dummy to satisfy the compiler.
-    return tpc::Prepare{};
+    throw StepBoundaryReached{};
   }
 
   tpc::Vote get_vote() override {
@@ -149,9 +149,7 @@ class SimEnvironment : public tpc::Environment {
 
     // Wait for DPOR thread to acknowledge (never returns to protocol).
     cv_.wait(lock, [this] { return dpor_ready_; });
-
-    // Unreachable.
-    return tpc::Vote::Yes;
+    throw StepBoundaryReached{};
   }
 
   // Called by the wrapper after run() returns, indicating the protocol
@@ -161,6 +159,22 @@ class SimEnvironment : public tpc::Environment {
     finished_ = true;
     protocol_ready_ = true;
     cv_.notify_all();
+  }
+
+  // Called by the worker thread when an unexpected exception occurs.
+  void mark_failed(std::exception_ptr eptr) {
+    std::lock_guard lock(mu_);
+    exception_ = std::move(eptr);
+    finished_ = true;
+    protocol_ready_ = true;
+    cv_.notify_all();
+  }
+
+  // Called by the DPOR thread after join to surface worker exceptions.
+  void rethrow_if_failed() const {
+    if (exception_) {
+      std::rethrow_exception(exception_);
+    }
   }
 
   // Called by the DPOR thread to wait for the protocol thread to reach
@@ -204,6 +218,7 @@ class SimEnvironment : public tpc::Environment {
   std::optional<EventLabel> result_;
   bool finished_{false};
   bool crash_injected_{false};
+  std::exception_ptr exception_;
 };
 
 // ---------------------------------------------------------------------------
@@ -235,8 +250,10 @@ std::optional<EventLabel> run_and_capture(
     } catch (const CrashInjected&) {
       // Crash was injected during fast-forward -- protocol terminated.
       env.mark_finished();
+    } catch (const StepBoundaryReached&) {
+      // Expected: we captured one DPOR event and stop this replay run here.
     } catch (...) {
-      env.mark_finished();
+      env.mark_failed(std::current_exception());
     }
   });
 
@@ -244,6 +261,7 @@ std::optional<EventLabel> run_and_capture(
 
   if (env.is_finished()) {
     worker.join();
+    env.rethrow_if_failed();
     return std::nullopt;
   }
 

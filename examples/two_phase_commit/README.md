@@ -87,10 +87,35 @@ The tests check the following invariants across all DPOR-explored executions:
 - **Crash safety**: when the coordinator crashes between phases, no participant
   receives a decision.
 
+## Error handling
+
+If the protocol implementation throws an unexpected exception during DPOR
+exploration, the model checker **stops immediately**. The exception propagates
+from the worker thread through `run_and_capture` → the `ThreadFunction` → the
+DPOR engine's `verify()` call. This is a deliberate fail-fast design: a
+protocol bug should not be silently absorbed and produce a false "all executions
+safe" result.
+
+The known/expected exceptions (`CrashInjected`, `StepBoundaryReached`) are
+caught and handled normally. Only truly unexpected exceptions (logic errors,
+assertion failures, etc.) trigger the fail-fast path.
+
 ## Running
 
 ```bash
 cmake --preset debug
 cmake --build --preset debug
 ctest --test-dir build/debug -R "2PC|UDP"
+```
+
+## Debugging with gdb
+
+To debug an unexpected protocol exception, break on `mark_failed` -- it is only
+called for unexpected exceptions, so simulation-internal ones are skipped:
+
+```bash
+gdb ./build/debug/examples/two_phase_commit/dpor_two_phase_commit_test
+(gdb) break tpc_sim::SimEnvironment::mark_failed
+(gdb) run "[two_phase_commit]"
+(gdb) bt
 ```

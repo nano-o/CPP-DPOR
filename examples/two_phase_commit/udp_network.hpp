@@ -42,7 +42,10 @@ class UdpEnvironment : public Environment {
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(it->second.second);
-    ::inet_pton(AF_INET, it->second.first.c_str(), &addr.sin_addr);
+    if (::inet_pton(AF_INET, it->second.first.c_str(), &addr.sin_addr) != 1) {
+      ::close(socket_fd_);
+      throw std::invalid_argument("invalid address: " + it->second.first);
+    }
 
     if (::bind(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) <
         0) {
@@ -65,11 +68,18 @@ class UdpEnvironment : public Environment {
     sockaddr_in dest_addr{};
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(it->second.second);
-    ::inet_pton(AF_INET, it->second.first.c_str(), &dest_addr.sin_addr);
+    if (::inet_pton(AF_INET, it->second.first.c_str(), &dest_addr.sin_addr) !=
+        1) {
+      throw std::invalid_argument("invalid destination address: " +
+                                  it->second.first);
+    }
 
     std::string data = serialize(msg);
-    ::sendto(socket_fd_, data.data(), data.size(), 0,
-             reinterpret_cast<sockaddr*>(&dest_addr), sizeof(dest_addr));
+    if (::sendto(socket_fd_, data.data(), data.size(), 0,
+                 reinterpret_cast<sockaddr*>(&dest_addr),
+                 sizeof(dest_addr)) < 0) {
+      throw std::runtime_error("sendto() failed");
+    }
   }
 
   Message receive() override {
