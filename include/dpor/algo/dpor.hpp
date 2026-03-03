@@ -319,13 +319,15 @@ inline void backward_revisit(
     }
 
     // Line 11: Deleted = {e' ∈ G.E | r <_G e' ∧ ⟨e', send⟩ ∉ G.porf}
+    // Note: send_id itself is never deleted — porf is irreflexive, but the
+    // send trivially "reaches itself" in the paper's reflexive reading.
     std::unordered_set<EvId> deleted;
     for (EvId ep = 0; ep < graph.event_count(); ++ep) {
-      if (graph.inserted_before_or_equal(ep, recv_id) && ep != recv_id) {
-        continue;  // ep ≤_G r, so r does NOT strictly precede ep.
+      if (ep == recv_id || ep == send_id) {
+        continue;
       }
-      if (ep == recv_id) {
-        continue;  // "r <_G e'" means strictly after r.
+      if (graph.inserted_before_or_equal(ep, recv_id)) {
+        continue;  // ep ≤_G r, so r does NOT strictly precede ep.
       }
       // ep is strictly after r in insertion order.
       if (!graph.porf_contains(ep, send_id)) {
