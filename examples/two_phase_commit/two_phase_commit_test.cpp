@@ -78,7 +78,10 @@ TEST_CASE("2PC basic exploration with 2 participants",
 
   const auto result = algo::verify(config);
   REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
-  REQUIRE(result.executions_explored > 0);
+  // No-crash: 4 vote combos * 4 orderings = 16
+  // Crash:    4 vote combos * 2 orderings = 8
+  // Total: 24
+  REQUIRE(result.executions_explored == 24);
 }
 
 TEST_CASE("2PC agreement invariant: all decided participants agree",
@@ -186,6 +189,19 @@ TEST_CASE("2PC crash behavior: no participant decides after coordinator crash",
   REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
   REQUIRE(crash_executions > 0);
   REQUIRE_FALSE(invariant_violated);
+}
+
+TEST_CASE("2PC without crashes explores 16 executions for 2 participants",
+          "[two_phase_commit]") {
+  auto prog = make_two_phase_commit_program(2, /*inject_crash=*/false);
+
+  algo::DporConfig config;
+  config.program = std::move(prog);
+
+  const auto result = algo::verify(config);
+  REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
+  // 4 vote combinations (2x2) * 4 message delivery orderings = 16
+  REQUIRE(result.executions_explored == 16);
 }
 
 TEST_CASE("2PC scales to 3 participants", "[two_phase_commit]") {
