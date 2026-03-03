@@ -4,12 +4,71 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
 namespace {
 using namespace dpor::algo;
 using namespace dpor::model;
+
+std::string event_signature(const Event& event) {
+  std::ostringstream oss;
+  oss << "t" << event.thread << ":i" << event.index << ":";
+  if (const auto* send = as_send(event)) {
+    oss << "S(dst=" << send->destination << ",v=" << send->value << ")";
+  } else if (const auto* nd = as_nondeterministic_choice(event)) {
+    oss << "ND(v=" << nd->value << ")";
+  } else if (is_receive(event)) {
+    oss << "R";
+  } else if (is_block(event)) {
+    oss << "B";
+  } else if (is_error(event)) {
+    oss << "E";
+  }
+  return oss.str();
+}
+
+std::string graph_signature(const ExplorationGraph& graph) {
+  std::vector<std::string> events;
+  events.reserve(graph.events().size());
+  for (const auto& event : graph.events()) {
+    events.push_back(event_signature(event));
+  }
+  std::sort(events.begin(), events.end());
+
+  std::vector<std::string> rf_edges;
+  rf_edges.reserve(graph.reads_from().size());
+  for (const auto& [recv_id, send_id] : graph.reads_from()) {
+    rf_edges.push_back(
+        event_signature(graph.event(send_id)) + "->" + event_signature(graph.event(recv_id)));
+  }
+  std::sort(rf_edges.begin(), rf_edges.end());
+
+  std::ostringstream oss;
+  for (const auto& event : events) {
+    oss << event << ";";
+  }
+  oss << "|";
+  for (const auto& edge : rf_edges) {
+    oss << edge << ";";
+  }
+  return oss.str();
+}
+
+ExplorationGraph::EventId find_event_id_by_thread_index(
+    const ExplorationGraph& graph,
+    const ThreadId thread,
+    const EventIndex index) {
+  for (ExplorationGraph::EventId id = 0; id < graph.event_count(); ++id) {
+    const auto& event = graph.event(id);
+    if (event.thread == thread && event.index == index) {
+      return id;
+    }
+  }
+  return ExplorationGraph::kNoSource;
+}
 }  // namespace
 
 // --- Empty and trivial programs ---
@@ -227,6 +286,53 @@ TEST_CASE("receiver-first schedule still explores both rf choices via backward r
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   // One execution where T1 reads from T2's send and one from T3's send.
   REQUIRE(result.executions_explored == 2);
+}
+
+TEST_CASE("backward-revisit-heavy exploration does not produce duplicate execution graphs",
+    "[algo][dpor][regression]") {
+  DporConfig config;
+  std::vector<std::string> signatures;
+
+  // Receiver thread (smallest tid) performs two receives.
+  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step < 2 && trace.size() == step) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+
+  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "a"};
+    }
+    return std::nullopt;
+  };
+
+  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "b"};
+    }
+    return std::nullopt;
+  };
+
+  config.program.threads[4] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "c"};
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&signatures](const ExplorationGraph& graph) {
+    signatures.push_back(graph_signature(graph));
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 6);
+  REQUIRE(signatures.size() == result.executions_explored);
+
+  const std::set<std::string> unique_signatures(signatures.begin(), signatures.end());
+  REQUIRE(unique_signatures.size() == signatures.size());
 }
 
 // --- max_depth ---
@@ -514,6 +620,143 @@ TEST_CASE("backward revisit must reject candidates when a deleted event violates
 
   // With the Deleted-set guard from Algorithm 1, this revisit should be blocked.
   REQUIRE(result.executions_explored == 0);
+}
+
+TEST_CASE("line-10 revisit filter blocks revisits when receive already reaches the new send",
+    "[algo][dpor][regression]") {
+  ExplorationGraph graph;
+
+  const auto source = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto receive = graph.add_event(2, make_receive_label<Value>());
+  const auto send = graph.add_event(2, SendLabel{.destination = 2, .value = "x"});
+  graph.set_reads_from(receive, source);
+
+  REQUIRE(graph.porf_contains(receive, send));
+
+  VerifyResult result;
+  DporConfig config;
+  dpor::algo::detail::backward_revisit(config.program, graph, send, result, config, 0);
+  REQUIRE(result.executions_explored == 0);
+}
+
+TEST_CASE("deleted-set check rejects revisit when any deleted event fails (mixed event kinds)",
+    "[algo][dpor][regression]") {
+  ExplorationGraph graph;
+
+  const auto s20 = graph.add_event(2, SendLabel{.destination = 3, .value = "c"});
+  const auto s80 = graph.add_event(8, SendLabel{.destination = 7, .value = "u"});
+  const auto r10 = graph.add_event(1, make_receive_label<Value>());
+  const auto r30 = graph.add_event(3, make_receive_label<Value>());
+  const auto r70 = graph.add_event(7, make_receive_label<Value>());
+  const auto nd_bad = graph.add_event(
+      6,
+      NondeterministicChoiceLabel{
+          .value = "b",
+          .choices = {"a", "b"},
+      });
+  static_cast<void>(graph.add_event(5, SendLabel{.destination = 1, .value = "z"}));
+  const auto s41 = graph.add_event(4, SendLabel{.destination = 3, .value = "b"});
+  const auto s31 = graph.add_event(3, SendLabel{.destination = 1, .value = "b"});
+
+  graph.set_reads_from(r10, s31);
+  graph.set_reads_from(r30, s20);
+  graph.set_reads_from(r70, s80);
+
+  REQUIRE(dpor::algo::detail::revisit_condition(graph, r30, s41));
+  REQUIRE_FALSE(dpor::algo::detail::revisit_condition(graph, nd_bad, s41));
+  REQUIRE(dpor::algo::detail::revisit_condition(graph, r70, s41));
+
+  VerifyResult result;
+  DporConfig config;
+  dpor::algo::detail::backward_revisit(config.program, graph, s41, result, config, 0);
+  REQUIRE(result.executions_explored == 0);
+}
+
+TEST_CASE("backward revisit preserves intended rf endpoint after restrict/remap",
+    "[algo][dpor][regression]") {
+  ExplorationGraph graph;
+
+  const auto s_old = graph.add_event(1, SendLabel{.destination = 4, .value = "old"});
+  static_cast<void>(s_old);
+  const auto receive = graph.add_event(4, make_receive_label<Value>());
+  static_cast<void>(graph.add_event(3, SendLabel{.destination = 9, .value = "noise"}));
+  const auto s_new = graph.add_event(2, SendLabel{.destination = 4, .value = "new"});
+  graph.set_reads_from(receive, s_old);
+
+  std::vector<ExplorationGraph> revisited_graphs;
+  VerifyResult result;
+  DporConfig config;
+  config.on_execution = [&revisited_graphs](const ExplorationGraph& g) {
+    revisited_graphs.push_back(g);
+  };
+
+  dpor::algo::detail::backward_revisit(config.program, graph, s_new, result, config, 0);
+
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(revisited_graphs.size() == 1);
+
+  const auto& revisited = revisited_graphs.front();
+  REQUIRE(revisited.event_count() == 3);
+  REQUIRE(find_event_id_by_thread_index(revisited, 3, 0) == ExplorationGraph::kNoSource);
+
+  const auto new_receive_id = find_event_id_by_thread_index(revisited, 4, 0);
+  REQUIRE(new_receive_id != ExplorationGraph::kNoSource);
+
+  const auto rf_it = revisited.reads_from().find(new_receive_id);
+  REQUIRE(rf_it != revisited.reads_from().end());
+
+  const auto* rf_send = as_send(revisited.event(rf_it->second));
+  REQUIRE(rf_send != nullptr);
+  REQUIRE(rf_send->destination == 4);
+  REQUIRE(rf_send->value == "new");
+}
+
+TEST_CASE("only compatible receives in destination thread are revisited",
+    "[algo][dpor][regression]") {
+  ExplorationGraph graph;
+
+  const auto s_b = graph.add_event(2, SendLabel{.destination = 4, .value = "b"});
+  const auto r_b = graph.add_event(4, make_receive_label_from_values<Value>({"b"}));
+  const auto s_a = graph.add_event(1, SendLabel{.destination = 4, .value = "a"});
+  const auto r_a = graph.add_event(4, make_receive_label_from_values<Value>({"a"}));
+  const auto s_new = graph.add_event(3, SendLabel{.destination = 4, .value = "a"});
+
+  graph.set_reads_from(r_b, s_b);
+  graph.set_reads_from(r_a, s_a);
+
+  std::vector<ExplorationGraph> revisited_graphs;
+  VerifyResult result;
+  DporConfig config;
+  config.on_execution = [&revisited_graphs](const ExplorationGraph& g) {
+    revisited_graphs.push_back(g);
+  };
+
+  dpor::algo::detail::backward_revisit(config.program, graph, s_new, result, config, 0);
+
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(revisited_graphs.size() == 1);
+
+  const auto& revisited = revisited_graphs.front();
+  const auto rb_id = find_event_id_by_thread_index(revisited, 4, 0);
+  const auto ra_id = find_event_id_by_thread_index(revisited, 4, 1);
+  REQUIRE(rb_id != ExplorationGraph::kNoSource);
+  REQUIRE(ra_id != ExplorationGraph::kNoSource);
+
+  const auto rb_rf = revisited.reads_from().find(rb_id);
+  const auto ra_rf = revisited.reads_from().find(ra_id);
+  REQUIRE(rb_rf != revisited.reads_from().end());
+  REQUIRE(ra_rf != revisited.reads_from().end());
+
+  const auto* rb_send = as_send(revisited.event(rb_rf->second));
+  const auto* ra_send = as_send(revisited.event(ra_rf->second));
+  REQUIRE(rb_send != nullptr);
+  REQUIRE(ra_send != nullptr);
+
+  REQUIRE(rb_send->value == "b");
+  REQUIRE(rb_send->destination == 4);
+  REQUIRE(ra_send->value == "a");
+  REQUIRE(ra_send->destination == 4);
+  REQUIRE(revisited.event(ra_rf->second).thread == 3);
 }
 
 TEST_CASE("tiebreaker should not pick an already-consumed send", "[algo][dpor][regression]") {
