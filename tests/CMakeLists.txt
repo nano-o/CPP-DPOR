@@ -40,6 +40,9 @@ target_link_libraries(dpor_exploration_graph_test PRIVATE dpor::dpor Catch2::Cat
 add_executable(dpor_dpor_test dpor_test.cpp)
 target_link_libraries(dpor_dpor_test PRIVATE dpor::dpor Catch2::Catch2WithMain)
 
+add_executable(dpor_dpor_stress_test dpor_stress_test.cpp)
+target_link_libraries(dpor_dpor_stress_test PRIVATE dpor::dpor Catch2::Catch2WithMain)
+
 if(DEFINED Catch2_SOURCE_DIR)
   list(APPEND CMAKE_MODULE_PATH "${Catch2_SOURCE_DIR}/extras")
 endif()
@@ -51,3 +54,4 @@ catch_discover_tests(dpor_relation_test)
 catch_discover_tests(dpor_consistency_test)
 catch_discover_tests(dpor_exploration_graph_test)
 catch_discover_tests(dpor_dpor_test)
+catch_discover_tests(dpor_dpor_stress_test)
