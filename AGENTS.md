@@ -45,6 +45,26 @@ This is required to preserve DPOR soundness/completeness assumptions.
 - focus first on async communication model support
 - add genericity where it improves integration with real systems (not genericity for its own sake)
 
+### Semantics In Scope (Now)
+
+- communication model: async message passing only
+- receive semantics: blocking receives only
+- event kinds: send, receive, nondeterministic choice, block, error
+- receive compatibility: predicate/callable-based matching
+- exploration strategy: insertion-order execution graphs + backward revisiting
+
+### Semantics Out of Scope (Now)
+
+- non-blocking receives / bottom (`⊥`) receive results
+- multiple communication models (`p2p`, `cd`, `mbox`) and their model-specific consistency rules
+- monitor-specific semantics for temporal properties
+
+## Consistency Invariants Policy
+
+- Every graph that is recursively explored by DPOR (`visit`) must satisfy full consistency (`consistent(G)`), with no issue-code exemptions.
+- Intermediate helper constructions (e.g., transient graphs during restrict/remap/revisit computation) may be partial only as internal artifacts.
+- No helper/partial graph may be emitted as a complete execution, or used as an exploration state, unless it passes full consistency.
+
 ## Prototype Policy
 
 This codebase is currently a prototype.
