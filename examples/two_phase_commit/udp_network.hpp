@@ -1,6 +1,6 @@
 #pragma once
 
-// Real UDP-based Network implementation for Two-Phase Commit.
+// Real UDP-based Environment implementation for Two-Phase Commit.
 //
 // Simple datagram transport with no retransmission.  Each node binds
 // to its own (host, port) pair and sends/receives serialized messages.
@@ -20,13 +20,14 @@
 
 namespace tpc {
 
-class UdpNetwork : public Network {
+class UdpEnvironment : public Environment {
  public:
-  UdpNetwork(
+  UdpEnvironment(
       ParticipantId my_id,
       std::unordered_map<ParticipantId, std::pair<std::string, uint16_t>>
-          port_map)
-      : my_id_(my_id), port_map_(std::move(port_map)) {
+          port_map,
+      Vote vote = Vote::Yes)
+      : my_id_(my_id), port_map_(std::move(port_map)), vote_(vote) {
     socket_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (socket_fd_ < 0) {
       throw std::runtime_error("socket() failed");
@@ -50,10 +51,10 @@ class UdpNetwork : public Network {
     }
   }
 
-  ~UdpNetwork() override { ::close(socket_fd_); }
+  ~UdpEnvironment() override { ::close(socket_fd_); }
 
-  UdpNetwork(const UdpNetwork&) = delete;
-  UdpNetwork& operator=(const UdpNetwork&) = delete;
+  UdpEnvironment(const UdpEnvironment&) = delete;
+  UdpEnvironment& operator=(const UdpEnvironment&) = delete;
 
   void send(ParticipantId destination, const Message& msg) override {
     auto it = port_map_.find(destination);
@@ -82,11 +83,14 @@ class UdpNetwork : public Network {
         std::string(buf.data(), static_cast<std::size_t>(n)));
   }
 
+  Vote get_vote() override { return vote_; }
+
  private:
   ParticipantId my_id_;
   int socket_fd_{-1};
   std::unordered_map<ParticipantId, std::pair<std::string, uint16_t>>
       port_map_;
+  Vote vote_;
 };
 
 }  // namespace tpc

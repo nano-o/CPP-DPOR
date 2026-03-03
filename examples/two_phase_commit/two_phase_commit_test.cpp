@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <set>
@@ -23,46 +24,50 @@
 using namespace dpor;
 using namespace tpc_sim;
 
-// Helper: extract the nondeterministic choice value (trace[0]) for a thread.
-static std::string get_nd_choice(const model::ExplorationGraph& graph,
-                                 model::ThreadId tid) {
-  auto trace = graph.thread_trace(tid);
-  if (trace.empty()) {
-    return {};
+// ---------------------------------------------------------------------------
+// Trace helpers
+// ---------------------------------------------------------------------------
+
+// Participant trace layout (program order):
+//   [0] = received Prepare (serialized)
+//   [1] = vote ND choice ("YES" / "NO")
+//   [2] = received DecisionMsg (serialized) -- only if coordinator didn't crash
+static std::string get_participant_vote(
+    const model::ExplorationGraph& graph,
+    tpc::ParticipantId pid) {
+  auto trace = graph.thread_trace(participant_to_thread(pid));
+  if (trace.size() >= 2) {
+    return trace[1];
   }
-  return trace[0];
+  return {};
 }
 
-// Helper: check if the coordinator crashed in this execution.
-static bool coordinator_crashed(const model::ExplorationGraph& graph) {
-  return get_nd_choice(graph, participant_to_thread(tpc::kCoordinator)) ==
-         "crash";
-}
-
-// Helper: extract the decision the coordinator would have reached.
-// The coordinator's decision can be inferred from the votes:
-// Commit iff all participants voted Yes.
-// But in the simulation, the coordinator sends DecisionMsg which is visible
-// in the participant traces.  We look at participant trace values instead.
 static std::optional<std::string> get_participant_decision(
     const model::ExplorationGraph& graph,
     tpc::ParticipantId pid) {
   auto trace = graph.thread_trace(participant_to_thread(pid));
-  // trace[0] = vote choice ("YES"/"NO")
-  // trace[1] = received Prepare (serialized)
-  // trace[2] = received DecisionMsg (serialized) -- if present
   if (trace.size() >= 3) {
     return trace[2];
   }
   return std::nullopt;
 }
 
-// Helper: get the vote for a participant.
-static std::string get_participant_vote(
-    const model::ExplorationGraph& graph,
-    tpc::ParticipantId pid) {
-  return get_nd_choice(graph, participant_to_thread(pid));
+// Coordinator trace layout (program order, with N participants):
+//   [0..N-1] = received votes (serialized VoteMsg)
+//   [N]      = crash ND choice ("no_crash" / "crash")
+static bool coordinator_crashed(const model::ExplorationGraph& graph,
+                                std::size_t num_participants) {
+  auto trace =
+      graph.thread_trace(participant_to_thread(tpc::kCoordinator));
+  if (trace.size() > num_participants) {
+    return trace[num_participants] == "crash";
+  }
+  return false;
 }
+
+// ---------------------------------------------------------------------------
+// DPOR tests
+// ---------------------------------------------------------------------------
 
 TEST_CASE("2PC basic exploration with 2 participants",
           "[two_phase_commit]") {
@@ -73,8 +78,6 @@ TEST_CASE("2PC basic exploration with 2 participants",
 
   const auto result = algo::verify(config);
   REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
-  // There should be multiple executions explored (exact count depends on
-  // interleaving of votes and message delivery).
   REQUIRE(result.executions_explored > 0);
 }
 
@@ -88,8 +91,8 @@ TEST_CASE("2PC agreement invariant: all decided participants agree",
   algo::DporConfig config;
   config.program = std::move(prog);
   config.on_execution = [&](const model::ExplorationGraph& graph) {
-    if (coordinator_crashed(graph)) {
-      return;  // Skip crash executions for agreement check.
+    if (coordinator_crashed(graph, kNumParticipants)) {
+      return;
     }
 
     // Collect decisions from all participants that received one.
@@ -122,7 +125,7 @@ TEST_CASE("2PC validity invariant: Commit implies all voted Yes",
   algo::DporConfig config;
   config.program = std::move(prog);
   config.on_execution = [&](const model::ExplorationGraph& graph) {
-    if (coordinator_crashed(graph)) {
+    if (coordinator_crashed(graph, kNumParticipants)) {
       return;
     }
 
@@ -163,7 +166,7 @@ TEST_CASE("2PC crash behavior: no participant decides after coordinator crash",
   algo::DporConfig config;
   config.program = std::move(prog);
   config.on_execution = [&](const model::ExplorationGraph& graph) {
-    if (!coordinator_crashed(graph)) {
+    if (!coordinator_crashed(graph, kNumParticipants)) {
       return;
     }
 
@@ -197,7 +200,7 @@ TEST_CASE("2PC scales to 3 participants", "[two_phase_commit]") {
 }
 
 // ---------------------------------------------------------------------------
-// UDP Network tests
+// UDP tests
 // ---------------------------------------------------------------------------
 
 // Allocate an ephemeral port by binding to port 0, reading the assigned port,
@@ -252,8 +255,8 @@ TEST_CASE("UDP: send and receive a single message over localhost",
           "[two_phase_commit][udp]") {
   auto pm = make_localhost_port_map(1);
 
-  tpc::UdpNetwork sender(tpc::kCoordinator, pm);
-  tpc::UdpNetwork receiver(1, pm);
+  tpc::UdpEnvironment sender(tpc::kCoordinator, pm);
+  tpc::UdpEnvironment receiver(1, pm);
 
   tpc::Message sent = tpc::Prepare{};
   sender.send(1, sent);
@@ -266,13 +269,13 @@ TEST_CASE("UDP: send and receive VoteMsg preserves fields",
           "[two_phase_commit][udp]") {
   auto pm = make_localhost_port_map(1);
 
-  tpc::UdpNetwork participant_net(1, pm);
-  tpc::UdpNetwork coordinator_net(tpc::kCoordinator, pm);
+  tpc::UdpEnvironment participant_env(1, pm, tpc::Vote::Yes);
+  tpc::UdpEnvironment coordinator_env(tpc::kCoordinator, pm);
 
-  participant_net.send(tpc::kCoordinator,
+  participant_env.send(tpc::kCoordinator,
                        tpc::VoteMsg{1, tpc::Vote::Yes});
 
-  auto got = coordinator_net.receive();
+  auto got = coordinator_env.receive();
   const auto* vote = std::get_if<tpc::VoteMsg>(&got);
   REQUIRE(vote != nullptr);
   REQUIRE(vote->from == 1);
@@ -285,18 +288,18 @@ TEST_CASE("UDP: full 2PC protocol run with all-Yes votes commits",
   auto pm = make_localhost_port_map(kN);
 
   tpc::Coordinator coord(kN);
-  tpc::Participant p1(1, tpc::Vote::Yes);
-  tpc::Participant p2(2, tpc::Vote::Yes);
+  tpc::Participant p1(1);
+  tpc::Participant p2(2);
 
-  // Create all networks on the main thread so every socket is bound
-  // before any thread starts sending.
-  tpc::UdpNetwork net_coord(tpc::kCoordinator, pm);
-  tpc::UdpNetwork net_p1(1, pm);
-  tpc::UdpNetwork net_p2(2, pm);
+  // Create all environments on the main thread so every socket is bound
+  // before any thread starts sending.  Vote is passed to the environment.
+  tpc::UdpEnvironment env_coord(tpc::kCoordinator, pm);
+  tpc::UdpEnvironment env_p1(1, pm, tpc::Vote::Yes);
+  tpc::UdpEnvironment env_p2(2, pm, tpc::Vote::Yes);
 
-  std::thread t_coord([&] { coord.run(net_coord); });
-  std::thread t_p1([&] { p1.run(net_p1); });
-  std::thread t_p2([&] { p2.run(net_p2); });
+  std::thread t_coord([&] { coord.run(env_coord); });
+  std::thread t_p1([&] { p1.run(env_p1); });
+  std::thread t_p2([&] { p2.run(env_p2); });
 
   t_coord.join();
   t_p1.join();
@@ -313,16 +316,16 @@ TEST_CASE("UDP: full 2PC protocol run with a No vote aborts",
   auto pm = make_localhost_port_map(kN);
 
   tpc::Coordinator coord(kN);
-  tpc::Participant p1(1, tpc::Vote::Yes);
-  tpc::Participant p2(2, tpc::Vote::No);
+  tpc::Participant p1(1);
+  tpc::Participant p2(2);
 
-  tpc::UdpNetwork net_coord(tpc::kCoordinator, pm);
-  tpc::UdpNetwork net_p1(1, pm);
-  tpc::UdpNetwork net_p2(2, pm);
+  tpc::UdpEnvironment env_coord(tpc::kCoordinator, pm);
+  tpc::UdpEnvironment env_p1(1, pm, tpc::Vote::Yes);
+  tpc::UdpEnvironment env_p2(2, pm, tpc::Vote::No);
 
-  std::thread t_coord([&] { coord.run(net_coord); });
-  std::thread t_p1([&] { p1.run(net_p1); });
-  std::thread t_p2([&] { p2.run(net_p2); });
+  std::thread t_coord([&] { coord.run(env_coord); });
+  std::thread t_p1([&] { p1.run(env_p1); });
+  std::thread t_p2([&] { p2.run(env_p2); });
 
   t_coord.join();
   t_p1.join();

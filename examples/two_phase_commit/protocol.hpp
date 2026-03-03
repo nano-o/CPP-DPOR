@@ -3,8 +3,8 @@
 // Two-Phase Commit (2PC) protocol implementation.
 //
 // Real, runnable 2PC logic with no model-checking awareness.
-// Coordinator and Participants communicate over an abstract Network interface,
-// which can be backed by real UDP or a DPOR simulation adapter.
+// Coordinator and Participants communicate over an abstract Environment
+// interface, which can be backed by real UDP or a DPOR simulation adapter.
 
 #include <cstddef>
 #include <optional>
@@ -100,12 +100,12 @@ inline Message deserialize(const std::string& data) {
 }
 
 // ---------------------------------------------------------------------------
-// Network interface
+// Environment interface
 // ---------------------------------------------------------------------------
 
-class Network {
+class Environment {
  public:
-  virtual ~Network() = default;
+  virtual ~Environment() = default;
 
   // Send a message to a node. destination is a ParticipantId
   // (kCoordinator for coordinator, 1..N for participants).
@@ -113,6 +113,9 @@ class Network {
 
   // Blocking receive: returns the next incoming message.
   virtual Message receive() = 0;
+
+  // Query the environment for this participant's vote.
+  virtual Vote get_vote() = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -121,21 +124,19 @@ class Network {
 
 class Coordinator {
  public:
-  explicit Coordinator(std::size_t num_participants,
-                       bool crash_between_phases = false)
-      : num_participants_(num_participants),
-        crash_between_phases_(crash_between_phases) {}
+  explicit Coordinator(std::size_t num_participants)
+      : num_participants_(num_participants) {}
 
-  void run(Network& net) {
+  void run(Environment& env) {
     // Phase 1: send Prepare to all participants.
     for (std::size_t pid = 1; pid <= num_participants_; ++pid) {
-      net.send(pid, Prepare{});
+      env.send(pid, Prepare{});
     }
 
     // Phase 1: collect votes.
     bool all_yes = true;
     for (std::size_t i = 0; i < num_participants_; ++i) {
-      auto msg = net.receive();
+      auto msg = env.receive();
       const auto* vote = std::get_if<VoteMsg>(&msg);
       if (vote == nullptr || vote->vote == Vote::No) {
         all_yes = false;
@@ -144,19 +145,14 @@ class Coordinator {
 
     decision_ = all_yes ? Decision::Commit : Decision::Abort;
 
-    // Simulate crash: skip phase 2 entirely.
-    if (crash_between_phases_) {
-      return;
-    }
-
     // Phase 2: send decision to all participants.
     for (std::size_t pid = 1; pid <= num_participants_; ++pid) {
-      net.send(pid, DecisionMsg{*decision_});
+      env.send(pid, DecisionMsg{*decision_});
     }
 
     // Phase 2: collect acks.
     for (std::size_t i = 0; i < num_participants_; ++i) {
-      net.receive();
+      env.receive();
     }
   }
 
@@ -166,7 +162,6 @@ class Coordinator {
 
  private:
   std::size_t num_participants_;
-  bool crash_between_phases_;
   std::optional<Decision> decision_;
 };
 
@@ -176,24 +171,27 @@ class Coordinator {
 
 class Participant {
  public:
-  explicit Participant(ParticipantId id, Vote vote) : id_(id), vote_(vote) {}
+  explicit Participant(ParticipantId id) : id_(id) {}
 
-  void run(Network& net) {
+  void run(Environment& env) {
     // Wait for Prepare.
-    net.receive();
+    env.receive();
+
+    // Ask environment for our vote.
+    auto vote = env.get_vote();
 
     // Send vote.
-    net.send(kCoordinator, VoteMsg{id_, vote_});
+    env.send(kCoordinator, VoteMsg{id_, vote});
 
     // Wait for decision.
-    auto msg = net.receive();
+    auto msg = env.receive();
     const auto* dec = std::get_if<DecisionMsg>(&msg);
     if (dec != nullptr) {
       outcome_ = dec->decision;
     }
 
     // Send ack.
-    net.send(kCoordinator, Ack{id_});
+    env.send(kCoordinator, Ack{id_});
   }
 
   [[nodiscard]] ParticipantId id() const noexcept { return id_; }
@@ -203,7 +201,6 @@ class Participant {
 
  private:
   ParticipantId id_;
-  Vote vote_;
   std::optional<Decision> outcome_;
 };
 

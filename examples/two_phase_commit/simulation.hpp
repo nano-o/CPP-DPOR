@@ -2,12 +2,13 @@
 
 // DPOR simulation adapter for Two-Phase Commit.
 //
-// Bridges the real tpc::Network interface to the DPOR engine by intercepting
-// send/receive calls.  Protocol-agnostic: knows nothing about 2PC specifics.
+// Bridges the real tpc::Environment interface to the DPOR engine by
+// intercepting send/receive/get_vote calls and injecting crash
+// nondeterminism.
 //
-// Core idea: each ThreadFunction call with step >= 1 creates a fresh protocol
-// object and SimNetwork, launches run() in a real OS thread, fast-forwards
-// through past I/O, and captures the current I/O as a DPOR EventLabel.
+// Core idea: each ThreadFunction call creates a fresh protocol object and
+// SimEnvironment, launches run() in a real OS thread, fast-forwards through
+// past I/O, and captures the current I/O as a DPOR EventLabel.
 
 #include "protocol.hpp"
 
@@ -18,6 +19,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -33,23 +35,58 @@ using ThreadFunction = dpor::algo::ThreadFunction;
 using Program = dpor::algo::Program;
 
 // ---------------------------------------------------------------------------
-// SimNetwork: intercepting Network implementation
+// SimEnvironment: intercepting Environment implementation
 // ---------------------------------------------------------------------------
 
-class SimNetwork : public tpc::Network {
+// Exception used internally to terminate the protocol thread when a crash
+// is injected during fast-forward.
+struct CrashInjected {};
+
+class SimEnvironment : public tpc::Environment {
  public:
-  SimNetwork(
+  SimEnvironment(
       std::function<dpor::model::ThreadId(tpc::ParticipantId)> id_map,
       std::size_t target_io,
       const ThreadTrace& trace,
-      std::size_t trace_offset)
+      std::size_t trace_offset,
+      bool inject_crash = false)
       : id_map_(std::move(id_map)),
         target_io_(target_io),
         trace_(trace),
-        trace_offset_(trace_offset) {}
+        trace_offset_(trace_offset),
+        inject_crash_(inject_crash) {}
 
   void send(tpc::ParticipantId dest, const tpc::Message& msg) override {
     std::unique_lock lock(mu_);
+
+    // Crash injection: when the coordinator is about to send a DecisionMsg
+    // for the first time, inject a nondeterministic crash choice.
+    if (inject_crash_ && !crash_injected_ &&
+        std::holds_alternative<tpc::DecisionMsg>(msg)) {
+      crash_injected_ = true;
+      auto current = io_count_++;
+
+      if (current < target_io_) {
+        // Fast-forward: read crash choice from trace.
+        auto idx = trace_offset_ + trace_consume_count_++;
+        if (trace_.at(idx) == "crash") {
+          // Crash chosen: abort the protocol thread.
+          throw CrashInjected{};
+        }
+        // "no_crash": fall through to process the actual send below.
+      } else {
+        // This is the target I/O: produce ND choice label.
+        result_ = NondeterministicChoiceLabel{
+            .value = {},
+            .choices = {"no_crash", "crash"},
+        };
+        protocol_ready_ = true;
+        cv_.notify_all();
+        cv_.wait(lock, [this] { return dpor_ready_; });
+        return;  // Thread will be torn down.
+      }
+    }
+
     auto current = io_count_++;
 
     if (current < target_io_) {
@@ -75,7 +112,7 @@ class SimNetwork : public tpc::Network {
 
     if (current < target_io_) {
       // Fast-forward: past receive, replay value from trace.
-      auto idx = trace_offset_ + receive_count_++;
+      auto idx = trace_offset_ + trace_consume_count_++;
       return tpc::deserialize(trace_.at(idx));
     }
 
@@ -90,6 +127,31 @@ class SimNetwork : public tpc::Network {
     // Unreachable in practice -- the OS thread gets detached/joined.
     // Return a dummy to satisfy the compiler.
     return tpc::Prepare{};
+  }
+
+  tpc::Vote get_vote() override {
+    std::unique_lock lock(mu_);
+    auto current = io_count_++;
+
+    if (current < target_io_) {
+      // Fast-forward: past vote choice, replay from trace.
+      auto idx = trace_offset_ + trace_consume_count_++;
+      return trace_.at(idx) == "YES" ? tpc::Vote::Yes : tpc::Vote::No;
+    }
+
+    // This is the target I/O operation: produce ND choice label.
+    result_ = NondeterministicChoiceLabel{
+        .value = {},
+        .choices = {"YES", "NO"},
+    };
+    protocol_ready_ = true;
+    cv_.notify_all();
+
+    // Wait for DPOR thread to acknowledge (never returns to protocol).
+    cv_.wait(lock, [this] { return dpor_ready_; });
+
+    // Unreachable.
+    return tpc::Vote::Yes;
   }
 
   // Called by the wrapper after run() returns, indicating the protocol
@@ -130,6 +192,7 @@ class SimNetwork : public tpc::Network {
   std::size_t target_io_;
   const ThreadTrace& trace_;
   std::size_t trace_offset_;
+  bool inject_crash_;
 
   mutable std::mutex mu_;
   std::condition_variable cv_;
@@ -137,9 +200,10 @@ class SimNetwork : public tpc::Network {
   bool dpor_ready_{false};
 
   std::size_t io_count_{0};
-  std::size_t receive_count_{0};
+  std::size_t trace_consume_count_{0};
   std::optional<EventLabel> result_;
   bool finished_{false};
+  bool crash_injected_{false};
 };
 
 // ---------------------------------------------------------------------------
@@ -158,32 +222,35 @@ inline dpor::model::ThreadId participant_to_thread(
 // ---------------------------------------------------------------------------
 
 // Run a protocol object in a background OS thread, capturing a single I/O
-// event via SimNetwork.  Returns the captured EventLabel or nullopt if the
-// protocol finished before reaching the target I/O.
+// event via SimEnvironment.  Returns the captured EventLabel or nullopt if
+// the protocol finished before reaching the target I/O.
 template <typename ProtocolObj>
 std::optional<EventLabel> run_and_capture(
     ProtocolObj& obj,
-    SimNetwork& net) {
-  std::thread worker([&obj, &net] {
+    SimEnvironment& env) {
+  std::thread worker([&obj, &env] {
     try {
-      obj.run(net);
-      net.mark_finished();
+      obj.run(env);
+      env.mark_finished();
+    } catch (const CrashInjected&) {
+      // Crash was injected during fast-forward -- protocol terminated.
+      env.mark_finished();
     } catch (...) {
-      net.mark_finished();
+      env.mark_finished();
     }
   });
 
-  net.wait_for_protocol();
+  env.wait_for_protocol();
 
-  if (net.is_finished()) {
+  if (env.is_finished()) {
     worker.join();
     return std::nullopt;
   }
 
   // Protocol is blocked on the target I/O.  Collect the result
   // and release the thread for cleanup.
-  auto label = net.result();
-  net.release_protocol();
+  auto label = env.result();
+  env.release_protocol();
   worker.join();
   return label;
 }
@@ -193,20 +260,10 @@ inline ThreadFunction make_coordinator_function(
     std::size_t num_participants) {
   return [num_participants](const ThreadTrace& trace,
                             std::size_t step) -> std::optional<EventLabel> {
-    // Step 0: nondeterministic choice for crash behavior.
-    if (step == 0) {
-      return NondeterministicChoiceLabel{
-          .value = "no_crash",
-          .choices = {"no_crash", "crash"},
-      };
-    }
-
-    // Read the ND choice from trace[0].
-    bool crash = (trace.at(0) == "crash");
-
-    tpc::Coordinator coord(num_participants, crash);
-    SimNetwork net(participant_to_thread, step - 1, trace, 1);
-    return run_and_capture(coord, net);
+    tpc::Coordinator coord(num_participants);
+    SimEnvironment env(participant_to_thread, step, trace, 0,
+                       /*inject_crash=*/true);
+    return run_and_capture(coord, env);
   };
 }
 
@@ -215,21 +272,9 @@ inline ThreadFunction make_participant_function(
     tpc::ParticipantId pid) {
   return [pid](const ThreadTrace& trace,
                std::size_t step) -> std::optional<EventLabel> {
-    // Step 0: nondeterministic choice for vote.
-    if (step == 0) {
-      return NondeterministicChoiceLabel{
-          .value = "YES",
-          .choices = {"YES", "NO"},
-      };
-    }
-
-    // Read the ND choice from trace[0].
-    tpc::Vote vote =
-        (trace.at(0) == "YES") ? tpc::Vote::Yes : tpc::Vote::No;
-
-    tpc::Participant participant(pid, vote);
-    SimNetwork net(participant_to_thread, step - 1, trace, 1);
-    return run_and_capture(participant, net);
+    tpc::Participant participant(pid);
+    SimEnvironment env(participant_to_thread, step, trace, 0);
+    return run_and_capture(participant, env);
   };
 }
 
