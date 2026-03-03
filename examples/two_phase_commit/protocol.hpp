@@ -82,7 +82,9 @@ inline Message deserialize(const std::string& data) {
   if (tag == "VOTE") {
     std::size_t from{};
     std::string vote_str;
-    iss >> from >> vote_str;
+    if (!(iss >> from >> vote_str)) {
+      throw std::invalid_argument("malformed VOTE message: " + data);
+    }
     if (vote_str == "YES") {
       return VoteMsg{from, Vote::Yes};
     }
@@ -104,7 +106,9 @@ inline Message deserialize(const std::string& data) {
   }
   if (tag == "ACK") {
     std::size_t from{};
-    iss >> from;
+    if (!(iss >> from)) {
+      throw std::invalid_argument("malformed ACK message: " + data);
+    }
     return Ack{from};
   }
   throw std::invalid_argument("unknown message tag: " + tag);
@@ -135,8 +139,9 @@ class Environment {
 
 class Coordinator {
  public:
-  explicit Coordinator(std::size_t num_participants)
-      : num_participants_(num_participants) {}
+  explicit Coordinator(std::size_t num_participants,
+                       bool bug_on_p1_no = false)
+      : num_participants_(num_participants), bug_on_p1_no_(bug_on_p1_no) {}
 
   void run(Environment& env) {
     // Phase 1: send Prepare to all participants.
@@ -151,6 +156,11 @@ class Coordinator {
       const auto* vote = std::get_if<VoteMsg>(&msg);
       if (vote == nullptr || vote->vote == Vote::No) {
         all_yes = false;
+        // Simulated implementation bug: crash on No vote from participant 1.
+        if (bug_on_p1_no_ && vote != nullptr && vote->from == 1) {
+          throw std::logic_error(
+              "BUG: coordinator cannot handle No vote from participant 1");
+        }
       }
     }
 
@@ -173,6 +183,7 @@ class Coordinator {
 
  private:
   std::size_t num_participants_;
+  bool bug_on_p1_no_;
   std::optional<Decision> decision_;
 };
 

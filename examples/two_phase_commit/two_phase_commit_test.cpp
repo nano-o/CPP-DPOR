@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iostream>
 #include <optional>
 #include <set>
 #include <string>
@@ -63,6 +64,36 @@ static bool coordinator_crashed(const model::ExplorationGraph& graph,
     return trace[num_participants] == "crash";
   }
   return false;
+}
+
+// Dump the global interleaving of an execution to stderr.
+static void dump_global_trace(const model::ExplorationGraph& graph) {
+  for (auto id : graph.insertion_order()) {
+    const auto& evt = graph.event(id);
+    std::cerr << "  event " << id
+              << " thread=" << evt.thread
+              << " index=" << evt.index;
+    if (const auto* send = model::as_send(evt)) {
+      std::cerr << " send(dest=" << send->destination
+                << ", val=" << send->value << ")";
+    } else if (model::as_receive(evt) != nullptr) {
+      // Show which send was matched via reads-from.
+      auto it = graph.reads_from().find(id);
+      if (it != graph.reads_from().end()) {
+        const auto& src = graph.event(it->second);
+        if (const auto* s = model::as_send(src)) {
+          std::cerr << " receive(val=" << s->value << ")";
+        } else {
+          std::cerr << " receive(src=" << it->second << ")";
+        }
+      } else {
+        std::cerr << " receive(unmatched)";
+      }
+    } else if (const auto* nd = model::as_nondeterministic_choice(evt)) {
+      std::cerr << " nd(val=" << nd->value << ")";
+    }
+    std::cerr << "\n";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +244,52 @@ TEST_CASE("2PC scales to 3 participants", "[two_phase_commit]") {
   const auto result = algo::verify(config);
   REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored > 0);
+}
+
+TEST_CASE("2PC protocol bug surfaces as exception, not silent success",
+          "[two_phase_commit]") {
+  auto prog = make_two_phase_commit_program(2, /*inject_crash=*/false,
+                                            /*bug_on_p1_no=*/true);
+
+  algo::DporConfig config;
+  config.program = std::move(prog);
+
+  // The buggy coordinator throws when participant 1 votes No.
+  // This must propagate out of verify(), not be silently swallowed.
+  REQUIRE_THROWS_AS(algo::verify(config), std::logic_error);
+}
+
+TEST_CASE("2PC false invariant is detected: Abort implies some voted No",
+          "[two_phase_commit]") {
+  constexpr std::size_t kNumParticipants = 2;
+  auto prog = make_two_phase_commit_program(kNumParticipants,
+                                            /*inject_crash=*/false);
+
+  bool invariant_violated = false;
+
+  algo::DporConfig config;
+  config.program = std::move(prog);
+  config.on_execution = [&](const model::ExplorationGraph& graph) {
+    // False invariant: "if the decision is Abort, then at least one
+    // participant voted No."  This is actually true for 2PC, so let's
+    // check the *opposite*: "Abort never happens."  Since participants
+    // can vote No, this must be violated in at least one execution.
+    for (std::size_t pid = 1; pid <= kNumParticipants; ++pid) {
+      auto dec = get_participant_decision(graph, pid);
+      if (dec.has_value() && *dec == "DECISION ABORT") {
+        if (!invariant_violated) {
+          std::cerr << "Invariant violated! Global trace:\n";
+          dump_global_trace(graph);
+        }
+        invariant_violated = true;
+      }
+    }
+  };
+
+  const auto result = algo::verify(config);
+  REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
+  // The false invariant ("Abort never happens") must be violated.
+  REQUIRE(invariant_violated);
 }
 
 // ---------------------------------------------------------------------------

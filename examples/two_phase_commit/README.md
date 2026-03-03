@@ -100,6 +100,11 @@ The known/expected exceptions (`CrashInjected`, `StepBoundaryReached`) are
 caught and handled normally. Only truly unexpected exceptions (logic errors,
 assertion failures, etc.) trigger the fail-fast path.
 
+The `Coordinator` constructor accepts a `bug_on_p1_no` flag that injects a
+deliberate bug (throwing when participant 1 votes No). This exists solely to
+test that the fail-fast mechanism works -- it would not be part of a real 2PC
+implementation.
+
 ## Running
 
 ```bash

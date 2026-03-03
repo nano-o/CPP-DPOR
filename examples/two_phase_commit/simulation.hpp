@@ -276,11 +276,12 @@ std::optional<EventLabel> run_and_capture(
 // Create a ThreadFunction for the coordinator.
 inline ThreadFunction make_coordinator_function(
     std::size_t num_participants,
-    bool inject_crash = true) {
-  return [num_participants, inject_crash](
+    bool inject_crash = true,
+    bool bug_on_p1_no = false) {
+  return [num_participants, inject_crash, bug_on_p1_no](
              const ThreadTrace& trace,
              std::size_t step) -> std::optional<EventLabel> {
-    tpc::Coordinator coord(num_participants);
+    tpc::Coordinator coord(num_participants, bug_on_p1_no);
     SimEnvironment env(participant_to_thread, step, trace, 0, inject_crash);
     return run_and_capture(coord, env);
   };
@@ -303,12 +304,13 @@ inline ThreadFunction make_participant_function(
 
 inline Program make_two_phase_commit_program(
     std::size_t num_participants,
-    bool inject_crash = true) {
+    bool inject_crash = true,
+    bool bug_on_p1_no = false) {
   Program prog;
 
   // Coordinator gets ThreadId 1 (= participant_to_thread(kCoordinator)).
   prog.threads[participant_to_thread(tpc::kCoordinator)] =
-      make_coordinator_function(num_participants, inject_crash);
+      make_coordinator_function(num_participants, inject_crash, bug_on_p1_no);
 
   // Participants get ThreadIds 2..N+1.
   for (std::size_t pid = 1; pid <= num_participants; ++pid) {
