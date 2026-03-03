@@ -195,6 +195,40 @@ TEST_CASE("s+s+r: two sends from one thread, one receive, explores 2 executions"
   REQUIRE(result.executions_explored == 2);
 }
 
+TEST_CASE("receiver-first schedule still explores both rf choices via backward revisit",
+    "[algo][dpor][regression]") {
+  DporConfig config;
+
+  // T1 has the smallest tid and is considered first by next-event selection.
+  // It performs a receive as its first operation.
+  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+
+  // Two independent senders to T1.
+  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "a"};
+    }
+    return std::nullopt;
+  };
+
+  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "b"};
+    }
+    return std::nullopt;
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  // One execution where T1 reads from T2's send and one from T3's send.
+  REQUIRE(result.executions_explored == 2);
+}
+
 // --- max_depth ---
 
 TEST_CASE("max_depth limits exploration", "[algo][dpor]") {
