@@ -347,7 +347,7 @@ TEST_CASE("max_depth limits exploration", "[algo][dpor]") {
   };
 
   const auto result = verify(config);
-  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.kind == VerifyResultKind::DepthLimitReached);
   // With max_depth=2, it should stop early rather than looping forever.
 }
 
@@ -771,6 +771,66 @@ TEST_CASE("tiebreaker should not pick an already-consumed send", "[algo][dpor][r
 
   const auto chosen = dpor::algo::detail::get_cons_tiebreaker(graph, r1);
   REQUIRE(chosen == s2);
+}
+
+TEST_CASE("receive revisit condition should use tiebreaker from G|Previous", "[algo][dpor][regression]") {
+  ExplorationGraph graph;
+
+  // Current source for the receive.
+  const auto send_current = graph.add_event(2, SendLabel{.destination = 1, .value = "x"});
+  const auto receive = graph.add_event(
+      1,
+      make_receive_label_from_values<Value>({"x"}));
+  graph.set_reads_from(receive, send_current);
+
+  // Compatible send added after the receive, but unrelated to the revisiting send.
+  const auto send_outside_previous = graph.add_event(0, SendLabel{.destination = 1, .value = "x"});
+
+  // Candidate revisiting send to an unrelated destination so it does not pull
+  // send_outside_previous into Previous.
+  const auto revisiting_send = graph.add_event(3, SendLabel{.destination = 9, .value = "y"});
+
+  const auto previous = dpor::algo::detail::compute_previous_set(graph, receive, revisiting_send);
+  REQUIRE(previous.count(send_outside_previous) == 0U);
+
+  const auto restricted = graph.restrict(previous);
+  const auto recv_in_previous = find_event_id_by_thread_index(restricted, 1, 0);
+  REQUIRE(recv_in_previous != ExplorationGraph::kNoSource);
+
+  // Paper condition: receive should compare against GetConsTiebreaker(G|Previous, e).
+  const auto expected_tiebreaker = dpor::algo::detail::get_cons_tiebreaker(restricted, recv_in_previous);
+  const auto rf_it = restricted.reads_from().find(recv_in_previous);
+  REQUIRE(rf_it != restricted.reads_from().end());
+  REQUIRE(rf_it->second == expected_tiebreaker);
+
+  // This should hold when the tiebreaker is computed on G|Previous.
+  REQUIRE(dpor::algo::detail::revisit_condition(graph, receive, revisiting_send));
+}
+
+TEST_CASE("receive revisit condition rejects rf source outside G|Previous", "[algo][dpor][regression]") {
+  ExplorationGraph graph;
+
+  // Receive is inserted before its source send.
+  const auto receive = graph.add_event(
+      1,
+      make_receive_label_from_values<Value>({"x"}));
+  const auto source_outside_previous = graph.add_event(
+      2,
+      SendLabel{.destination = 1, .value = "x"});
+  const auto revisiting_send = graph.add_event(
+      3,
+      SendLabel{.destination = 9, .value = "y"});
+
+  graph.set_reads_from(receive, source_outside_previous);
+
+  // For this pair (receive, revisiting_send), Previous does not include the
+  // current rf source.
+  const auto previous = dpor::algo::detail::compute_previous_set(graph, receive, revisiting_send);
+  REQUIRE(previous.count(source_outside_previous) == 0U);
+
+  // Under Algorithm 1, rf(e) cannot equal a tiebreaker computed on G|Previous
+  // if rf(e) is outside Previous.
+  REQUIRE_FALSE(dpor::algo::detail::revisit_condition(graph, receive, revisiting_send));
 }
 
 TEST_CASE("ND revisit condition should use min(S), not insertion order", "[algo][dpor][regression]") {

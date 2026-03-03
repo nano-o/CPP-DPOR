@@ -21,6 +21,11 @@ namespace dpor::algo {
 template <typename ValueT>
 using ThreadTraceT = std::vector<ValueT>;
 
+// Thread step function. Must be deterministic and side-effect-free: the same
+// (trace, step) arguments must always produce the same event label. DPOR
+// correctness (soundness and completeness) depends on this invariant.
+// Stateful captures or external side effects will silently invalidate
+// exploration guarantees.
 template <typename ValueT>
 using ThreadFunctionT = std::function<
     std::optional<model::EventLabelT<ValueT>>(const ThreadTraceT<ValueT>&, std::size_t step)>;

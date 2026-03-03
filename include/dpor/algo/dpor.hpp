@@ -25,7 +25,7 @@
 
 namespace dpor::algo {
 
-enum class VerifyResultKind { AllExecutionsExplored, ErrorFound };
+enum class VerifyResultKind { AllExecutionsExplored, ErrorFound, DepthLimitReached };
 
 struct VerifyResult {
   VerifyResultKind kind{VerifyResultKind::AllExecutionsExplored};
@@ -211,9 +211,9 @@ get_cons_tiebreaker(
 }
 
 // REVISITCONDITION(G, e, s):
-// - ND → val(e) == choices[0]
+// - ND → val(e) == min(S)
 // - non-receive → no receive in Previous reads from e
-// - receive → rf(e) == get_cons_tiebreaker(G, e)
+// - receive → rf(e) == get_cons_tiebreaker(G|Previous, e)
 template <typename ValueT>
 [[nodiscard]] inline bool revisit_condition(
     const model::ExplorationGraphT<ValueT>& graph,
@@ -224,7 +224,10 @@ template <typename ValueT>
 
   const auto& evt = graph.event(e);
 
-  // ND choice: val(e) == choices[0]
+  // ND choice: val(e) == min(S).
+  // NOTE: This branch requires ValueT to provide operator< (for min_element)
+  // and operator== (for comparison). If ValueT lacks these, verify<T>() will
+  // fail to compile even when no ND events are produced at runtime.
   if (const auto* nd = model::as_nondeterministic_choice(evt)) {
     if (nd->choices.empty()) {
       return true;
@@ -248,11 +251,46 @@ template <typename ValueT>
     return true;
   }
 
-  // Receive: rf(e) == get_cons_tiebreaker(G, e)
-  auto it = graph.reads_from().find(e);
-  const auto current_rf = (it != graph.reads_from().end()) ? it->second : kNoSource;
-  const auto tiebreaker = get_cons_tiebreaker(graph, e);
-  return current_rf == tiebreaker;
+  // Receive: rf(e) == get_cons_tiebreaker(G|Previous, e)
+  // Must Algorithm 1 requires the tiebreaker to be computed on G restricted
+  // to the Previous set, not the full graph.
+  const auto previous = compute_previous_set(graph, e, s);
+  auto restricted = graph.restrict(previous);
+
+  // Build old-to-new ID mapping for events kept in the restricted graph.
+  std::unordered_map<EvId, EvId> id_map;
+  {
+    EvId new_id = 0;
+    for (const auto old_id : graph.insertion_order()) {
+      if (previous.count(old_id) != 0U) {
+        id_map[old_id] = new_id++;
+      }
+    }
+  }
+
+  // Remap e to its ID in the restricted graph.
+  auto e_it = id_map.find(e);
+  if (e_it == id_map.end()) {
+    return true;  // e not in Previous — vacuously satisfied.
+  }
+  const auto remapped_e = e_it->second;
+
+  // Remap current rf(e) to its ID in the restricted graph.
+  // If rf(e) is not in Previous, the equality must fail (it cannot match any
+  // tiebreaker source of G|Previous).
+  auto rf_it = graph.reads_from().find(e);
+  if (rf_it == graph.reads_from().end()) {
+    return false;  // No rf source to compare.
+  }
+  const auto current_rf_original = rf_it->second;
+  auto rf_map_it = id_map.find(current_rf_original);
+  if (rf_map_it == id_map.end()) {
+    return false;  // rf(e) outside Previous => cannot equal restricted tiebreaker.
+  }
+  const EvId remapped_rf = rf_map_it->second;
+
+  const auto tiebreaker = get_cons_tiebreaker(restricted, remapped_e);
+  return remapped_rf == tiebreaker;
 }
 
 // Forward declarations for mutual recursion.
@@ -424,6 +462,9 @@ inline void visit(
   }
 
   if (depth >= config.max_depth) {
+    if (result.kind == VerifyResultKind::AllExecutionsExplored) {
+      result.kind = VerifyResultKind::DepthLimitReached;
+    }
     return;
   }
 

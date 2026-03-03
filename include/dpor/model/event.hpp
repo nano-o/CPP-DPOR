@@ -27,14 +27,17 @@ using ThreadId = std::uint32_t;
 using EventIndex = std::uint32_t;
 using Value = std::string;
 
+// Receive matcher predicate. Must be deterministic and side-effect-free: the
+// same ValueT input must always produce the same bool result. DPOR soundness
+// and completeness depend on this invariant. Stateful or mutable captures will
+// silently invalidate exploration guarantees.
+//
+// Additionally, `std::function` keeps matcher semantics flexible but makes
+// matcher identity opaque. As a result, `ReceiveLabelT` equality is not
+// structurally meaningful. This matters for future memoization/reduction
+// features (e.g., sleep sets), where stable matcher identity may be required.
 template <typename ValueT>
 using ReceiveMatchFnT = std::function<bool(const ValueT&)>;
-// Warning:
-// `std::function` keeps matcher semantics flexible but makes matcher identity
-// opaque. As a result, `ReceiveLabelT` equality is not structurally meaningful,
-// and stateful/mutable captures can produce surprising behavior if not kept
-// deterministic. This matters for future memoization/reduction features (e.g.,
-// sleep sets), where stable matcher identity may be required.
 
 template <typename ValueT>
 struct ReceiveLabelT {
@@ -52,6 +55,9 @@ struct SendLabelT {
   ValueT value;
 };
 
+// Nondeterministic choice label. When `choices` is non-empty, the DPOR revisit
+// condition uses min_element and equality comparison on ValueT, so ValueT must
+// provide operator< and operator== in that case.
 template <typename ValueT>
 struct NondeterministicChoiceLabelT {
   ValueT value;
