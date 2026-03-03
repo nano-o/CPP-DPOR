@@ -786,3 +786,294 @@ TEST_CASE("ND revisit condition should use min(S), not insertion order", "[algo]
   // Under the paper's condition val(e) = min(S), this should hold.
   REQUIRE(dpor::algo::detail::revisit_condition(graph, nd, s));
 }
+
+// --- Paper examples (Must, OOPSLA'24) within current async + ND scope ---
+
+TEST_CASE("paper ex 2.4: nondet failure target yields one execution per choice", "[algo][dpor][paper]") {
+  DporConfig config;
+  std::set<std::string> received_failures;
+
+  // T1 (environment): who := nondet({node1,node2}); send(T2, Fail(who))
+  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return NondeterministicChoiceLabel{
+          .value = "node1",
+          .choices = {"node1", "node2"},
+      };
+    }
+    if (step == 1 && trace.size() == 1) {
+      return SendLabel{.destination = 2, .value = "Fail(" + trace[0] + ")"};
+    }
+    return std::nullopt;
+  };
+
+  // T2 (coordinator): receive one failure notification.
+  config.program.threads[2] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+    if (trace.empty()) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&received_failures](const ExplorationGraph& graph) {
+    const auto trace = graph.thread_trace(2);
+    if (!trace.empty()) {
+      received_failures.insert(trace[0]);
+    }
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 2);
+  REQUIRE(received_failures == std::set<std::string>{"Fail(node1)", "Fail(node2)"});
+}
+
+TEST_CASE("paper ex 2.6: selective receive filters stale value", "[algo][dpor][paper]") {
+  DporConfig config;
+
+  // Two messages to T3: one stale, one fresh.
+  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 3, .value = "stale"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 3, .value = "fresh"};
+    }
+    return std::nullopt;
+  };
+
+  // T3 only accepts "fresh".
+  config.program.threads[3] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+    if (trace.empty()) {
+      return make_receive_label_from_values<Value>({"fresh"});
+    }
+    return std::nullopt;
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+}
+
+TEST_CASE("paper ex 2.7: ordered selective receives collapse ns+rn-sel to one execution",
+    "[algo][dpor][paper]") {
+  DporConfig config;
+
+  // T1..T3 send 1..3 to T4.
+  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 4, .value = "1"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 4, .value = "2"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 4, .value = "3"};
+    }
+    return std::nullopt;
+  };
+
+  // T4 receives exactly 1, then 2, then 3.
+  config.program.threads[4] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"1"});
+    }
+    if (step == 1 && trace.size() == 1) {
+      return make_receive_label_from_values<Value>({"2"});
+    }
+    if (step == 2 && trace.size() == 2) {
+      return make_receive_label_from_values<Value>({"3"});
+    }
+    return std::nullopt;
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+}
+
+TEST_CASE("paper ex 2.8: receives can consume messages out of sender order with predicates",
+    "[algo][dpor][paper]") {
+  DporConfig config;
+
+  // T1: send(T2,1); send(T2,2)
+  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 2, .value = "1"};
+    }
+    if (step == 1) {
+      return SendLabel{.destination = 2, .value = "2"};
+    }
+    return std::nullopt;
+  };
+
+  // T2: recv(x==2); recv(x==1)
+  config.program.threads[2] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"2"});
+    }
+    if (step == 1 && trace.size() == 1) {
+      return make_receive_label_from_values<Value>({"1"});
+    }
+    return std::nullopt;
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+}
+
+TEST_CASE("paper ex 2.9: ns+r explores N executions (lazy ordering)", "[algo][dpor][paper]") {
+  DporConfig config;
+  std::set<std::string> first_receive_values;
+
+  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 5, .value = "1"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 5, .value = "2"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 5, .value = "3"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[4] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 5, .value = "4"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[5] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+    if (trace.empty()) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&first_receive_values](const ExplorationGraph& graph) {
+    const auto trace = graph.thread_trace(5);
+    if (!trace.empty()) {
+      first_receive_values.insert(trace[0]);
+    }
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 4);
+  REQUIRE(first_receive_values == std::set<std::string>{"1", "2", "3", "4"});
+}
+
+TEST_CASE("paper ex 4.2: backward revisit recovers missed rf option", "[algo][dpor][paper]") {
+  DporConfig config;
+  std::set<std::string> observed_receive_values;
+
+  // Thread IDs arranged to force the paper's schedule shape:
+  // T1 then T3(recv) then T2.
+  // T1: send(T3,1)
+  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 2, .value = "1"};
+    }
+    return std::nullopt;
+  };
+  // T3: recv()
+  config.program.threads[2] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+    if (trace.empty()) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+  // T2: send(T3,2)
+  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 2, .value = "2"};
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&observed_receive_values](const ExplorationGraph& graph) {
+    const auto trace = graph.thread_trace(2);
+    if (!trace.empty()) {
+      observed_receive_values.insert(trace[0]);
+    }
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 2);
+  REQUIRE(observed_receive_values == std::set<std::string>{"1", "2"});
+}
+
+TEST_CASE("paper ex 4.3: revisiting condition avoids duplicate exploration in s+s+r-br",
+    "[algo][dpor][paper]") {
+  DporConfig config;
+  std::vector<std::string> signatures;
+
+  // T1: send(T1,0); recv()
+  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "0"};
+    }
+    if (step == 1 && trace.empty()) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+  // T2: send(T4,1)
+  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 4, .value = "1"};
+    }
+    return std::nullopt;
+  };
+  // T3: send(T4,2)
+  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 4, .value = "2"};
+    }
+    return std::nullopt;
+  };
+  // T4: recv()
+  config.program.threads[4] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+    if (trace.empty()) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+  // T5: send(T1,42)
+  config.program.threads[5] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "42"};
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&signatures](const ExplorationGraph& graph) {
+    signatures.push_back(graph_signature(graph));
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 4);
+  REQUIRE(signatures.size() == result.executions_explored);
+
+  const std::set<std::string> unique_signatures(signatures.begin(), signatures.end());
+  REQUIRE(unique_signatures.size() == signatures.size());
+}

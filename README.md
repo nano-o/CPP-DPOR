@@ -13,6 +13,7 @@ See the Must paper in docs/.
 
 - Receives are modeled as blocking only.
 - Non-blocking receive behavior is currently out of scope.
+- Asynchronous message-passing is the only supported model.
 
 ## Build
 
@@ -23,6 +24,7 @@ ctest --preset debug
 ```
 
 Tests are written with Catch2 (v3). CMake uses a system Catch2 package if available.
+Paper-derived examples in current scope are in `tests/dpor_test.cpp` and tagged `[paper]`.
 
 If Catch2 is not installed and your environment has internet access, enable fetching:
 
