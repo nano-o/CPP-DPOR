@@ -404,10 +404,8 @@ inline void visit_if_consistent(
 
   model::AsyncConsistencyCheckerT<ValueT> checker;
   const auto consistency = checker.check(graph.execution_graph());
-  for (const auto& issue : consistency.issues) {
-    if (issue.code != model::ConsistencyIssueCode::MissingReadsFromForReceive) {
-      return;  // Inconsistent — prune.
-    }
+  if (!consistency.is_consistent()) {
+    return;  // Inconsistent — prune.
   }
 
   visit(program, std::move(graph), result, config, depth);
