@@ -9,6 +9,7 @@
 // All functions are header-only and templated on ValueT.
 
 #include "dpor/algo/program.hpp"
+#include "dpor/model/consistency.hpp"
 #include "dpor/model/event.hpp"
 #include "dpor/model/exploration_graph.hpp"
 
@@ -150,11 +151,17 @@ get_cons_tiebreaker(
     return kNoSource;
   }
 
-  // Find all compatible unread sends targeting recv's thread.
+  // Find all compatible sends that are available for recv to read from:
+  // unread sends plus the send that recv itself currently reads from (if any).
   struct Candidate {
     EvId send_id;
     model::ThreadId sender_thread;
   };
+
+  // Determine which send recv currently reads from (if any).
+  auto rf_it = graph.reads_from().find(recv);
+  const auto current_rf_source = (rf_it != graph.reads_from().end())
+      ? rf_it->second : kNoSource;
 
   std::vector<Candidate> candidates;
   for (const auto send_id : graph.unread_send_event_ids()) {
@@ -172,23 +179,15 @@ get_cons_tiebreaker(
     candidates.push_back(Candidate{send_id, send_evt.thread});
   }
 
-  // Also consider already-consumed sends (any send targeting this thread and compatible).
-  // Actually, per the paper, we look at all sends in the graph, not just unread.
-  // The tiebreaker is about which send *could* be assigned as rf source.
-  candidates.clear();
-  for (EvId id = 0; id < graph.event_count(); ++id) {
-    const auto& evt = graph.event(id);
-    const auto* send_label = model::as_send(evt);
-    if (send_label == nullptr) {
-      continue;
+  // Also include the send that recv currently reads from (consumed by recv itself).
+  if (current_rf_source != kNoSource) {
+    const auto& send_evt = graph.event(current_rf_source);
+    const auto* send_label = model::as_send(send_evt);
+    if (send_label != nullptr &&
+        send_label->destination == recv_evt.thread &&
+        recv_label->accepts(send_label->value)) {
+      candidates.push_back(Candidate{current_rf_source, send_evt.thread});
     }
-    if (send_label->destination != recv_evt.thread) {
-      continue;
-    }
-    if (!recv_label->accepts(send_label->value)) {
-      continue;
-    }
-    candidates.push_back(Candidate{id, evt.thread});
   }
 
   // Sort by sender thread ID (tid-minimal), then by event ID for stability.
@@ -230,7 +229,8 @@ template <typename ValueT>
     if (nd->choices.empty()) {
       return true;
     }
-    return nd->value == nd->choices[0];
+    auto min_it = std::min_element(nd->choices.begin(), nd->choices.end());
+    return nd->value == *min_it;
   }
 
   // Non-receive event (send, block, error): check that no receive in Previous
@@ -313,27 +313,52 @@ inline void backward_revisit(
       continue;
     }
 
-    // Check revisit condition.
-    if (!revisit_condition(graph, recv_id, send_id)) {
+    // Line 10 filter: skip if ⟨recv, send⟩ ∈ G.porf.
+    if (graph.porf_contains(recv_id, send_id)) {
       continue;
     }
 
-    // Compute the Previous set and use it as the keep set for restrict,
-    // plus add the send itself.
-    auto keep_set = compute_previous_set(graph, recv_id, send_id);
-    keep_set.insert(send_id);
-    // Also keep recv_id itself.
-    keep_set.insert(recv_id);
+    // Line 11: Deleted = {e' ∈ G.E | r <_G e' ∧ ⟨e', send⟩ ∉ G.porf}
+    std::unordered_set<EvId> deleted;
+    for (EvId ep = 0; ep < graph.event_count(); ++ep) {
+      if (graph.inserted_before_or_equal(ep, recv_id) && ep != recv_id) {
+        continue;  // ep ≤_G r, so r does NOT strictly precede ep.
+      }
+      if (ep == recv_id) {
+        continue;  // "r <_G e'" means strictly after r.
+      }
+      // ep is strictly after r in insertion order.
+      if (!graph.porf_contains(ep, send_id)) {
+        deleted.insert(ep);
+      }
+    }
+
+    // Line 12: check revisit_condition for all e' ∈ Deleted ∪ {r}.
+    if (!revisit_condition(graph, recv_id, send_id)) {
+      continue;
+    }
+    bool all_pass = true;
+    for (const auto ep : deleted) {
+      if (!revisit_condition(graph, ep, send_id)) {
+        all_pass = false;
+        break;
+      }
+    }
+    if (!all_pass) {
+      continue;
+    }
+
+    // Line 13: keep_set = G.E \ Deleted.
+    std::unordered_set<EvId> keep_set;
+    for (EvId ep = 0; ep < graph.event_count(); ++ep) {
+      if (deleted.count(ep) == 0U) {
+        keep_set.insert(ep);
+      }
+    }
 
     auto restricted = graph.restrict(keep_set);
 
-    // In the restricted graph, find the remapped IDs for recv and send.
-    // We need to find them by matching. Build a mapping from old events to new positions.
-    // The restrict function keeps events in insertion order; we can find our events by
-    // iterating the restricted graph and matching thread + index.
-
-    // Actually, let's build the mapping more carefully.
-    // Events in the restricted graph correspond to the kept IDs in insertion order.
+    // Map old IDs to new IDs in the restricted graph.
     std::vector<EvId> kept_in_order;
     kept_in_order.reserve(keep_set.size());
     for (const auto old_id : graph.insertion_order()) {
@@ -342,7 +367,6 @@ inline void backward_revisit(
       }
     }
 
-    // Find the new IDs for recv and send.
     EvId new_recv_id = model::ExplorationGraphT<ValueT>::kNoSource;
     EvId new_send_id = model::ExplorationGraphT<ValueT>::kNoSource;
     for (EvId new_id = 0; new_id < kept_in_order.size(); ++new_id) {
@@ -376,8 +400,12 @@ inline void visit_if_consistent(
     return;
   }
 
-  if (graph.has_causal_cycle()) {
-    return;  // Prune inconsistent graphs.
+  model::AsyncConsistencyCheckerT<ValueT> checker;
+  const auto consistency = checker.check(graph.execution_graph());
+  for (const auto& issue : consistency.issues) {
+    if (issue.code != model::ConsistencyIssueCode::MissingReadsFromForReceive) {
+      return;  // Inconsistent — prune.
+    }
   }
 
   visit(program, std::move(graph), result, config, depth);

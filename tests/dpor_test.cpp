@@ -1,4 +1,5 @@
 #include "dpor/algo/dpor.hpp"
+#include "dpor/model/consistency.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -374,4 +375,137 @@ TEST_CASE("ND choice value visible in subsequent trace", "[algo][dpor]") {
   std::sort(observed_values.begin(), observed_values.end());
   REQUIRE(observed_values[0] == "a");
   REQUIRE(observed_values[1] == "b");
+}
+
+// --- Algorithmic regressions against Must-style constraints ---
+
+TEST_CASE("all explored executions should satisfy async consistency", "[algo][dpor][regression]") {
+  DporConfig config;
+
+  // T1: R
+  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+
+  // T2: S(3,c); S(1,a)
+  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 3, .value = "c"};
+    }
+    if (step == 1) {
+      return SendLabel{.destination = 1, .value = "a"};
+    }
+    return std::nullopt;
+  };
+
+  // T3: R; S(1,b)
+  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return make_receive_label<Value>();
+    }
+    if (step == 1) {
+      return SendLabel{.destination = 1, .value = "b"};
+    }
+    return std::nullopt;
+  };
+
+  // T4: ND{b,a}; S(3,b)
+  config.program.threads[4] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return NondeterministicChoiceLabel{
+          .value = "a",
+          .choices = {"b", "a"},
+      };
+    }
+    if (step == 1) {
+      return SendLabel{.destination = 3, .value = "b"};
+    }
+    return std::nullopt;
+  };
+
+  AsyncConsistencyChecker checker;
+  bool found_inconsistent = false;
+
+  config.on_execution = [&](const ExplorationGraph& g) {
+    const auto consistency = checker.check(g.execution_graph());
+    if (!consistency.is_consistent()) {
+      found_inconsistent = true;
+    }
+  };
+
+  static_cast<void>(verify(config));
+  REQUIRE_FALSE(found_inconsistent);
+}
+
+TEST_CASE("backward revisit must reject candidates when a deleted event violates revisit condition",
+    "[algo][dpor][regression]") {
+  ExplorationGraph graph;
+
+  // 0: T2 send -> T3
+  const auto s20 = graph.add_event(2, SendLabel{.destination = 3, .value = "c"});
+  // 1: T2 send -> T1
+  static_cast<void>(graph.add_event(2, SendLabel{.destination = 1, .value = "a"}));
+  // 2: T1 receive
+  const auto r10 = graph.add_event(1, make_receive_label<Value>());
+  // 3: T3 receive
+  const auto r30 = graph.add_event(3, make_receive_label<Value>());
+  // 4: T4 ND
+  static_cast<void>(graph.add_event(
+      4,
+      NondeterministicChoiceLabel{
+          .value = "b",
+          .choices = {"b", "a"},
+      }));
+  // 5: T4 send -> T3 (candidate revisiting send)
+  const auto s41 = graph.add_event(4, SendLabel{.destination = 3, .value = "b"});
+  // 6: T3 send -> T1
+  const auto s31 = graph.add_event(3, SendLabel{.destination = 1, .value = "b"});
+
+  // r10 currently reads from s31, r30 currently reads from s20.
+  graph.set_reads_from(r10, s31);
+  graph.set_reads_from(r30, s20);
+
+  // Revisit candidate is (r30, s41). The deleted event set contains s31,
+  // and RevisitCondition(G, s31, s41) should fail because r10 reads from s31.
+  REQUIRE(dpor::algo::detail::revisit_condition(graph, r30, s41));
+  REQUIRE_FALSE(dpor::algo::detail::revisit_condition(graph, s31, s41));
+
+  VerifyResult result;
+  DporConfig config;
+  dpor::algo::detail::backward_revisit(
+      config.program, graph, s41, result, config, 0);
+
+  // With the Deleted-set guard from Algorithm 1, this revisit should be blocked.
+  REQUIRE(result.executions_explored == 0);
+}
+
+TEST_CASE("tiebreaker should not pick an already-consumed send", "[algo][dpor][regression]") {
+  ExplorationGraph graph;
+
+  const auto s1 = graph.add_event(1, SendLabel{.destination = 3, .value = "x"});
+  const auto r0 = graph.add_event(3, make_receive_label<Value>());
+  const auto s2 = graph.add_event(2, SendLabel{.destination = 3, .value = "y"});
+  const auto r1 = graph.add_event(3, make_receive_label<Value>());
+
+  graph.set_reads_from(r0, s1);  // s1 already consumed
+
+  const auto chosen = dpor::algo::detail::get_cons_tiebreaker(graph, r1);
+  REQUIRE(chosen == s2);
+}
+
+TEST_CASE("ND revisit condition should use min(S), not insertion order", "[algo][dpor][regression]") {
+  ExplorationGraph graph;
+  const auto nd = graph.add_event(
+      1,
+      NondeterministicChoiceLabel{
+          .value = "a",
+          .choices = {"b", "a"},
+      });
+  const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
+
+  // Under the paper's condition val(e) = min(S), this should hold.
+  REQUIRE(dpor::algo::detail::revisit_condition(graph, nd, s));
 }
