@@ -31,6 +31,9 @@ target_link_libraries(dpor_model_types_test PRIVATE dpor::dpor Catch2::Catch2Wit
 add_executable(dpor_relation_test relation_test.cpp)
 target_link_libraries(dpor_relation_test PRIVATE dpor::dpor Catch2::Catch2WithMain)
 
+add_executable(dpor_consistency_test consistency_test.cpp)
+target_link_libraries(dpor_consistency_test PRIVATE dpor::dpor Catch2::Catch2WithMain)
+
 if(DEFINED Catch2_SOURCE_DIR)
   list(APPEND CMAKE_MODULE_PATH "${Catch2_SOURCE_DIR}/extras")
 endif()
@@ -39,3 +42,4 @@ include(Catch)
 catch_discover_tests(dpor_session_test)
 catch_discover_tests(dpor_model_types_test)
 catch_discover_tests(dpor_relation_test)
+catch_discover_tests(dpor_consistency_test)
