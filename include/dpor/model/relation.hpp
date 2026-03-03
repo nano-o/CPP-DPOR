@@ -301,4 +301,61 @@ template <Relation BaseRelation>
   return TransitiveClosureRelation<BaseRelation>(relation);
 }
 
+// Union-relation view: left ∪ right.
+// Contains (from, to) if either left or right contains it.
+template <Relation LeftRelation, Relation RightRelation>
+class UnionRelation {
+ public:
+  UnionRelation(const LeftRelation& left, const RightRelation& right)
+      : left_(left), right_(right) {
+    if (left_.node_count() != right_.node_count()) {
+      throw std::invalid_argument("cannot union relations with different node counts");
+    }
+  }
+
+  [[nodiscard]] std::size_t node_count() const noexcept {
+    return left_.node_count();
+  }
+
+  [[nodiscard]] bool contains(NodeId from, NodeId to) const {
+    validate_node(from);
+    validate_node(to);
+    return left_.contains(from, to) || right_.contains(from, to);
+  }
+
+  template <typename Func>
+  void for_each_successor(NodeId from, Func&& func) const {
+    validate_node(from);
+
+    std::vector<bool> emitted(node_count(), false);
+    left_.for_each_successor(from, [&](const NodeId successor) {
+      if (!emitted[successor]) {
+        emitted[successor] = true;
+        func(successor);
+      }
+    });
+    right_.for_each_successor(from, [&](const NodeId successor) {
+      if (!emitted[successor]) {
+        emitted[successor] = true;
+        func(successor);
+      }
+    });
+  }
+
+ private:
+  void validate_node(NodeId node) const {
+    if (node >= node_count()) {
+      throw std::out_of_range("relation node id is out of bounds");
+    }
+  }
+
+  const LeftRelation& left_;
+  const RightRelation& right_;
+};
+
+template <Relation L, Relation R>
+[[nodiscard]] inline auto relation_union(const L& left, const R& right) {
+  return UnionRelation<L, R>(left, right);
+}
+
 }  // namespace dpor::model

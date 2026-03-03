@@ -27,6 +27,9 @@
 namespace dpor::model {
 
 template <typename ValueT>
+class ExplorationGraphT;
+
+template <typename ValueT>
 class ExecutionGraphT {
  public:
   using EventId = std::size_t;
@@ -156,7 +159,15 @@ class ExecutionGraphT {
     return unread;
   }
 
+  template <typename V>
+  friend class ExplorationGraphT;
+
  private:
+  // Mutable access to events for in-place label modifications (e.g., ND value updates).
+  [[nodiscard]] std::vector<Event>& events_mutable() noexcept {
+    return events_;
+  }
+
   [[nodiscard]] EventIndex next_event_index(ThreadId thread) {
     constexpr auto kMaxIndex = std::numeric_limits<EventIndex>::max();
     auto& next_index = next_event_index_by_thread_[thread];

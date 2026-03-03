@@ -55,6 +55,7 @@ struct SendLabelT {
 template <typename ValueT>
 struct NondeterministicChoiceLabelT {
   ValueT value;
+  std::vector<ValueT> choices{};  // The set S of possible values for this choice.
 };
 
 struct BlockLabel {};
