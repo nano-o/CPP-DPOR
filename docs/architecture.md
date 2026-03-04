@@ -9,7 +9,7 @@ The system is organized into three primary layers: **Model**, **Algorithm**, and
 The model layer defines the formal representation of concurrent executions and their properties.
 
 ### Events and Traces
-- **`EventT`**: The fundamental unit of execution. Events include `Send`, `Receive`, and `ND` (non-deterministic choice). Each event is associated with a thread and a unique identifier.
+- **`EventT`**: The fundamental unit of execution. Events include `Send`, `Receive`, `ND` (non-deterministic choice), `Block` (thread cannot proceed), and `Error` (assertion or invariant violation). Each event is associated with a thread and a unique identifier.
 - **`ExecutionGraphT`**: Represents a single execution of the system. It stores a set of events and the **Reads-From (RF)** relation, which maps receive events to their corresponding send events.
 
 ### Relations and Reachability

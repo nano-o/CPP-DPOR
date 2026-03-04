@@ -65,6 +65,64 @@ This is required to preserve DPOR soundness/completeness assumptions.
 - Intermediate helper constructions (e.g., transient graphs during restrict/remap/revisit computation) may be partial only as internal artifacts.
 - No helper/partial graph may be emitted as a complete execution, or used as an exploration state, unless it passes full consistency.
 
+## Build & Test
+
+- **Build system**: CMake 3.22+ with Ninja generator, C++20
+- **Test framework**: Catch2 v3
+- **CMake presets**: `debug`, `release`, `asan`, `debug-fetch-catch2`
+- Build: `cmake --preset debug && cmake --build --preset debug`
+- Run tests: `ctest --preset debug`
+- The `debug-fetch-catch2` preset auto-fetches Catch2 if not installed locally
+- The `asan` preset enables AddressSanitizer and UndefinedBehaviorSanitizer
+
+## Code Organization
+
+```
+include/dpor/
+  model/    → dpor::model  (events, relations, graphs, consistency)
+  algo/     → dpor::algo   (DPOR engine, program representation)
+  api/      → dpor::api    (Session — public entry point)
+src/api/    → only compiled source (session.cpp)
+tests/      → Catch2 test files
+examples/   → minimal/ and two_phase_commit/
+```
+
+- Most code is **header-only templates** in `include/dpor/model/` and `include/dpor/algo/`
+- The only `.cpp` source file is `src/api/session.cpp`; don't look for `.cpp` files for model/algo code
+
+## DPOR Algorithm
+
+The engine in `include/dpor/algo/dpor.hpp` implements **Algorithm 1** from the Must paper:
+
+- `verify()` — top-level entry point, returns `VerifyResult` (AllExecutionsExplored / ErrorFound / DepthLimitReached)
+- `visit()` — recursive exploration of consistent executions
+- `backward_revisit()` — identifies alternative interleavings or message matches
+- `DporConfigT` — configuration: program, max_depth, on_execution observer callback
+
+Programs are defined via `ProgramT` / `ThreadFunctionT` in `include/dpor/algo/program.hpp`.
+
+## PorfCache (Vector Clocks)
+
+`ExplorationGraphT` maintains an optional `PorfCache` for O(1) porf (program-order ∪ reads-from)⁺ reachability:
+
+- Built lazily via `ensure_porf_cache()` using vector clocks
+- When the graph is acyclic (common case), `porf_contains()` uses the cache
+- When a cycle is detected, it falls back to the full relation algebra (`relation_union` + `transitive_closure`)
+- Agents modifying `ExplorationGraphT` should be aware that mutations invalidate the cache
+
+## Test Structure
+
+| Test file | Covers |
+|---|---|
+| `session_test.cpp` | Session/SessionConfig API |
+| `model_types_test.cpp` | Events, labels, ExecutionGraphT |
+| `relation_test.cpp` | Relation concept, ExplicitRelation, ProgramOrderRelation, compose, transitive_closure |
+| `consistency_test.cpp` | AsyncConsistencyCheckerT, all ConsistencyIssueCodes |
+| `exploration_graph_test.cpp` | ExplorationGraphT operations (restrict, with_rf, porf_contains, etc.) |
+| `dpor_test.cpp` | DPOR algorithm end-to-end (paper examples, known execution counts) |
+| `dpor_stress_test.cpp` | Randomized stress tests with multiple seeds |
+| `two_phase_commit_test.cpp` | 2PC protocol example (in `examples/two_phase_commit/`) |
+
 ## Prototype Policy
 
 This codebase is currently a prototype.
