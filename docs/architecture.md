@@ -1,18 +1,52 @@
-# Architecture Notes
+# Architecture
 
-This scaffold starts with a minimal API and is organized to scale toward a full DPOR checker.
+This document describes the high-level architecture of the `dpor` library, a Dynamic Partial Order Reduction (DPOR) checker for distributed protocols.
 
-## Suggested module growth
+The system is organized into three primary layers: **Model**, **Algorithm**, and **API**.
 
-- `include/dpor/model`: events, traces, dependency relation, happens-before graph
-- `include/dpor/algo`: source-DPOR, persistent sets, sleep sets, reduction strategy interfaces
-- `include/dpor/runtime`: scheduler/executor abstractions for system adapters
-- `include/dpor/api`: top-level entry points and stable integration surface
+## 1. Model Layer (`dpor::model`)
 
-## Design constraints
+The model layer defines the formal representation of concurrent executions and their properties.
 
-- Keep public API headers lean and explicit.
-- Avoid global state in exploration logic.
-- Make exploration deterministic when seeded.
-- Separate model extraction from reduction/exploration.
-- In the current prototype scope, model receives as blocking only (no non-blocking receives).
+### Events and Traces
+- **`EventT`**: The fundamental unit of execution. Events include `Send`, `Receive`, and `ND` (non-deterministic choice). Each event is associated with a thread and a unique identifier.
+- **`ExecutionGraphT`**: Represents a single execution of the system. It stores a set of events and the **Reads-From (RF)** relation, which maps receive events to their corresponding send events.
+
+### Relations and Reachability
+- **`Relation`**: Defines the **Program Order (PO)** and **Happens-Before (HB)** relations.
+- **`ExplorationGraphT`**: A specialized version of the execution graph used during DPOR exploration. It includes a **`PorfCache`** (based on vector clocks) that provides $O(1)$ reachability queries for the partial order.
+- **`Consistency`**: The `AsyncConsistencyCheckerT` validates that an execution graph is "consistent" (e.g., no causal cycles, matching send/receive values, no multiple consumes of a single send).
+
+## 2. Algorithm Layer (`dpor::algo`)
+
+The algorithm layer implements the core DPOR engine and the system-under-test (SUT) model.
+
+### Program Representation
+- **`ProgramT`**: Represents the system being checked. It consists of a set of **Thread Functions**, where each thread is a deterministic function of its observed trace.
+- **`ThreadFunctionT`**: A function that takes a thread's local history and returns the next event it will perform.
+
+### DPOR Engine
+- **`dpor.hpp`**: Implements the core DPOR algorithm based on the "revisiting" approach (Enea et al., 2024).
+- **Exploration**: The engine recursively explores the space of consistent executions. It uses **backward revisiting** to identify alternative interleavings or message matches that could lead to new behaviors.
+
+## 3. API Layer (`dpor::api`)
+
+The API layer provides the stable integration surface for users of the library.
+
+- **`Session`**: The primary entry point. A session configures the exploration (e.g., max depth, name) and manages the execution of the DPOR algorithm.
+- **`SessionConfig`**: Allows users to tune parameters like resource limits and exploration strategies.
+
+## 4. Demonstration and Examples (`examples/`)
+
+The library includes examples that demonstrate how to model distributed protocols:
+- **`minimal/`**: A basic example of setting up a `ProgramT` and running a DPOR session.
+- **`two_phase_commit/`**: A more complex case study modeling the Two-Phase Commit (2PC) protocol, including UDP network modeling and simulation logic.
+
+---
+
+## Design Principles
+
+- **Immutability**: Exploration graphs are treated as mostly immutable or copy-on-write to simplify the backtracking logic in the DPOR algorithm.
+- **Determinism**: Given a fixed seed and program, the exploration is fully deterministic.
+- **Separation of Concerns**: The consistency rules (what makes an execution valid) are decoupled from the DPOR algorithm (how to find all valid executions).
+- **Zero Global State**: All state is encapsulated within `Session` or passed explicitly through the exploration recursion.
