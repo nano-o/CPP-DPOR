@@ -261,7 +261,7 @@ class ExplorationGraphT {
     }
     ensure_porf_cache();
     if (porf_cache_->has_cycle) {
-      return porf_contains_fallback(from, to);
+      throw std::logic_error("porf_contains called on a graph with a causal cycle");
     }
     if (from == to) {
       return false;  // Acyclic graph: no self-loops in strict transitive closure.
@@ -447,15 +447,6 @@ class ExplorationGraphT {
     }
 
     porf_cache_ = std::move(cache);
-  }
-
-  // BFS fallback for porf_contains when graph has a cycle.
-  [[nodiscard]] bool porf_contains_fallback(EventId from, EventId to) const {
-    const auto po = po_relation();
-    const auto rf = rf_relation();
-    const auto porf = relation_union(po, rf);
-    const auto porf_plus = transitive_closure(porf);
-    return porf_plus.contains(from, to);
   }
 };
 

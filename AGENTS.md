@@ -106,8 +106,8 @@ Programs are defined via `ProgramT` / `ThreadFunctionT` in `include/dpor/algo/pr
 `ExplorationGraphT` maintains an optional `PorfCache` for O(1) porf (program-order ∪ reads-from)⁺ reachability:
 
 - Built lazily via `ensure_porf_cache()` using vector clocks
-- When the graph is acyclic (common case), `porf_contains()` uses the cache
-- When a cycle is detected, it falls back to the full relation algebra (`relation_union` + `transitive_closure`)
+- `porf_contains()` requires an acyclic graph; calling it on a cyclic graph throws `std::logic_error`
+- This is safe because the DPOR engine only calls `porf_contains` on consistent graphs, and causal cycles are a consistency violation
 - Agents modifying `ExplorationGraphT` should be aware that mutations invalidate the cache
 
 ## Test Structure
