@@ -23,7 +23,7 @@ The algorithm layer implements the core DPOR engine and the system-under-test (S
 
 ### Program Representation
 - **`ProgramT`**: Represents the system being checked. It consists of a set of **Thread Functions**, where each thread is a deterministic function of its observed trace.
-- **`ThreadFunctionT`**: A function that takes a thread's local history and returns the next event it will perform. Thread functions should not emit `Block`; DPOR inserts `Block` internally when a blocking receive has no compatible unread send.
+- **`ThreadFunctionT`**: A function that takes a thread's local history and returns the next event it will perform. The history contains only values observed from receives (`rf`) and nondeterministic choices; it does not include send/block/error events. The separate `step` argument is therefore required to represent local control-flow progress. Thread functions should not emit `Block`; DPOR inserts `Block` internally when a blocking receive has no compatible unread send.
 
 ### DPOR Engine
 - **`dpor.hpp`**: Implements the core DPOR algorithm based on the "revisiting" approach (Enea et al., 2024).

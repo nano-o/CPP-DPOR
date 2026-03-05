@@ -5,8 +5,10 @@
 // that returns the next event label given the trace of values observed so far
 // (from receives via rf and ND choices, in program order) and the step count
 // (number of events this thread has produced so far).
-// The step count allows send-only threads to know when to stop without
-// relying on mutable captured state.
+// The trace intentionally excludes send/block/error events, so trace length is
+// not a program counter. The step parameter carries that control-state signal
+// and allows send-only threads to know when to stop without relying on mutable
+// captured state.
 
 #include "dpor/model/event.hpp"
 
@@ -26,6 +28,8 @@ using ThreadTraceT = std::vector<ValueT>;
 // correctness (soundness and completeness) depends on this invariant.
 // Stateful captures or external side effects will silently invalidate
 // exploration guarantees.
+// Because sends are not included in trace, callers must use `step` (not
+// trace.size()) to determine local control-flow progress.
 //
 // Must-style blocking semantics: user thread functions should not return
 // BlockLabel. DPOR injects Block events internally when a blocking receive has
