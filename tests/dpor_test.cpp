@@ -477,6 +477,200 @@ TEST_CASE("program thread function returning BlockLabel is rejected", "[algo][dp
   REQUIRE_THROWS_AS(verify(config), std::logic_error);
 }
 
+TEST_CASE("internal block suspends thread progress until receive is rescheduled", "[algo][dpor][regression]") {
+  Program program;
+
+  // T1: blocking receive, then send to T3.
+  program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return make_receive_label<Value>();
+    }
+    if (step == 1) {
+      return SendLabel{.destination = 3, .value = "done"};
+    }
+    return std::nullopt;
+  };
+
+  // T2: provide the message that eventually unblocks T1.
+  program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "msg"};
+    }
+    return std::nullopt;
+  };
+
+  // T3: receive T1's "done".
+  program.threads[3] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+    if (trace.empty()) {
+      return make_receive_label_from_values<Value>({"done"});
+    }
+    return std::nullopt;
+  };
+
+  // At the empty graph, T1 has no compatible send and must be internally blocked.
+  const auto first = dpor::algo::detail::compute_next_event(program, ExplorationGraph{});
+  REQUIRE(first.has_value());
+  REQUIRE(first->first == 1);
+  REQUIRE(std::holds_alternative<BlockLabel>(first->second));
+
+  DporConfig config;
+  config.program = program;
+
+  bool saw_completed_graph_with_block = false;
+  bool saw_bad_t1_prefix = false;
+  bool saw_bad_t3_receive = false;
+
+  config.on_execution = [&](const ExplorationGraph& graph) {
+    for (const auto& evt : graph.events()) {
+      if (is_block(evt)) {
+        saw_completed_graph_with_block = true;
+      }
+    }
+
+    const auto t1_e0 = find_event_id_by_thread_index(graph, 1, 0);
+    const auto t1_e1 = find_event_id_by_thread_index(graph, 1, 1);
+    if (t1_e0 == ExplorationGraph::kNoSource ||
+        t1_e1 == ExplorationGraph::kNoSource ||
+        !is_receive(graph.event(t1_e0))) {
+      saw_bad_t1_prefix = true;
+      return;
+    }
+
+    const auto* t1_send = as_send(graph.event(t1_e1));
+    if (t1_send == nullptr || t1_send->destination != 3 || t1_send->value != "done") {
+      saw_bad_t1_prefix = true;
+      return;
+    }
+
+    const auto t3_recv = find_event_id_by_thread_index(graph, 3, 0);
+    if (t3_recv == ExplorationGraph::kNoSource || !is_receive(graph.event(t3_recv))) {
+      saw_bad_t3_receive = true;
+      return;
+    }
+    const auto rf_it = graph.reads_from().find(t3_recv);
+    if (rf_it == graph.reads_from().end()) {
+      saw_bad_t3_receive = true;
+      return;
+    }
+
+    const auto* src = as_send(graph.event(rf_it->second));
+    if (src == nullptr || src->value != "done" || graph.event(rf_it->second).thread != 1) {
+      saw_bad_t3_receive = true;
+      return;
+    }
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE_FALSE(saw_completed_graph_with_block);
+  REQUIRE_FALSE(saw_bad_t1_prefix);
+  REQUIRE_FALSE(saw_bad_t3_receive);
+}
+
+TEST_CASE("multiple blocked receives are both rescheduled when matching sends appear",
+    "[algo][dpor][regression]") {
+  Program program;
+
+  // Two receiver threads that start blocked until sends arrive.
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"a", "a2"});
+    }
+    return std::nullopt;
+  };
+  program.threads[2] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"b", "b2"});
+    }
+    return std::nullopt;
+  };
+
+  // Two senders that eventually provide matching values for both receivers.
+  program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "a"};
+    }
+    if (step == 1) {
+      return SendLabel{.destination = 2, .value = "b"};
+    }
+    return std::nullopt;
+  };
+  program.threads[4] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "a2"};
+    }
+    if (step == 1) {
+      return SendLabel{.destination = 2, .value = "b2"};
+    }
+    return std::nullopt;
+  };
+
+  // At the beginning, both receiver threads should become internally blocked.
+  ExplorationGraph partial;
+  const auto first = dpor::algo::detail::compute_next_event(program, partial);
+  REQUIRE(first.has_value());
+  REQUIRE(first->first == 1);
+  REQUIRE(std::holds_alternative<BlockLabel>(first->second));
+  static_cast<void>(partial.add_event(first->first, first->second));
+
+  const auto second = dpor::algo::detail::compute_next_event(program, partial);
+  REQUIRE(second.has_value());
+  REQUIRE(second->first == 2);
+  REQUIRE(std::holds_alternative<BlockLabel>(second->second));
+
+  DporConfig config;
+  config.program = program;
+
+  bool saw_completed_graph_with_block = false;
+  bool missing_receiver_event = false;
+  std::set<std::string> t1_received_values;
+  std::set<std::string> t2_received_values;
+
+  config.on_execution = [&](const ExplorationGraph& graph) {
+    for (const auto& evt : graph.events()) {
+      if (is_block(evt)) {
+        saw_completed_graph_with_block = true;
+      }
+    }
+
+    const auto t1_recv = find_event_id_by_thread_index(graph, 1, 0);
+    const auto t2_recv = find_event_id_by_thread_index(graph, 2, 0);
+    if (t1_recv == ExplorationGraph::kNoSource ||
+        t2_recv == ExplorationGraph::kNoSource ||
+        !is_receive(graph.event(t1_recv)) ||
+        !is_receive(graph.event(t2_recv))) {
+      missing_receiver_event = true;
+      return;
+    }
+
+    const auto rf1 = graph.reads_from().find(t1_recv);
+    const auto rf2 = graph.reads_from().find(t2_recv);
+    if (rf1 == graph.reads_from().end() || rf2 == graph.reads_from().end()) {
+      missing_receiver_event = true;
+      return;
+    }
+
+    const auto* src1 = as_send(graph.event(rf1->second));
+    const auto* src2 = as_send(graph.event(rf2->second));
+    if (src1 == nullptr || src2 == nullptr) {
+      missing_receiver_event = true;
+      return;
+    }
+
+    t1_received_values.insert(src1->value);
+    t2_received_values.insert(src2->value);
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 4);
+  REQUIRE_FALSE(saw_completed_graph_with_block);
+  REQUIRE_FALSE(missing_receiver_event);
+  REQUIRE(t1_received_values == std::set<std::string>{"a", "a2"});
+  REQUIRE(t2_received_values == std::set<std::string>{"b", "b2"});
+}
+
 // --- ND choice affects subsequent behavior ---
 
 TEST_CASE("ND choice value visible in subsequent trace", "[algo][dpor]") {
