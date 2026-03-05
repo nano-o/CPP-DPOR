@@ -1,4 +1,4 @@
-# Two-Phase Commit Example
+# Two-Phase Commit + Timers Example
 
 This example applies the DPOR model checker to a real Two-Phase Commit (2PC)
 implementation. The protocol code is runnable over real UDP -- the
@@ -11,7 +11,7 @@ model-checking adapter accommodates the protocol, not the other way around.
 | `protocol.hpp` | 2PC protocol: `Coordinator`, `Participant`, `Environment` interface |
 | `udp_network.hpp` | Real UDP `Environment` implementation |
 | `simulation.hpp` | DPOR adapter: `SimEnvironment` + `ThreadFunction` factories |
-| `two_phase_commit_test.cpp` | Catch2 tests: DPOR invariant checks + UDP integration tests |
+| `two_phase_commit_test.cpp` | Catch2 tests: DPOR invariant checks + UDP integration tests + timer behavior tests |
 
 ## Design intent
 
@@ -47,16 +47,25 @@ The environment drives protocol progress:
 ## The Environment interface
 
 ```cpp
+class Environment;
+
+using TimerId = std::size_t;
+using TimerCallback = std::function<void(Environment&)>;
+
 class Environment {
  public:
   virtual void send(ParticipantId destination, const Message& msg) = 0;
   virtual Vote get_vote() = 0;
+  virtual void set_timer(TimerId id, std::size_t timeout_ms,
+                         TimerCallback callback) = 0;
+  virtual void cancel_timer(TimerId id) = 0;
 };
 ```
 
 This is called `Environment` rather than `Network` because `get_vote()` is not
 a networking operation -- it's a query to the external environment for a
-participant's vote decision.
+participant's vote decision. Timer operations are also part of the environment
+contract.
 
 ## Nondeterminism
 
@@ -100,10 +109,27 @@ simple replay strategy:
 
 The cost is O(step) per call, which is negligible for small protocols.
 
+## Timers and current DPOR scope
+
+This timeout variant extends the environment with `set_timer()` /
+`cancel_timer()` and exercises timer behavior in the UDP runtime.
+
+- The coordinator sets a vote-collection timer in `start()`. If the timer
+  fires before all unique participant votes arrive, it broadcasts
+  `DECISION ABORT` and transitions to ack collection.
+- Current limitation: there is no ack-collection timeout. After deciding
+  (including timeout-triggered Abort), the coordinator still waits for unique
+  acks from all participants. If some participants never process the decision,
+  coordinator completion is not guaranteed.
+- `UdpEnvironment` implements timers and dispatches callbacks inside `run()`.
+- `SimEnvironment` timer methods are currently stubs.
+- DPOR exploration in this example currently models message/vote/crash behavior,
+  not timer events.
+
 ## UDP runtime behavior
 
 - `UdpEnvironment::run(protocol)` is single-use per environment instance.
-- A background receiver thread reads datagrams and enqueues decoded messages.
+- Socket I/O and timer dispatch are driven on the same thread via `poll()`.
 - Malformed UDP datagrams are dropped (they do not crash the process).
 
 ## Verified properties
@@ -114,6 +140,13 @@ The tests check the following invariants across all DPOR-explored executions:
 - **Validity**: if the decision is Commit, then every participant voted Yes.
 - **Crash safety**: when the coordinator crashes between phases, no participant
   receives a decision.
+
+The UDP tests additionally check runtime timer behavior:
+
+- timer callback fires without incoming UDP traffic
+- canceled timer does not fire
+- replacing a timer id keeps only the newest callback
+- shutdown is clean even with pending timers
 
 ## Error handling
 
@@ -138,7 +171,13 @@ implementation.
 ```bash
 cmake --preset debug
 cmake --build --preset debug
-ctest --test-dir build/debug -R "2PC|UDP"
+
+# DPOR exploration/invariants for the timeout example:
+./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[two_phase_commit]"
+
+# UDP transport + timer behavior:
+./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[udp]"
+./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[timer]"
 ```
 
 ## Debugging with gdb
@@ -146,7 +185,7 @@ ctest --test-dir build/debug -R "2PC|UDP"
 To debug an unexpected protocol exception, catch C++ throws:
 
 ```bash
-gdb ./build/debug/examples/two_phase_commit/dpor_two_phase_commit_test
+gdb ./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test
 (gdb) catch throw
 (gdb) run "[two_phase_commit]"
 (gdb) bt
