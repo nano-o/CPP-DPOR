@@ -13,6 +13,8 @@
 
 #include <array>
 #include <cstring>
+#include <optional>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -26,7 +28,7 @@ class UdpEnvironment : public Environment {
       ParticipantId my_id,
       std::unordered_map<ParticipantId, std::pair<std::string, uint16_t>>
           port_map,
-      Vote vote = Vote::Yes)
+      std::optional<Vote> vote = std::nullopt)
       : my_id_(my_id), port_map_(std::move(port_map)), vote_(vote) {
     socket_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (socket_fd_ < 0) {
@@ -93,14 +95,21 @@ class UdpEnvironment : public Environment {
         std::string(buf.data(), static_cast<std::size_t>(n)));
   }
 
-  Vote get_vote() override { return vote_; }
+  Vote get_vote() override {
+    if (vote_) {
+      return *vote_;
+    }
+    thread_local std::mt19937 rng{std::random_device{}()};
+    std::bernoulli_distribution dist(0.5);
+    return dist(rng) ? Vote::Yes : Vote::No;
+  }
 
  private:
   ParticipantId my_id_;
   int socket_fd_{-1};
   std::unordered_map<ParticipantId, std::pair<std::string, uint16_t>>
       port_map_;
-  Vote vote_;
+  std::optional<Vote> vote_;
 };
 
 }  // namespace tpc

@@ -428,3 +428,39 @@ TEST_CASE("UDP: full 2PC protocol run with a No vote aborts",
   REQUIRE(p1.outcome() == tpc::Decision::Abort);
   REQUIRE(p2.outcome() == tpc::Decision::Abort);
 }
+
+TEST_CASE("UDP: repeated random-vote runs satisfy agreement",
+          "[two_phase_commit][udp]") {
+  constexpr std::size_t kN = 2;
+  constexpr int kRuns = 20;
+
+  for (int run = 0; run < kRuns; ++run) {
+    auto pm = make_localhost_port_map(kN);
+
+    tpc::Coordinator coord(kN);
+    tpc::Participant p1(1);
+    tpc::Participant p2(2);
+
+    // No vote argument — each participant picks a random vote.
+    tpc::UdpEnvironment env_coord(tpc::kCoordinator, pm);
+    tpc::UdpEnvironment env_p1(1, pm);
+    tpc::UdpEnvironment env_p2(2, pm);
+
+    std::thread t_coord([&] { coord.run(env_coord); });
+    std::thread t_p1([&] { p1.run(env_p1); });
+    std::thread t_p2([&] { p2.run(env_p2); });
+
+    t_coord.join();
+    t_p1.join();
+    t_p2.join();
+
+    // All nodes must have reached a decision.
+    REQUIRE(coord.decision().has_value());
+    REQUIRE(p1.outcome().has_value());
+    REQUIRE(p2.outcome().has_value());
+
+    // Agreement: every participant got the same decision as the coordinator.
+    REQUIRE(p1.outcome() == coord.decision());
+    REQUIRE(p2.outcome() == coord.decision());
+  }
+}
