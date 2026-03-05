@@ -5,6 +5,9 @@
 // Real, runnable 2PC logic with no model-checking awareness.
 // Coordinator and Participants communicate over an abstract Environment
 // interface, which can be backed by real UDP or a DPOR simulation adapter.
+//
+// The protocol is driven by the environment: the environment calls start()
+// once, then feeds incoming messages via receive() until the protocol is done.
 
 #include <cstddef>
 #include <optional>
@@ -126,9 +129,6 @@ class Environment {
   // (kCoordinator for coordinator, 1..N for participants).
   virtual void send(ParticipantId destination, const Message& msg) = 0;
 
-  // Blocking receive: returns the next incoming message.
-  virtual Message receive() = 0;
-
   // Query the environment for this participant's vote.
   virtual Vote get_vote() = 0;
 };
@@ -143,38 +143,58 @@ class Coordinator {
                        bool bug_on_p1_no = false)
       : num_participants_(num_participants), bug_on_p1_no_(bug_on_p1_no) {}
 
-  void run(Environment& env) {
-    // Phase 1: send Prepare to all participants.
+  // Kick off the protocol: sends Prepare to all participants.
+  // Returns true if the protocol needs incoming messages, false if done.
+  bool start(Environment& env) {
+    phase_ = Phase::CollectingVotes;
+    all_yes_ = true;
+    votes_received_ = 0;
+    acks_received_ = 0;
+    decision_ = std::nullopt;
+
     for (std::size_t pid = 1; pid <= num_participants_; ++pid) {
       env.send(pid, Prepare{});
     }
+    return true;
+  }
 
-    // Phase 1: collect votes.
-    bool all_yes = true;
-    for (std::size_t i = 0; i < num_participants_; ++i) {
-      auto msg = env.receive();
-      const auto* vote = std::get_if<VoteMsg>(&msg);
-      if (vote == nullptr || vote->vote == Vote::No) {
-        all_yes = false;
-        // Simulated implementation bug: crash on No vote from participant 1.
-        if (bug_on_p1_no_ && vote != nullptr && vote->from == 1) {
-          throw std::logic_error(
-              "BUG: coordinator cannot handle No vote from participant 1");
+  // Process one incoming message.
+  // Returns true if the protocol needs more messages, false if done.
+  bool receive(Environment& env, const Message& msg) {
+    switch (phase_) {
+      case Phase::CollectingVotes: {
+        const auto* vote = std::get_if<VoteMsg>(&msg);
+        if (vote == nullptr || vote->vote == Vote::No) {
+          all_yes_ = false;
+          if (bug_on_p1_no_ && vote != nullptr && vote->from == 1) {
+            throw std::logic_error(
+                "BUG: coordinator cannot handle No vote from participant 1");
+          }
         }
+        ++votes_received_;
+        if (votes_received_ < num_participants_) {
+          return true;
+        }
+        // All votes collected — send decision.
+        decision_ = all_yes_ ? Decision::Commit : Decision::Abort;
+        for (std::size_t pid = 1; pid <= num_participants_; ++pid) {
+          env.send(pid, DecisionMsg{*decision_});
+        }
+        phase_ = Phase::CollectingAcks;
+        return true;
       }
+      case Phase::CollectingAcks: {
+        ++acks_received_;
+        if (acks_received_ < num_participants_) {
+          return true;
+        }
+        phase_ = Phase::Done;
+        return false;
+      }
+      case Phase::Done:
+        return false;
     }
-
-    decision_ = all_yes ? Decision::Commit : Decision::Abort;
-
-    // Phase 2: send decision to all participants.
-    for (std::size_t pid = 1; pid <= num_participants_; ++pid) {
-      env.send(pid, DecisionMsg{*decision_});
-    }
-
-    // Phase 2: collect acks.
-    for (std::size_t i = 0; i < num_participants_; ++i) {
-      env.receive();
-    }
+    return false;
   }
 
   [[nodiscard]] std::optional<Decision> decision() const noexcept {
@@ -182,9 +202,16 @@ class Coordinator {
   }
 
  private:
+  enum class Phase { CollectingVotes, CollectingAcks, Done };
+
   std::size_t num_participants_;
   bool bug_on_p1_no_;
   std::optional<Decision> decision_;
+
+  Phase phase_ = Phase::CollectingVotes;
+  bool all_yes_ = true;
+  std::size_t votes_received_ = 0;
+  std::size_t acks_received_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -195,25 +222,39 @@ class Participant {
  public:
   explicit Participant(ParticipantId id) : id_(id) {}
 
-  void run(Environment& env) {
-    // Wait for Prepare.
-    env.receive();
+  // Kick off the protocol: participant waits for Prepare, so it just
+  // signals that it needs a message.
+  // Returns true if the protocol needs incoming messages, false if done.
+  bool start(Environment& /*env*/) {
+    state_ = State::WaitPrepare;
+    outcome_ = std::nullopt;
+    return true;
+  }
 
-    // Ask environment for our vote.
-    auto vote = env.get_vote();
-
-    // Send vote.
-    env.send(kCoordinator, VoteMsg{id_, vote});
-
-    // Wait for decision.
-    auto msg = env.receive();
-    const auto* dec = std::get_if<DecisionMsg>(&msg);
-    if (dec != nullptr) {
-      outcome_ = dec->decision;
+  // Process one incoming message.
+  // Returns true if the protocol needs more messages, false if done.
+  bool receive(Environment& env, const Message& msg) {
+    switch (state_) {
+      case State::WaitPrepare: {
+        // Got Prepare — vote and send it.
+        auto vote = env.get_vote();
+        env.send(kCoordinator, VoteMsg{id_, vote});
+        state_ = State::WaitDecision;
+        return true;
+      }
+      case State::WaitDecision: {
+        const auto* dec = std::get_if<DecisionMsg>(&msg);
+        if (dec != nullptr) {
+          outcome_ = dec->decision;
+        }
+        env.send(kCoordinator, Ack{id_});
+        state_ = State::Done;
+        return false;
+      }
+      case State::Done:
+        return false;
     }
-
-    // Send ack.
-    env.send(kCoordinator, Ack{id_});
+    return false;
   }
 
   [[nodiscard]] ParticipantId id() const noexcept { return id_; }
@@ -222,7 +263,10 @@ class Participant {
   }
 
  private:
+  enum class State { WaitPrepare, WaitDecision, Done };
+
   ParticipantId id_;
+  State state_ = State::WaitPrepare;
   std::optional<Decision> outcome_;
 };
 

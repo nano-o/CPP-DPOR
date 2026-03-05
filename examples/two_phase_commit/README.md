@@ -17,10 +17,32 @@ model-checking adapter accommodates the protocol, not the other way around.
 
 The goal is to demonstrate that the DPOR engine can verify properties of
 **existing, production-style code**. The protocol has no awareness of model
-checking -- it calls `env.send()`, `env.receive()`, and `env.get_vote()` on an
-abstract `Environment` interface. The same `Coordinator` and `Participant`
-classes work with both `UdpEnvironment` (real sockets) and `SimEnvironment`
-(DPOR exploration).
+checking. It exposes an event-driven interface (`start()` + `receive()`) and
+uses a minimal abstract `Environment`. The same `Coordinator` and
+`Participant` classes work with both `UdpEnvironment` (real sockets) and
+`SimEnvironment` (DPOR exploration).
+
+## Protocol interface
+
+```cpp
+class Coordinator {
+ public:
+  bool start(Environment& env);
+  bool receive(Environment& env, const Message& msg);
+};
+
+class Participant {
+ public:
+  bool start(Environment& env);
+  bool receive(Environment& env, const Message& msg);
+};
+```
+
+The environment drives protocol progress:
+
+1. Call `start()` once.
+2. While it returns/requests more input, feed messages through `receive()`.
+3. Stop when `receive()` returns `false`.
 
 ## The Environment interface
 
@@ -28,7 +50,6 @@ classes work with both `UdpEnvironment` (real sockets) and `SimEnvironment`
 class Environment {
  public:
   virtual void send(ParticipantId destination, const Message& msg) = 0;
-  virtual Message receive() = 0;
   virtual Vote get_vote() = 0;
 };
 ```
@@ -46,7 +67,7 @@ construction time.
 
 ### Votes
 
-The participant calls `env.get_vote()` after receiving a Prepare message. In
+The participant calls `env.get_vote()` after processing `Prepare`. In
 the simulation, `SimEnvironment` intercepts this call and produces a
 `NondeterministicChoiceLabel` with choices `{"YES", "NO"}`. The DPOR engine
 explores both branches. In the real UDP implementation, `UdpEnvironment` simply
@@ -70,13 +91,19 @@ simple replay strategy:
 
 1. Each `ThreadFunction` call creates a fresh protocol object and
    `SimEnvironment`.
-2. `run()` is launched in a real OS thread.
+2. `run_and_capture()` drives the protocol directly via `start()` /
+   `receive()`.
 3. `SimEnvironment` fast-forwards through past I/O operations (replaying
    receive values and nondeterministic choices from the trace), then captures
    the current I/O operation as a DPOR `EventLabel`.
-4. The DPOR thread collects the label and tears down the OS thread.
 
 The cost is O(step) per call, which is negligible for small protocols.
+
+## UDP runtime behavior
+
+- `UdpEnvironment::run(protocol)` is single-use per environment instance.
+- A background receiver thread reads datagrams and enqueues decoded messages.
+- Malformed UDP datagrams are dropped (they do not crash the process).
 
 ## Verified properties
 
@@ -91,8 +118,8 @@ The tests check the following invariants across all DPOR-explored executions:
 
 If the protocol implementation throws an unexpected exception during DPOR
 exploration, the model checker **stops immediately**. The exception propagates
-from the worker thread through `run_and_capture` → the `ThreadFunction` → the
-DPOR engine's `verify()` call. This is a deliberate fail-fast design: a
+through `run_and_capture` → the `ThreadFunction` → the DPOR engine's `verify()`
+call. This is a deliberate fail-fast design: a
 protocol bug should not be silently absorbed and produce a false "all executions
 safe" result.
 
@@ -115,12 +142,11 @@ ctest --test-dir build/debug -R "2PC|UDP"
 
 ## Debugging with gdb
 
-To debug an unexpected protocol exception, break on `mark_failed` -- it is only
-called for unexpected exceptions, so simulation-internal ones are skipped:
+To debug an unexpected protocol exception, catch C++ throws:
 
 ```bash
 gdb ./build/debug/examples/two_phase_commit/dpor_two_phase_commit_test
-(gdb) break tpc_sim::SimEnvironment::mark_failed
+(gdb) catch throw
 (gdb) run "[two_phase_commit]"
 (gdb) bt
 ```

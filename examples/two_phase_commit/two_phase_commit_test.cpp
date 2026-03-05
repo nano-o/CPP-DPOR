@@ -351,11 +351,22 @@ TEST_CASE("UDP: send and receive a single message over localhost",
   tpc::UdpEnvironment sender(tpc::kCoordinator, pm);
   tpc::UdpEnvironment receiver(1, pm);
 
+  // Use a trivial one-message protocol to test send/receive.
+  struct OneReceiver {
+    tpc::Message received;
+    bool start(tpc::Environment& /*env*/) { return true; }
+    bool receive(tpc::Environment& /*env*/, const tpc::Message& msg) {
+      received = msg;
+      return false;
+    }
+  };
+
   tpc::Message sent = tpc::Prepare{};
   sender.send(1, sent);
 
-  tpc::Message got = receiver.receive();
-  REQUIRE(std::holds_alternative<tpc::Prepare>(got));
+  OneReceiver proto;
+  receiver.run(proto);
+  REQUIRE(std::holds_alternative<tpc::Prepare>(proto.received));
 }
 
 TEST_CASE("UDP: send and receive VoteMsg preserves fields",
@@ -368,8 +379,18 @@ TEST_CASE("UDP: send and receive VoteMsg preserves fields",
   participant_env.send(tpc::kCoordinator,
                        tpc::VoteMsg{1, tpc::Vote::Yes});
 
-  auto got = coordinator_env.receive();
-  const auto* vote = std::get_if<tpc::VoteMsg>(&got);
+  struct OneReceiver {
+    tpc::Message received;
+    bool start(tpc::Environment& /*env*/) { return true; }
+    bool receive(tpc::Environment& /*env*/, const tpc::Message& msg) {
+      received = msg;
+      return false;
+    }
+  };
+
+  OneReceiver proto;
+  coordinator_env.run(proto);
+  const auto* vote = std::get_if<tpc::VoteMsg>(&proto.received);
   REQUIRE(vote != nullptr);
   REQUIRE(vote->from == 1);
   REQUIRE(vote->vote == tpc::Vote::Yes);
@@ -385,14 +406,14 @@ TEST_CASE("UDP: full 2PC protocol run with all-Yes votes commits",
   tpc::Participant p2(2);
 
   // Create all environments on the main thread so every socket is bound
-  // before any thread starts sending.  Vote is passed to the environment.
+  // before any thread starts sending.
   tpc::UdpEnvironment env_coord(tpc::kCoordinator, pm);
   tpc::UdpEnvironment env_p1(1, pm, tpc::Vote::Yes);
   tpc::UdpEnvironment env_p2(2, pm, tpc::Vote::Yes);
 
-  std::thread t_coord([&] { coord.run(env_coord); });
-  std::thread t_p1([&] { p1.run(env_p1); });
-  std::thread t_p2([&] { p2.run(env_p2); });
+  std::thread t_coord([&] { env_coord.run(coord); });
+  std::thread t_p1([&] { env_p1.run(p1); });
+  std::thread t_p2([&] { env_p2.run(p2); });
 
   t_coord.join();
   t_p1.join();
@@ -416,9 +437,9 @@ TEST_CASE("UDP: full 2PC protocol run with a No vote aborts",
   tpc::UdpEnvironment env_p1(1, pm, tpc::Vote::Yes);
   tpc::UdpEnvironment env_p2(2, pm, tpc::Vote::No);
 
-  std::thread t_coord([&] { coord.run(env_coord); });
-  std::thread t_p1([&] { p1.run(env_p1); });
-  std::thread t_p2([&] { p2.run(env_p2); });
+  std::thread t_coord([&] { env_coord.run(coord); });
+  std::thread t_p1([&] { env_p1.run(p1); });
+  std::thread t_p2([&] { env_p2.run(p2); });
 
   t_coord.join();
   t_p1.join();
@@ -446,9 +467,9 @@ TEST_CASE("UDP: repeated random-vote runs satisfy agreement",
     tpc::UdpEnvironment env_p1(1, pm);
     tpc::UdpEnvironment env_p2(2, pm);
 
-    std::thread t_coord([&] { coord.run(env_coord); });
-    std::thread t_p1([&] { p1.run(env_p1); });
-    std::thread t_p2([&] { p2.run(env_p2); });
+    std::thread t_coord([&] { env_coord.run(coord); });
+    std::thread t_p1([&] { env_p1.run(p1); });
+    std::thread t_p2([&] { env_p2.run(p2); });
 
     t_coord.join();
     t_p1.join();
@@ -463,4 +484,63 @@ TEST_CASE("UDP: repeated random-vote runs satisfy agreement",
     REQUIRE(p1.outcome() == coord.decision());
     REQUIRE(p2.outcome() == coord.decision());
   }
+}
+
+TEST_CASE("UDP: run() is single-use per environment",
+          "[two_phase_commit][udp]") {
+  constexpr std::size_t kN = 1;
+  auto pm = make_localhost_port_map(kN);
+
+  tpc::Coordinator coord(kN);
+  tpc::Participant p1(1);
+
+  tpc::UdpEnvironment env_coord(tpc::kCoordinator, pm);
+  tpc::UdpEnvironment env_p1(1, pm, tpc::Vote::Yes);
+
+  std::thread t_coord([&] { env_coord.run(coord); });
+  std::thread t_p1([&] { env_p1.run(p1); });
+
+  t_coord.join();
+  t_p1.join();
+
+  tpc::Coordinator coord2(kN);
+  REQUIRE_THROWS_AS(env_coord.run(coord2), std::logic_error);
+}
+
+TEST_CASE("UDP: malformed datagrams are skipped without crashing",
+          "[two_phase_commit][udp]") {
+  constexpr std::size_t kN = 1;
+  auto pm = make_localhost_port_map(kN);
+
+  tpc::Coordinator coord(kN);
+  tpc::Participant p1(1);
+
+  tpc::UdpEnvironment env_coord(tpc::kCoordinator, pm);
+  tpc::UdpEnvironment env_p1(1, pm, tpc::Vote::Yes);
+
+  // Send garbage to the coordinator before starting the protocol.
+  // It should be silently discarded by the receiver thread.
+  int raw_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+  REQUIRE(raw_fd >= 0);
+  sockaddr_in coord_addr{};
+  coord_addr.sin_family = AF_INET;
+  coord_addr.sin_port = htons(pm[tpc::kCoordinator].second);
+  ::inet_pton(AF_INET, "127.0.0.1", &coord_addr.sin_addr);
+
+  const char* junk = "NOT_A_VALID_MESSAGE !!!";
+  auto sent = ::sendto(raw_fd, junk, std::strlen(junk), 0,
+                       reinterpret_cast<sockaddr*>(&coord_addr),
+                       sizeof(coord_addr));
+  ::close(raw_fd);
+  REQUIRE(sent == static_cast<ssize_t>(std::strlen(junk)));
+
+  // The protocol should still complete normally despite the junk datagram.
+  std::thread t_coord([&] { env_coord.run(coord); });
+  std::thread t_p1([&] { env_p1.run(p1); });
+
+  t_coord.join();
+  t_p1.join();
+
+  REQUIRE(coord.decision() == tpc::Decision::Commit);
+  REQUIRE(p1.outcome() == tpc::Decision::Commit);
 }

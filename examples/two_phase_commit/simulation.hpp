@@ -3,12 +3,12 @@
 // DPOR simulation adapter for Two-Phase Commit.
 //
 // Bridges the real tpc::Environment interface to the DPOR engine by
-// intercepting send/receive/get_vote calls and injecting crash
-// nondeterminism.
+// intercepting send/get_vote calls and injecting crash nondeterminism.
 //
 // Core idea: each ThreadFunction call creates a fresh protocol object and
-// SimEnvironment, launches run() in a real OS thread, fast-forwards through
-// past I/O, and captures the current I/O as a DPOR EventLabel.
+// SimEnvironment, drives it via start()/receive() (the event-driven protocol
+// interface), fast-forwards through past I/O, and captures the current I/O
+// as a DPOR EventLabel.
 
 #include "protocol.hpp"
 
@@ -59,8 +59,6 @@ class SimEnvironment : public tpc::Environment {
         inject_crash_(inject_crash) {}
 
   void send(tpc::ParticipantId dest, const tpc::Message& msg) override {
-    std::unique_lock lock(mu_);
-
     // Crash injection: when the coordinator is about to send a DecisionMsg
     // for the first time, inject a nondeterministic crash choice.
     if (inject_crash_ && !crash_injected_ &&
@@ -72,7 +70,6 @@ class SimEnvironment : public tpc::Environment {
         // Fast-forward: read crash choice from trace.
         auto idx = trace_offset_ + trace_consume_count_++;
         if (trace_.at(idx) == "crash") {
-          // Crash chosen: abort the protocol thread.
           throw CrashInjected{};
         }
         // "no_crash": fall through to process the actual send below.
@@ -82,9 +79,6 @@ class SimEnvironment : public tpc::Environment {
             .value = {},
             .choices = {"no_crash", "crash"},
         };
-        protocol_ready_ = true;
-        cv_.notify_all();
-        cv_.wait(lock, [this] { return dpor_ready_; });
         throw StepBoundaryReached{};
       }
     }
@@ -101,36 +95,10 @@ class SimEnvironment : public tpc::Environment {
         .destination = id_map_(dest),
         .value = tpc::serialize(msg),
     };
-    protocol_ready_ = true;
-    cv_.notify_all();
-
-    // Wait for DPOR thread to acknowledge (it will tear down the thread).
-    cv_.wait(lock, [this] { return dpor_ready_; });
-    throw StepBoundaryReached{};
-  }
-
-  tpc::Message receive() override {
-    std::unique_lock lock(mu_);
-    auto current = io_count_++;
-
-    if (current < target_io_) {
-      // Fast-forward: past receive, replay value from trace.
-      auto idx = trace_offset_ + trace_consume_count_++;
-      return tpc::deserialize(trace_.at(idx));
-    }
-
-    // This is the target I/O operation.
-    result_ = dpor::model::make_receive_label<dpor::model::Value>();
-    protocol_ready_ = true;
-    cv_.notify_all();
-
-    // Wait for DPOR thread to acknowledge (never returns to protocol).
-    cv_.wait(lock, [this] { return dpor_ready_; });
     throw StepBoundaryReached{};
   }
 
   tpc::Vote get_vote() override {
-    std::unique_lock lock(mu_);
     auto current = io_count_++;
 
     if (current < target_io_) {
@@ -144,60 +112,27 @@ class SimEnvironment : public tpc::Environment {
         .value = {},
         .choices = {"YES", "NO"},
     };
-    protocol_ready_ = true;
-    cv_.notify_all();
-
-    // Wait for DPOR thread to acknowledge (never returns to protocol).
-    cv_.wait(lock, [this] { return dpor_ready_; });
     throw StepBoundaryReached{};
   }
 
-  // Called by the wrapper after run() returns, indicating the protocol
-  // finished before reaching target_io.
-  void mark_finished() {
-    std::lock_guard lock(mu_);
-    finished_ = true;
-    protocol_ready_ = true;
-    cv_.notify_all();
-  }
+  // Produce a ReceiveLabel for the current I/O, or replay from trace.
+  // Returns nullopt if this is the target I/O (label stored in result_),
+  // or the replayed message if fast-forwarding.
+  std::optional<tpc::Message> sim_receive() {
+    auto current = io_count_++;
 
-  // Called by the worker thread when an unexpected exception occurs.
-  void mark_failed(std::exception_ptr eptr) {
-    std::lock_guard lock(mu_);
-    exception_ = std::move(eptr);
-    finished_ = true;
-    protocol_ready_ = true;
-    cv_.notify_all();
-  }
-
-  // Called by the DPOR thread after join to surface worker exceptions.
-  void rethrow_if_failed() const {
-    if (exception_) {
-      std::rethrow_exception(exception_);
+    if (current < target_io_) {
+      // Fast-forward: past receive, replay value from trace.
+      auto idx = trace_offset_ + trace_consume_count_++;
+      return tpc::deserialize(trace_.at(idx));
     }
-  }
 
-  // Called by the DPOR thread to wait for the protocol thread to reach
-  // the target I/O or finish.
-  void wait_for_protocol() {
-    std::unique_lock lock(mu_);
-    cv_.wait(lock, [this] { return protocol_ready_; });
-  }
-
-  // Called by the DPOR thread to release the protocol thread (for teardown).
-  void release_protocol() {
-    std::lock_guard lock(mu_);
-    dpor_ready_ = true;
-    cv_.notify_all();
-  }
-
-  [[nodiscard]] bool is_finished() const {
-    std::lock_guard lock(mu_);
-    return finished_;
+    // This is the target I/O operation.
+    result_ = dpor::model::make_receive_label<dpor::model::Value>();
+    return std::nullopt;
   }
 
   [[nodiscard]] std::optional<EventLabel> result() const {
-    std::lock_guard lock(mu_);
     return result_;
   }
 
@@ -208,17 +143,10 @@ class SimEnvironment : public tpc::Environment {
   std::size_t trace_offset_;
   bool inject_crash_;
 
-  mutable std::mutex mu_;
-  std::condition_variable cv_;
-  bool protocol_ready_{false};
-  bool dpor_ready_{false};
-
   std::size_t io_count_{0};
   std::size_t trace_consume_count_{0};
   std::optional<EventLabel> result_;
-  bool finished_{false};
   bool crash_injected_{false};
-  std::exception_ptr exception_;
 };
 
 // ---------------------------------------------------------------------------
@@ -236,41 +164,32 @@ inline dpor::model::ThreadId participant_to_thread(
 // ThreadFunction factories
 // ---------------------------------------------------------------------------
 
-// Run a protocol object in a background OS thread, capturing a single I/O
+// Drive a protocol object through start()/receive(), capturing a single I/O
 // event via SimEnvironment.  Returns the captured EventLabel or nullopt if
 // the protocol finished before reaching the target I/O.
 template <typename ProtocolObj>
 std::optional<EventLabel> run_and_capture(
     ProtocolObj& obj,
     SimEnvironment& env) {
-  std::thread worker([&obj, &env] {
-    try {
-      obj.run(env);
-      env.mark_finished();
-    } catch (const CrashInjected&) {
-      // Crash was injected during fast-forward -- protocol terminated.
-      env.mark_finished();
-    } catch (const StepBoundaryReached&) {
-      // Expected: we captured one DPOR event and stop this replay run here.
-    } catch (...) {
-      env.mark_failed(std::current_exception());
+  try {
+    bool needs_message = obj.start(env);
+    while (needs_message) {
+      auto replayed = env.sim_receive();
+      if (!replayed) {
+        // Target I/O was a receive — label is stored in env.result().
+        return env.result();
+      }
+      needs_message = obj.receive(env, *replayed);
     }
-  });
-
-  env.wait_for_protocol();
-
-  if (env.is_finished()) {
-    worker.join();
-    env.rethrow_if_failed();
+    // Protocol finished before reaching target I/O.
     return std::nullopt;
+  } catch (const CrashInjected&) {
+    // Crash was injected during fast-forward -- protocol terminated.
+    return std::nullopt;
+  } catch (const StepBoundaryReached&) {
+    // Captured one DPOR event from a send/get_vote call.
+    return env.result();
   }
-
-  // Protocol is blocked on the target I/O.  Collect the result
-  // and release the thread for cleanup.
-  auto label = env.result();
-  env.release_protocol();
-  worker.join();
-  return label;
 }
 
 // Create a ThreadFunction for the coordinator.
