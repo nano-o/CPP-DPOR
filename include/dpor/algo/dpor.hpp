@@ -170,7 +170,7 @@ get_cons_tiebreaker(
   const auto& recv_evt = graph.event(recv);
   const auto* recv_label = model::as_receive(recv_evt);
   if (recv_label == nullptr) {
-    return kNoSource;
+    throw std::logic_error("get_cons_tiebreaker invariant violated: event is not a receive");
   }
 
   // Find all compatible sends that are available for recv to read from:
@@ -182,8 +182,11 @@ get_cons_tiebreaker(
 
   // Determine which send recv currently reads from (if any).
   auto rf_it = graph.reads_from().find(recv);
-  const auto current_rf_source = (rf_it != graph.reads_from().end())
-      ? rf_it->second : kNoSource;
+  if (rf_it == graph.reads_from().end()) {
+    throw std::logic_error(
+        "get_cons_tiebreaker invariant violated: receive missing reads-from source");
+  }
+  const auto current_rf_source = rf_it->second;
 
   std::vector<Candidate> candidates;
   for (const auto send_id : graph.unread_send_event_ids()) {
@@ -229,7 +232,8 @@ get_cons_tiebreaker(
     }
   }
 
-  return kNoSource;
+  throw std::logic_error(
+      "get_cons_tiebreaker invariant violated: no consistent source found");
 }
 
 // REVISITCONDITION(G, e, s):
@@ -293,7 +297,7 @@ template <typename ValueT>
   // Remap e to its ID in the restricted graph.
   auto e_it = id_map.find(e);
   if (e_it == id_map.end()) {
-    return true;  // e not in Previous — vacuously satisfied.
+    throw std::logic_error("revisit_condition invariant violated: event missing from Previous");
   }
   const auto remapped_e = e_it->second;
 
@@ -302,12 +306,14 @@ template <typename ValueT>
   // tiebreaker source of G|Previous).
   auto rf_it = graph.reads_from().find(e);
   if (rf_it == graph.reads_from().end()) {
-    return false;  // No rf source to compare.
+    throw std::logic_error(
+        "revisit_condition invariant violated: receive missing reads-from source");
   }
   const auto current_rf_original = rf_it->second;
   auto rf_map_it = id_map.find(current_rf_original);
   if (rf_map_it == id_map.end()) {
-    return false;  // rf(e) outside Previous => cannot equal restricted tiebreaker.
+    throw std::logic_error(
+        "revisit_condition invariant violated: reads-from source missing from Previous");
   }
   const EvId remapped_rf = rf_map_it->second;
 
