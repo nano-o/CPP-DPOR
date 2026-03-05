@@ -50,6 +50,7 @@ This is required to preserve DPOR soundness/completeness assumptions.
 - communication model: async message passing only
 - receive semantics: blocking receives only
 - event kinds: send, receive, nondeterministic choice, block, error
+- `block` is an internal DPOR event used to represent waiting on a blocking receive; user thread callbacks/adapters must not emit `Block` directly
 - receive compatibility: predicate/callable-based matching
 - exploration strategy: insertion-order execution graphs + backward revisiting
 

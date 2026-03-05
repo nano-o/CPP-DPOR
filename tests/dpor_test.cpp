@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -288,6 +289,22 @@ TEST_CASE("receiver-first schedule still explores both rf choices via backward r
   REQUIRE(result.executions_explored == 2);
 }
 
+TEST_CASE("next-event converts an unsatisfied receive into an internal block",
+    "[algo][dpor][regression]") {
+  Program program;
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+
+  const auto next = dpor::algo::detail::compute_next_event(program, ExplorationGraph{});
+  REQUIRE(next.has_value());
+  REQUIRE(next->first == 1);
+  REQUIRE(std::holds_alternative<BlockLabel>(next->second));
+}
+
 TEST_CASE("backward-revisit-heavy exploration does not produce duplicate execution graphs",
     "[algo][dpor][regression]") {
   DporConfig config;
@@ -448,35 +465,16 @@ TEST_CASE("three-thread chain: thread 1 sends to 2, thread 2 forwards to 3", "[a
 
 // --- Block events ---
 
-TEST_CASE("block event terminates the thread", "[algo][dpor]") {
+TEST_CASE("program thread function returning BlockLabel is rejected", "[algo][dpor]") {
   DporConfig config;
-  std::size_t send_count = 0;
-
-  config.on_execution = [&send_count](const ExplorationGraph& g) {
-    for (const auto& evt : g.events()) {
-      if (is_send(evt)) {
-        ++send_count;
-      }
-    }
-  };
-
-  // Thread returns block at step 0, then would return a send at step 1 —
-  // but the engine should never ask for step 1 because block terminates the thread.
   config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return BlockLabel{};
     }
-    if (step == 1) {
-      return SendLabel{.destination = 2, .value = "x"};
-    }
     return std::nullopt;
   };
 
-  const auto result = verify(config);
-  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
-  REQUIRE(result.executions_explored == 1);
-  // The send after block should never be produced.
-  REQUIRE(send_count == 0);
+  REQUIRE_THROWS_AS(verify(config), std::logic_error);
 }
 
 // --- ND choice affects subsequent behavior ---
@@ -1038,6 +1036,53 @@ TEST_CASE("paper ex 2.9: ns+r explores N executions (lazy ordering)", "[algo][dp
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 4);
   REQUIRE(first_receive_values == std::set<std::string>{"1", "2", "3", "4"});
+}
+
+TEST_CASE("paper ex 4.1: blocked receive is rescheduled when sends appear",
+    "[algo][dpor][paper]") {
+  DporConfig config;
+  std::set<std::string> observed_receive_values;
+  bool completed_graph_has_block = false;
+
+  // T3 (smallest tid) is scheduled first and tries to receive.
+  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+
+  // Two sends to T3.
+  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "1"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "2"};
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&observed_receive_values, &completed_graph_has_block](const ExplorationGraph& graph) {
+    for (const auto& evt : graph.events()) {
+      if (is_block(evt)) {
+        completed_graph_has_block = true;
+      }
+    }
+    const auto trace = graph.thread_trace(1);
+    if (!trace.empty()) {
+      observed_receive_values.insert(trace[0]);
+    }
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 2);
+  REQUIRE(observed_receive_values == std::set<std::string>{"1", "2"});
+  REQUIRE_FALSE(completed_graph_has_block);
 }
 
 TEST_CASE("paper ex 4.2: backward revisit recovers missed rf option", "[algo][dpor][paper]") {

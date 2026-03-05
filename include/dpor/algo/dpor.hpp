@@ -18,6 +18,7 @@
 #include <functional>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -50,23 +51,44 @@ namespace detail {
 
 using EventId = typename model::ExplorationGraphT<model::Value>::EventId;
 
-// Compute the next event to add to the graph, following Algorithm 1's next_P(G).
-// Iterates threads by ascending ThreadId, calls the thread function with the
-// current trace, skips blocked/done threads, skips receives with no compatible sends.
 template <typename ValueT>
-[[nodiscard]] inline std::optional<std::pair<model::ThreadId, model::EventLabelT<ValueT>>>
-compute_next_event(
-    const ProgramT<ValueT>& program,
-    const model::ExplorationGraphT<ValueT>& graph) {
-  using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
-
-  // Collect thread IDs and sort them for deterministic iteration.
+[[nodiscard]] inline std::vector<model::ThreadId> sorted_thread_ids(
+    const ProgramT<ValueT>& program) {
   std::vector<model::ThreadId> thread_ids;
   thread_ids.reserve(program.threads.size());
   for (const auto& [tid, _] : program.threads) {
     thread_ids.push_back(tid);
   }
   std::sort(thread_ids.begin(), thread_ids.end());
+  return thread_ids;
+}
+
+template <typename ValueT>
+[[nodiscard]] inline bool has_compatible_unread_send(
+    const model::ExplorationGraphT<ValueT>& graph,
+    model::ThreadId tid,
+    const model::ReceiveLabelT<ValueT>& receive) {
+  for (const auto send_id : graph.unread_send_event_ids()) {
+    const auto* send = model::as_send(graph.event(send_id));
+    if (send != nullptr &&
+        send->destination == tid &&
+        receive.accepts(send->value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Compute the next event to add to the graph, following Algorithm 1's next_P(G).
+// Iterates threads by ascending ThreadId, calls the thread function with the
+// current trace, skips blocked/done threads, and turns unsatisfied blocking
+// receives into internal Block events.
+template <typename ValueT>
+[[nodiscard]] inline std::optional<std::pair<model::ThreadId, model::EventLabelT<ValueT>>>
+compute_next_event(
+    const ProgramT<ValueT>& program,
+    const model::ExplorationGraphT<ValueT>& graph) {
+  const auto thread_ids = sorted_thread_ids(program);
 
   for (const auto tid : thread_ids) {
     // Skip threads that have terminated (block or error).
@@ -85,20 +107,20 @@ compute_next_event(
 
     const auto& label = *next_label;
 
+    if (std::holds_alternative<model::BlockLabel>(label)) {
+      throw std::logic_error(
+          "thread function returned BlockLabel; Block events are internal to DPOR");
+    }
+
     // If it's a receive, check if there's at least one compatible unread send.
     if (const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&label)) {
-      bool has_compatible_send = false;
-      for (const auto send_id : graph.unread_send_event_ids()) {
-        const auto* send = model::as_send(graph.event(send_id));
-        if (send != nullptr &&
-            send->destination == tid &&
-            recv->accepts(send->value)) {
-          has_compatible_send = true;
-          break;
-        }
-      }
-      if (!has_compatible_send) {
-        continue;  // Blocked — no compatible send available.
+      if (!has_compatible_unread_send(graph, tid, *recv)) {
+        // Must-style behavior: represent an unsatisfied blocking receive as a
+        // Block event and continue with other threads.
+        return std::pair{
+            tid,
+            model::EventLabelT<ValueT>{model::BlockLabel{}},
+        };
       }
     }
 
@@ -310,6 +332,79 @@ inline void visit_if_consistent(
     const DporConfigT<ValueT>& config,
     std::size_t depth);
 
+// Must Example 4.1: before declaring completion, check whether a previously
+// blocked receive can now be unblocked due to newly-added sends. If one exists,
+// remove its Block event and continue exploration from the unblocked graph.
+template <typename ValueT>
+[[nodiscard]] inline bool reschedule_blocked_receive_if_enabled(
+    const ProgramT<ValueT>& program,
+    const model::ExplorationGraphT<ValueT>& graph,
+    VerifyResult& result,
+    const DporConfigT<ValueT>& config,
+    std::size_t depth) {
+  using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
+  constexpr auto kNoSource = model::ExplorationGraphT<ValueT>::kNoSource;
+
+  auto find_last_event_in_thread = [&graph](const model::ThreadId tid) -> EvId {
+    EvId last_id = kNoSource;
+    model::EventIndex last_index = 0;
+    for (EvId id = 0; id < graph.event_count(); ++id) {
+      const auto& evt = graph.event(id);
+      if (evt.thread == tid &&
+          (last_id == kNoSource || evt.index > last_index)) {
+        last_id = id;
+        last_index = evt.index;
+      }
+    }
+    return last_id;
+  };
+
+  const auto thread_ids = sorted_thread_ids(program);
+  for (const auto tid : thread_ids) {
+    const auto last_id = find_last_event_in_thread(tid);
+    if (last_id == kNoSource || !model::is_block(graph.event(last_id))) {
+      continue;
+    }
+
+    std::unordered_set<EvId> keep_set;
+    keep_set.reserve(graph.event_count());
+    for (EvId id = 0; id < graph.event_count(); ++id) {
+      if (id != last_id) {
+        keep_set.insert(id);
+      }
+    }
+    auto unblocked_graph = graph.restrict(keep_set);
+
+    const auto& thread_fn = program.threads.at(tid);
+    const auto trace = unblocked_graph.thread_trace(tid);
+    const auto step = unblocked_graph.thread_event_count(tid);
+    const auto next_label = thread_fn(trace, step);
+
+    if (!next_label.has_value()) {
+      throw std::logic_error(
+          "blocked thread became done after unblocking; expected a blocking receive");
+    }
+    if (std::holds_alternative<model::BlockLabel>(*next_label)) {
+      throw std::logic_error(
+          "thread function returned BlockLabel; Block events are internal to DPOR");
+    }
+
+    const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&*next_label);
+    if (recv == nullptr) {
+      throw std::logic_error(
+          "blocked thread did not produce a receive after unblocking");
+    }
+    if (!has_compatible_unread_send(unblocked_graph, tid, *recv)) {
+      continue;
+    }
+
+    visit(program, std::move(unblocked_graph), result, config, depth);
+    return true;
+  }
+
+  return false;
+}
+
 // Backward revisiting: lines 10-13 of Algorithm 1.
 // For each receive in the destination thread of the new send:
 // check compatibility, compute Deleted, check RevisitCondition, restrict, set rf, recurse.
@@ -472,6 +567,9 @@ inline void visit(
   const auto next = compute_next_event(program, graph);
 
   if (!next.has_value()) {
+    if (reschedule_blocked_receive_if_enabled(program, graph, result, config, depth)) {
+      return;
+    }
     // No more events: this is a complete execution.
     ++result.executions_explored;
     if (config.on_execution) {
@@ -558,7 +656,7 @@ inline void visit(
     return;
   }
 
-  // Handle block: add event and continue.
+  // Handle block (internal receive-wait marker): add event and continue.
   if (std::holds_alternative<model::BlockLabel>(label)) {
     auto new_graph = graph;
     static_cast<void>(new_graph.add_event(tid, label));

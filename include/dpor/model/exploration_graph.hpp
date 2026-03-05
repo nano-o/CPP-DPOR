@@ -120,8 +120,9 @@ class ExplorationGraphT {
     return graph_.unread_send_event_ids();
   }
 
-  // Returns true if the thread's last event is a BlockLabel or ErrorLabel,
-  // meaning the thread cannot produce further events.
+  // Returns true if the thread's last event is a BlockLabel or ErrorLabel.
+  // DPOR's next-event selection skips such threads. Blocked receive threads
+  // may later be rescheduled by the algorithm.
   [[nodiscard]] bool thread_is_terminated(ThreadId tid) const {
     // Find the last event (by event index) for this thread.
     EventId last_id = kNoSource;

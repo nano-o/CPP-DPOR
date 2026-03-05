@@ -12,7 +12,9 @@
 #include <random>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -70,15 +72,51 @@ struct OracleTransition {
   std::optional<ExplorationGraph::EventId> rf_source{};
 };
 
-std::vector<OracleTransition> enumerate_enabled_transitions(
-    const Program& program,
-    const ExplorationGraph& graph) {
+std::vector<ThreadId> sorted_thread_ids(const Program& program) {
   std::vector<ThreadId> thread_ids;
   thread_ids.reserve(program.threads.size());
   for (const auto& [tid, _] : program.threads) {
     thread_ids.push_back(tid);
   }
   std::sort(thread_ids.begin(), thread_ids.end());
+  return thread_ids;
+}
+
+bool has_compatible_unread_send(
+    const ExplorationGraph& graph,
+    const ThreadId tid,
+    const ReceiveLabel& recv) {
+  for (const auto send_id : graph.unread_send_event_ids()) {
+    const auto* send = as_send(graph.event(send_id));
+    if (send != nullptr &&
+        send->destination == tid &&
+        recv.accepts(send->value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+ExplorationGraph::EventId find_last_event_in_thread(
+    const ExplorationGraph& graph,
+    const ThreadId tid) {
+  ExplorationGraph::EventId last_id = ExplorationGraph::kNoSource;
+  EventIndex last_index = 0;
+  for (ExplorationGraph::EventId id = 0; id < graph.event_count(); ++id) {
+    const auto& evt = graph.event(id);
+    if (evt.thread == tid &&
+        (last_id == ExplorationGraph::kNoSource || evt.index > last_index)) {
+      last_id = id;
+      last_index = evt.index;
+    }
+  }
+  return last_id;
+}
+
+std::vector<OracleTransition> enumerate_enabled_transitions(
+    const Program& program,
+    const ExplorationGraph& graph) {
+  const auto thread_ids = sorted_thread_ids(program);
 
   std::vector<OracleTransition> transitions;
 
@@ -95,18 +133,34 @@ std::vector<OracleTransition> enumerate_enabled_transitions(
       continue;
     }
 
+    if (std::holds_alternative<BlockLabel>(*next_label)) {
+      throw std::logic_error(
+          "stress program returned BlockLabel; blocks are internal to DPOR");
+    }
+
     if (const auto* recv = std::get_if<ReceiveLabel>(&*next_label)) {
+      bool found_compatible = false;
       for (const auto send_id : graph.unread_send_event_ids()) {
         const auto* send = as_send(graph.event(send_id));
-        if (send != nullptr &&
-            send->destination == tid &&
-            recv->accepts(send->value)) {
-          transitions.push_back(OracleTransition{
-              .thread = tid,
-              .label = *next_label,
-              .rf_source = send_id,
-          });
+        if (send == nullptr ||
+            send->destination != tid ||
+            !recv->accepts(send->value)) {
+          continue;
         }
+        found_compatible = true;
+        transitions.push_back(OracleTransition{
+            .thread = tid,
+            .label = *next_label,
+            .rf_source = send_id,
+        });
+      }
+      if (!found_compatible) {
+        // Must Example 4.1 behavior: unsatisfied blocking receives add Block.
+        transitions.push_back(OracleTransition{
+            .thread = tid,
+            .label = EventLabel{BlockLabel{}},
+            .rf_source = std::nullopt,
+        });
       }
       continue;
     }
@@ -143,32 +197,88 @@ std::vector<OracleTransition> enumerate_enabled_transitions(
   return transitions;
 }
 
+std::vector<ExplorationGraph> enumerate_reschedulable_graphs(
+    const Program& program,
+    const ExplorationGraph& graph) {
+  std::vector<ExplorationGraph> rescheduled;
+  const auto thread_ids = sorted_thread_ids(program);
+
+  for (const auto tid : thread_ids) {
+    const auto last_id = find_last_event_in_thread(graph, tid);
+    if (last_id == ExplorationGraph::kNoSource ||
+        !is_block(graph.event(last_id))) {
+      continue;
+    }
+
+    std::unordered_set<ExplorationGraph::EventId> keep_set;
+    keep_set.reserve(graph.event_count());
+    for (ExplorationGraph::EventId id = 0; id < graph.event_count(); ++id) {
+      if (id != last_id) {
+        keep_set.insert(id);
+      }
+    }
+    auto unblocked = graph.restrict(keep_set);
+
+    const auto& thread_fn = program.threads.at(tid);
+    const auto trace = unblocked.thread_trace(tid);
+    const auto step = unblocked.thread_event_count(tid);
+    const auto next_label = thread_fn(trace, step);
+    if (!next_label.has_value()) {
+      throw std::logic_error(
+          "rescheduling failed in oracle: blocked thread became done");
+    }
+    if (std::holds_alternative<BlockLabel>(*next_label)) {
+      throw std::logic_error(
+          "stress program returned BlockLabel; blocks are internal to DPOR");
+    }
+    const auto* recv = std::get_if<ReceiveLabel>(&*next_label);
+    if (recv == nullptr) {
+      throw std::logic_error(
+          "rescheduling failed in oracle: blocked thread is not waiting on receive");
+    }
+
+    if (has_compatible_unread_send(unblocked, tid, *recv)) {
+      rescheduled.push_back(std::move(unblocked));
+    }
+  }
+
+  return rescheduled;
+}
+
 void enumerate_consistent_executions(
     const Program& program,
     const ExplorationGraph& graph,
     AsyncConsistencyChecker& checker,
     std::set<std::string>& signatures) {
   const auto transitions = enumerate_enabled_transitions(program, graph);
-  if (transitions.empty()) {
-    signatures.insert(graph_signature(graph));
+  if (!transitions.empty()) {
+    for (const auto& transition : transitions) {
+      auto next_graph = graph;
+      const auto event_id = next_graph.add_event(transition.thread, transition.label);
+      if (transition.rf_source.has_value()) {
+        next_graph.set_reads_from(event_id, *transition.rf_source);
+      }
+
+      // Soundness oracle follows Must's "visit-if-consistent" rule.
+      const auto consistency = checker.check(next_graph.execution_graph());
+      if (!consistency.is_consistent()) {
+        continue;
+      }
+
+      enumerate_consistent_executions(program, next_graph, checker, signatures);
+    }
     return;
   }
 
-  for (const auto& transition : transitions) {
-    auto next_graph = graph;
-    const auto event_id = next_graph.add_event(transition.thread, transition.label);
-    if (transition.rf_source.has_value()) {
-      next_graph.set_reads_from(event_id, *transition.rf_source);
+  const auto rescheduled = enumerate_reschedulable_graphs(program, graph);
+  if (!rescheduled.empty()) {
+    for (const auto& unblocked : rescheduled) {
+      enumerate_consistent_executions(program, unblocked, checker, signatures);
     }
-
-    // Soundness oracle follows Must's "visit-if-consistent" rule.
-    const auto consistency = checker.check(next_graph.execution_graph());
-    if (!consistency.is_consistent()) {
-      continue;
-    }
-
-    enumerate_consistent_executions(program, next_graph, checker, signatures);
+    return;
   }
+
+  signatures.insert(graph_signature(graph));
 }
 
 std::set<std::string> collect_oracle_signatures(const Program& program) {
@@ -185,7 +295,6 @@ enum class ScriptOpKind {
   ReceiveValues,
   ReceiveLastTraceValue,
   NondeterministicChoice,
-  Block,
 };
 
 struct ScriptOp {
@@ -246,8 +355,6 @@ Program build_program_from_spec(const ProgramSpec& spec) {
               .value = op.value,
               .choices = {},
           };
-        case ScriptOpKind::Block:
-          return BlockLabel{};
       }
       return std::nullopt;
     };
@@ -290,9 +397,6 @@ std::string script_op_to_string(const ScriptOp& op) {
         oss << op.values[i];
       }
       oss << "})";
-      break;
-    case ScriptOpKind::Block:
-      oss << "B";
       break;
   }
   return oss.str();
@@ -452,13 +556,6 @@ std::vector<ProgramSpec> generate_stress_specs(
         break;
     }
 
-    if (one_in_three(rng)) {
-      const auto block_thread = static_cast<ThreadId>(receiver_dist(rng));
-      spec[block_thread].push_back(ScriptOp{
-          .kind = ScriptOpKind::Block,
-      });
-    }
-
     std::size_t send_count = 0;
     std::size_t receive_count = 0;
     std::size_t nd_count = 0;
@@ -478,8 +575,6 @@ std::vector<ProgramSpec> generate_stress_specs(
             break;
           case ScriptOpKind::NondeterministicChoice:
             ++nd_count;
-            break;
-          case ScriptOpKind::Block:
             break;
         }
       }

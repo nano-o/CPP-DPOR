@@ -26,6 +26,10 @@ using ThreadTraceT = std::vector<ValueT>;
 // correctness (soundness and completeness) depends on this invariant.
 // Stateful captures or external side effects will silently invalidate
 // exploration guarantees.
+//
+// Must-style blocking semantics: user thread functions should not return
+// BlockLabel. DPOR injects Block events internally when a blocking receive has
+// no currently compatible unread send.
 template <typename ValueT>
 using ThreadFunctionT = std::function<
     std::optional<model::EventLabelT<ValueT>>(const ThreadTraceT<ValueT>&, std::size_t step)>;

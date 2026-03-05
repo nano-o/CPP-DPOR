@@ -14,6 +14,8 @@ See the Must paper in docs/.
 - Receives are modeled as blocking only.
 - Non-blocking receive behavior is currently out of scope.
 - Asynchronous message-passing is the only supported model.
+- `Block` events are internal to the DPOR engine (used for temporarily
+  unsatisfied blocking receives), not user-program events.
 
 ## Build
 
