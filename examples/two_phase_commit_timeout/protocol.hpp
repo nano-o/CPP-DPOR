@@ -157,10 +157,12 @@ class Coordinator {
  public:
   explicit Coordinator(std::size_t num_participants,
                        bool bug_on_p1_no = false,
-                       std::size_t vote_timeout_ms = 100)
+                       std::size_t vote_timeout_ms = 100,
+                       std::size_t ack_timeout_ms = 1000)
       : num_participants_(num_participants),
         bug_on_p1_no_(bug_on_p1_no),
-        vote_timeout_ms_(vote_timeout_ms) {}
+        vote_timeout_ms_(vote_timeout_ms),
+        ack_timeout_ms_(ack_timeout_ms) {}
 
   // Kick off the protocol: sends Prepare to all participants.
   // Returns true if the protocol needs incoming messages, false if done.
@@ -209,10 +211,7 @@ class Coordinator {
         env.cancel_timer(kVoteTimeoutTimerId);
         // All votes collected — send decision.
         decision_ = all_yes_ ? Decision::Commit : Decision::Abort;
-        for (std::size_t pid = 1; pid <= num_participants_; ++pid) {
-          env.send(pid, DecisionMsg{*decision_});
-        }
-        phase_ = Phase::CollectingAcks;
+        broadcast_decision(env);
         return true;
       }
       case Phase::CollectingAcks: {
@@ -227,6 +226,7 @@ class Coordinator {
         if (acks_received_ < num_participants_) {
           return true;
         }
+        env.cancel_timer(kAckTimeoutTimerId);
         phase_ = Phase::Done;
         return false;
       }
@@ -242,6 +242,7 @@ class Coordinator {
 
  private:
   static constexpr TimerId kVoteTimeoutTimerId = 1;
+  static constexpr TimerId kAckTimeoutTimerId = 2;
 
   bool is_valid_participant(ParticipantId id) const noexcept {
     return id >= 1 && id <= num_participants_;
@@ -253,9 +254,26 @@ class Coordinator {
     }
     all_yes_ = false;
     decision_ = Decision::Abort;
+    broadcast_decision(env);
+  }
+
+  void on_ack_timeout(Environment& env) {
+    if (phase_ != Phase::CollectingAcks) {
+      return;
+    }
+    phase_ = Phase::Done;
+    // Wake blocking runtimes so they can observe completion and return.
+    env.send(kCoordinator, Ack{0});
+  }
+
+  void broadcast_decision(Environment& env) {
     for (std::size_t pid = 1; pid <= num_participants_; ++pid) {
       env.send(pid, DecisionMsg{*decision_});
     }
+    env.set_timer(kAckTimeoutTimerId, ack_timeout_ms_,
+                  [this](Environment& timer_env) {
+                    on_ack_timeout(timer_env);
+                  });
     phase_ = Phase::CollectingAcks;
   }
 
@@ -264,6 +282,7 @@ class Coordinator {
   std::size_t num_participants_;
   bool bug_on_p1_no_;
   std::size_t vote_timeout_ms_;
+  std::size_t ack_timeout_ms_;
   std::optional<Decision> decision_;
 
   Phase phase_ = Phase::CollectingVotes;

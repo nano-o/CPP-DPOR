@@ -248,13 +248,13 @@ TEST_CASE("Coordinator cancels vote timeout after collecting all votes",
   RecordingEnv env;
 
   REQUIRE(coord.start(env));
-  REQUIRE(env.set_timer_calls == 1);
+  REQUIRE(env.set_timer_calls == 1);  // vote timer
 
   REQUIRE(coord.receive(env, tpc::VoteMsg{1, tpc::Vote::Yes}));
   REQUIRE(coord.receive(env, tpc::VoteMsg{2, tpc::Vote::Yes}));
   REQUIRE(coord.decision() == tpc::Decision::Commit);
-  REQUIRE(env.cancel_timer_calls == 1);
-  REQUIRE_FALSE(env.fire_single_timer());
+  REQUIRE(env.cancel_timer_calls == 1);  // vote timer canceled
+  REQUIRE(env.set_timer_calls == 2);     // ack timer armed
   REQUIRE(count_decision_sends(env, tpc::Decision::Commit) == 2);
 }
 
@@ -287,6 +287,47 @@ TEST_CASE("Participant arms decision timeout after voting and cancels it on deci
   const auto* ack = std::get_if<tpc::Ack>(&env.sent.back().second);
   REQUIRE(ack != nullptr);
   REQUIRE(ack->from == 1);
+}
+
+TEST_CASE("Coordinator ack timeout completes protocol when participant never acks",
+          "[two_phase_commit][protocol][timer]") {
+  tpc::Coordinator coord(2, /*bug_on_p1_no=*/false,
+                         /*vote_timeout_ms=*/100,
+                         /*ack_timeout_ms=*/10);
+  RecordingEnv env;
+
+  REQUIRE(coord.start(env));
+
+  // Both participants vote Yes.
+  REQUIRE(coord.receive(env, tpc::VoteMsg{1, tpc::Vote::Yes}));
+  REQUIRE(coord.receive(env, tpc::VoteMsg{2, tpc::Vote::Yes}));
+  REQUIRE(coord.decision() == tpc::Decision::Commit);
+
+  // Only participant 1 acks; participant 2 never does.
+  REQUIRE(coord.receive(env, tpc::Ack{1}));
+
+  // Ack timer fires — coordinator gives up waiting and completes.
+  REQUIRE(env.fire_single_timer());
+  // Coordinator is done despite missing ack from participant 2.
+  REQUIRE_FALSE(coord.receive(env, tpc::Ack{2}));
+  REQUIRE(coord.decision() == tpc::Decision::Commit);
+}
+
+TEST_CASE("Coordinator cancels ack timeout after collecting all acks",
+          "[two_phase_commit][protocol][timer]") {
+  tpc::Coordinator coord(1, /*bug_on_p1_no=*/false,
+                         /*vote_timeout_ms=*/100,
+                         /*ack_timeout_ms=*/10);
+  RecordingEnv env;
+
+  REQUIRE(coord.start(env));
+  REQUIRE(coord.receive(env, tpc::VoteMsg{1, tpc::Vote::Yes}));
+  REQUIRE(coord.decision() == tpc::Decision::Commit);
+
+  // Ack arrives before timeout.
+  REQUIRE_FALSE(coord.receive(env, tpc::Ack{1}));
+  // Ack timer was canceled — fire_single_timer returns false.
+  REQUIRE_FALSE(env.fire_single_timer());
 }
 
 TEST_CASE("Participant timeout causes local abort while waiting for decision",
@@ -878,14 +919,28 @@ TEST_CASE("UDP: shutdown with pending timers exits cleanly",
 
 TEST_CASE("UDP: participant locally aborts when decision timer fires",
           "[two_phase_commit][udp][timer]") {
-  auto pm = make_localhost_port_map(1);
+  // Use 2 participants but only run participant 1. The coordinator waits for
+  // both votes and won't decide until its vote timeout fires (200ms). Since
+  // participant 1's decision timeout (10ms) is much shorter, participant 1
+  // times out and locally aborts before the coordinator ever sends a decision.
+  auto pm = make_localhost_port_map(2);
 
-  tpc::UdpEnvironment coordinator_sender(tpc::kCoordinator, pm);
-  tpc::UdpEnvironment participant_env(1, pm, tpc::Vote::Yes);
+  tpc::Coordinator coord(2, /*bug_on_p1_no=*/false,
+                         /*vote_timeout_ms=*/200,
+                         /*ack_timeout_ms=*/200);
   tpc::Participant participant(1, /*decision_timeout_ms=*/10);
 
-  coordinator_sender.send(1, tpc::Prepare{});
-  participant_env.run(participant);
+  tpc::UdpEnvironment env_coord(tpc::kCoordinator, pm);
+  tpc::UdpEnvironment env_p1(1, pm, tpc::Vote::Yes);
 
+  std::thread t_coord([&] { env_coord.run(coord); });
+  std::thread t_p1([&] { env_p1.run(participant); });
+
+  t_p1.join();
+  t_coord.join();
+
+  // Participant timed out waiting for a decision.
   REQUIRE(participant.outcome() == tpc::Decision::Abort);
+  // Coordinator eventually decided Abort (vote timeout, missing participant 2).
+  REQUIRE(coord.decision() == tpc::Decision::Abort);
 }

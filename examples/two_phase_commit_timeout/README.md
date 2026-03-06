@@ -121,10 +121,10 @@ This timeout variant extends the environment with `set_timer()` /
   vote. If that timer fires before any decision arrives, the participant
   locally aborts and exits. This is intentionally unsafe and exists only to
   exercise timeout behavior in the example.
-- Current limitation: there is no ack-collection timeout. After deciding
-  (including timeout-triggered Abort), the coordinator still waits for unique
-  acks from all participants. If some participants never process the decision,
-  coordinator completion is not guaranteed.
+- The coordinator sets an ack-collection timer when it transitions to the ack
+  phase. If the timer fires before all unique acks arrive, the coordinator
+  completes without waiting further. This prevents the coordinator from hanging
+  when a participant times out and never sends its ack.
 - `UdpEnvironment` implements timers and dispatches callbacks inside `run()`.
 - `SimEnvironment` timer methods are currently stubs.
 - DPOR exploration in this example currently models message/vote/crash behavior,
@@ -152,6 +152,8 @@ The protocol-state-machine tests additionally check:
 - out-of-phase and duplicate acks are ignored while collecting acks
 - vote-timeout expiry forces `DECISION ABORT`
 - collecting all votes cancels the vote timer
+- ack-timeout expiry completes the coordinator when a participant never acks
+- collecting all acks cancels the ack timer
 - participants arm a decision-wait timer after voting
 - participants cancel that timer when a decision arrives
 - participant timeout triggers a local abort
