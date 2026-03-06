@@ -134,15 +134,26 @@ This timeout variant extends the environment with `set_timer()` /
 
 ## Verified properties
 
-The tests check the following invariants across all DPOR-explored executions:
+The DPOR tests check the following invariants across all explored executions:
 
 - **Agreement**: all participants that receive a decision receive the same one.
 - **Validity**: if the decision is Commit, then every participant voted Yes.
 - **Crash safety**: when the coordinator crashes between phases, no participant
   receives a decision.
 
-The UDP tests additionally check runtime timer behavior:
+The protocol-state-machine tests additionally check:
 
+- invalid and duplicate votes are ignored while collecting votes
+- out-of-phase and duplicate acks are ignored while collecting acks
+- vote-timeout expiry forces `DECISION ABORT`
+- collecting all votes cancels the vote timer
+
+The UDP tests additionally check runtime transport and timer behavior:
+
+- message serialization/deserialization round-trips
+- localhost send/receive works end to end
+- full UDP protocol runs commit or abort as expected
+- repeated random-vote UDP runs preserve agreement
 - timer callback fires without incoming UDP traffic
 - canceled timer does not fire
 - replacing a timer id keeps only the newest callback
@@ -172,13 +183,26 @@ implementation.
 cmake --preset debug
 cmake --build --preset debug
 
-# DPOR exploration/invariants for the timeout example:
+# Full test suite for this example file:
 ./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[two_phase_commit]"
 
-# UDP transport + timer behavior:
+# DPOR exploration/invariants only:
+./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[two_phase_commit]~[protocol]~[udp]"
+
+# Coordinator protocol-state-machine checks, including vote-timeout behavior:
+./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[protocol]"
+
+# UDP transport tests (this also includes the UDP timer tests):
 ./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[udp]"
+
+# Timer-focused tests across both the pure protocol harness and UDP runtime:
 ./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[timer]"
 ```
+
+All tests in this file carry the `[two_phase_commit]` tag, so
+`"[two_phase_commit]"` is the full example suite, not the DPOR-only subset.
+The UDP-tagged tests require a runtime that permits opening localhost UDP
+sockets.
 
 ## Debugging with gdb
 

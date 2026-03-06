@@ -108,12 +108,21 @@ The cost is O(step) per call, which is negligible for small protocols.
 
 ## Verified properties
 
-The tests check the following invariants across all DPOR-explored executions:
+The DPOR tests check the following invariants across all explored executions:
 
 - **Agreement**: all participants that receive a decision receive the same one.
 - **Validity**: if the decision is Commit, then every participant voted Yes.
 - **Crash safety**: when the coordinator crashes between phases, no participant
   receives a decision.
+
+The UDP tests additionally check runtime transport behavior:
+
+- message serialization/deserialization round-trips
+- localhost send/receive works end to end
+- full UDP protocol runs commit or abort as expected
+- repeated random-vote UDP runs preserve agreement
+- `UdpEnvironment::run()` is single-use
+- malformed UDP datagrams are dropped without crashing the protocol
 
 ## Error handling
 
@@ -138,8 +147,26 @@ implementation.
 ```bash
 cmake --preset debug
 cmake --build --preset debug
-ctest --test-dir build/debug -R "2PC|UDP"
+
+# Full test suite for this example file:
+./build/debug/examples/two_phase_commit/dpor_two_phase_commit_test "[two_phase_commit]"
+
+# DPOR exploration/invariants only:
+./build/debug/examples/two_phase_commit/dpor_two_phase_commit_test "[two_phase_commit]~[udp]"
+
+# UDP transport tests:
+./build/debug/examples/two_phase_commit/dpor_two_phase_commit_test "[udp]"
+
+# Scoped CTest invocation for this example directory only:
+ctest --test-dir build/debug/examples/two_phase_commit
 ```
+
+All tests in this file carry the `[two_phase_commit]` tag, so
+`"[two_phase_commit]"` is the full example suite, not the DPOR-only subset.
+The top-level form `ctest --test-dir build/debug -R "2PC|UDP"` is too broad
+now that multiple example directories register tests with the same names.
+The UDP-tagged tests require a runtime that permits opening localhost UDP
+sockets.
 
 ## Debugging with gdb
 
