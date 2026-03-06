@@ -11,6 +11,8 @@ See the Must paper in docs/.
 
 ## Current model assumptions
 
+- The set of threads is fixed at program construction time — there is no
+  dynamic thread creation during exploration.
 - Asynchronous message-passing is the only supported communication model.
 - Blocking receives are supported.
 - Non-blocking receives are also supported in the current async model: they

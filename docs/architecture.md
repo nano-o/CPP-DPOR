@@ -22,7 +22,7 @@ The model layer defines the formal representation of concurrent executions and t
 The algorithm layer implements the core DPOR engine and the system-under-test (SUT) model.
 
 ### Program Representation
-- **`ProgramT`**: Represents the system being checked. It consists of a set of **Thread Functions**, where each thread is a deterministic function of its observed trace.
+- **`ProgramT`**: Represents the system being checked. It consists of a fixed set of **Thread Functions**, where each thread is a deterministic function of its observed trace. The thread set is defined upfront and cannot change during exploration — there is no dynamic thread creation. To model systems where threads are spawned at runtime, pre-declare all potential threads and use control flow (e.g. a nondeterministic choice or an initial receive) to keep them idle until "spawned".
 - **`ThreadFunctionT`**: A function that takes a thread's local history and returns the next event it will perform. The history is a sequence of `ObservedValueT<ValueT>` entries: receive outcomes (payload or bottom for non-blocking receives) and nondeterministic choices. It does not include send/block/error events. The separate `step` argument is therefore required to represent local control-flow progress. Thread functions should not emit `Block`; DPOR inserts `Block` internally when a blocking receive has no compatible unread send.
 
 ### DPOR Engine
