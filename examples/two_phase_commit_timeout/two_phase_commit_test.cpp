@@ -130,17 +130,15 @@ struct RecordingEnv : tpc::Environment {
     timers.erase(id);
   }
 
-  bool fire_single_timer() {
+  std::optional<bool> fire_single_timer() {
     if (timers.size() != 1) {
-      return false;
+      return std::nullopt;
     }
     auto it = timers.begin();
     auto callback = std::move(it->second);
     timers.erase(it);
-    callback(*this);
-    return true;
+    return callback(*this);
   }
-
 };
 
 static std::size_t count_decision_sends(const RecordingEnv& env,
@@ -230,7 +228,9 @@ TEST_CASE("Coordinator timeout aborts when not all votes arrive",
   REQUIRE(coord.decision() == std::nullopt);
 
   // Timer fires: coordinator must abort and broadcast decision.
-  REQUIRE(env.fire_single_timer());
+  auto keep_running = env.fire_single_timer();
+  REQUIRE(keep_running.has_value());
+  REQUIRE(*keep_running);
   REQUIRE(coord.decision() == tpc::Decision::Abort);
   REQUIRE(count_decision_sends(env, tpc::Decision::Abort) == 2);
 
@@ -281,7 +281,7 @@ TEST_CASE("Participant arms decision timeout after voting and cancels it on deci
       participant.receive(env, tpc::DecisionMsg{tpc::Decision::Commit}));
   REQUIRE(participant.outcome() == tpc::Decision::Commit);
   REQUIRE(env.cancel_timer_calls == 1);
-  REQUIRE_FALSE(env.fire_single_timer());
+  REQUIRE_FALSE(env.fire_single_timer().has_value());
   REQUIRE(env.sent.size() == 2);
 
   const auto* ack = std::get_if<tpc::Ack>(&env.sent.back().second);
@@ -307,7 +307,9 @@ TEST_CASE("Coordinator ack timeout completes protocol when participant never ack
   REQUIRE(coord.receive(env, tpc::Ack{1}));
 
   // Ack timer fires — coordinator gives up waiting and completes.
-  REQUIRE(env.fire_single_timer());
+  auto keep_running = env.fire_single_timer();
+  REQUIRE(keep_running.has_value());
+  REQUIRE_FALSE(*keep_running);
   // Coordinator is done despite missing ack from participant 2.
   REQUIRE_FALSE(coord.receive(env, tpc::Ack{2}));
   REQUIRE(coord.decision() == tpc::Decision::Commit);
@@ -327,7 +329,7 @@ TEST_CASE("Coordinator cancels ack timeout after collecting all acks",
   // Ack arrives before timeout.
   REQUIRE_FALSE(coord.receive(env, tpc::Ack{1}));
   // Ack timer was canceled — fire_single_timer returns false.
-  REQUIRE_FALSE(env.fire_single_timer());
+  REQUIRE_FALSE(env.fire_single_timer().has_value());
 }
 
 TEST_CASE("Participant timeout causes local abort while waiting for decision",
@@ -340,7 +342,9 @@ TEST_CASE("Participant timeout causes local abort while waiting for decision",
   REQUIRE(participant.receive(env, tpc::Prepare{}));
   REQUIRE(participant.outcome() == std::nullopt);
 
-  REQUIRE(env.fire_single_timer());
+  auto keep_running = env.fire_single_timer();
+  REQUIRE(keep_running.has_value());
+  REQUIRE_FALSE(*keep_running);
   REQUIRE(participant.outcome() == tpc::Decision::Abort);
 
   // Once the timeout fires, the participant stays aborted even if a late
@@ -811,24 +815,9 @@ TEST_CASE("UDP: timer fires without incoming UDP",
   struct TimerProto {
     bool fired = false;
     bool start(tpc::Environment& env) {
-      env.set_timer(1, 10, [this](tpc::Environment&) { fired = true; });
-      return true;
-    }
-    // Timer fires asynchronously; no messages expected. The run() loop
-    // will invoke the callback, then we need a way to signal completion.
-    // We rely on a dummy message sent by the timer callback.
-    bool receive(tpc::Environment&, const tpc::Message&) { return false; }
-  };
-
-  // We need a variant that sends itself a message from the timer callback
-  // so run()'s dequeue unblocks.
-  struct TimerSelfMsg {
-    bool timer_fired = false;
-    tpc::ParticipantId my_id;
-    bool start(tpc::Environment& env) {
-      env.set_timer(1, 10, [this](tpc::Environment& e) {
-        timer_fired = true;
-        e.send(my_id, tpc::Prepare{});
+      env.set_timer(1, 10, [this](tpc::Environment&) {
+        fired = true;
+        return false;
       });
       return true;
     }
@@ -836,9 +825,9 @@ TEST_CASE("UDP: timer fires without incoming UDP",
   };
 
   tpc::UdpEnvironment env(tpc::kCoordinator, pm);
-  TimerSelfMsg proto{false, tpc::kCoordinator};
+  TimerProto proto{};
   env.run(proto);
-  REQUIRE(proto.timer_fired);
+  REQUIRE(proto.fired);
 }
 
 TEST_CASE("UDP: canceled timer does not fire",
@@ -847,14 +836,16 @@ TEST_CASE("UDP: canceled timer does not fire",
 
   struct CancelProto {
     bool timer_fired = false;
-    tpc::ParticipantId my_id;
 
     bool start(tpc::Environment& env) {
-      env.set_timer(1, 10, [this](tpc::Environment&) { timer_fired = true; });
+      env.set_timer(1, 10, [this](tpc::Environment&) {
+        timer_fired = true;
+        return true;
+      });
       env.cancel_timer(1);
       // Set a second timer to end the protocol.
-      env.set_timer(2, 30, [this](tpc::Environment& e) {
-        e.send(my_id, tpc::Prepare{});
+      env.set_timer(2, 30, [this](tpc::Environment&) {
+        return false;
       });
       return true;
     }
@@ -862,7 +853,7 @@ TEST_CASE("UDP: canceled timer does not fire",
   };
 
   tpc::UdpEnvironment env(tpc::kCoordinator, pm);
-  CancelProto proto{false, tpc::kCoordinator};
+  CancelProto proto{};
   env.run(proto);
   REQUIRE_FALSE(proto.timer_fired);
 }
@@ -873,14 +864,16 @@ TEST_CASE("UDP: replace same id fires only newest callback",
 
   struct ReplaceProto {
     int which_fired = 0;
-    tpc::ParticipantId my_id;
 
     bool start(tpc::Environment& env) {
-      env.set_timer(1, 10, [this](tpc::Environment&) { which_fired = 1; });
+      env.set_timer(1, 10, [this](tpc::Environment&) {
+        which_fired = 1;
+        return true;
+      });
       // Replace with new callback.
-      env.set_timer(1, 10, [this](tpc::Environment& e) {
+      env.set_timer(1, 10, [this](tpc::Environment&) {
         which_fired = 2;
-        e.send(my_id, tpc::Prepare{});
+        return false;
       });
       return true;
     }
@@ -888,7 +881,7 @@ TEST_CASE("UDP: replace same id fires only newest callback",
   };
 
   tpc::UdpEnvironment env(tpc::kCoordinator, pm);
-  ReplaceProto proto{0, tpc::kCoordinator};
+  ReplaceProto proto{};
   env.run(proto);
   REQUIRE(proto.which_fired == 2);
 }
@@ -898,19 +891,16 @@ TEST_CASE("UDP: shutdown with pending timers exits cleanly",
   auto pm = make_localhost_port_map(1);
 
   struct ShutdownProto {
-    tpc::ParticipantId my_id;
     bool start(tpc::Environment& env) {
       // Set a long timer that should never fire.
-      env.set_timer(1, 60000, [](tpc::Environment&) {});
-      // Send ourselves a message to end immediately.
-      env.send(my_id, tpc::Prepare{});
-      return true;
+      env.set_timer(1, 60000, [](tpc::Environment&) { return true; });
+      return false;
     }
     bool receive(tpc::Environment&, const tpc::Message&) { return false; }
   };
 
   tpc::UdpEnvironment env(tpc::kCoordinator, pm);
-  ShutdownProto proto{tpc::kCoordinator};
+  ShutdownProto proto{};
   // Should return promptly despite the 60s pending timer.
   env.run(proto);
   // If we get here, shutdown was clean.

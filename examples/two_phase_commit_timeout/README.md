@@ -50,7 +50,7 @@ The environment drives protocol progress:
 class Environment;
 
 using TimerId = std::size_t;
-using TimerCallback = std::function<void(Environment&)>;
+using TimerCallback = std::function<bool(Environment&)>;
 
 class Environment {
  public:
@@ -65,7 +65,9 @@ class Environment {
 This is called `Environment` rather than `Network` because `get_vote()` is not
 a networking operation -- it's a query to the external environment for a
 participant's vote decision. Timer operations are also part of the environment
-contract.
+contract. Timer callbacks return the same continuation flag as `receive()`:
+`true` means the protocol should keep waiting for input, `false` means it is
+done.
 
 ## Nondeterminism
 
@@ -126,6 +128,8 @@ This timeout variant extends the environment with `set_timer()` /
   completes without waiting further. This prevents the coordinator from hanging
   when a participant times out and never sends its ack.
 - `UdpEnvironment` implements timers and dispatches callbacks inside `run()`.
+- Timer-driven completion is handled directly by the runtime; it does not rely
+  on fabricated protocol messages to wake the event loop.
 - `SimEnvironment` timer methods are currently stubs.
 - DPOR exploration in this example currently models message/vote/crash behavior,
   not timer events. Coordinator and participant timeouts are therefore only

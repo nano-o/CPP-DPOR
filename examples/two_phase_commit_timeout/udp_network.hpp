@@ -141,7 +141,10 @@ class UdpEnvironment : public Environment {
     try {
       bool needs_message = protocol.start(*this);
       while (needs_message) {
-        dispatch_due_timers();
+        needs_message = dispatch_due_timers();
+        if (!needs_message) {
+          break;
+        }
         auto msg = wait_for_message(compute_next_timeout_ms());
         if (msg.has_value()) {
           needs_message = protocol.receive(*this, *msg);
@@ -189,7 +192,7 @@ class UdpEnvironment : public Environment {
     return static_cast<int>(count);
   }
 
-  void dispatch_due_timers() {
+  bool dispatch_due_timers() {
     while (!timer_schedule_.empty()) {
       auto now = std::chrono::steady_clock::now();
       auto schedule_it = timer_schedule_.begin();
@@ -209,8 +212,11 @@ class UdpEnvironment : public Environment {
       active_timers_.erase(active_it);
       // Callback may set/cancel timers; this is safe because the current timer
       // has already been removed from both containers before invocation.
-      callback(*this);
+      if (!callback(*this)) {
+        return false;
+      }
     }
+    return true;
   }
 
   std::optional<Message> wait_for_message(int timeout_ms) {

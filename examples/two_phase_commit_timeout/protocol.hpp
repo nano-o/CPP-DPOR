@@ -125,7 +125,7 @@ inline Message deserialize(const std::string& data) {
 class Environment;
 
 using TimerId = std::size_t;
-using TimerCallback = std::function<void(Environment&)>;
+using TimerCallback = std::function<bool(Environment&)>;
 
 class Environment {
  public:
@@ -140,7 +140,8 @@ class Environment {
 
   // Start a timer. When timeout_ms elapses without the timer being cancelled,
   // the callback is invoked. If a timer with the same id already exists, it is
-  // replaced.
+  // replaced. The callback returns the same continuation flag as receive():
+  // true means the protocol still needs input, false means it is done.
   virtual void set_timer(TimerId id, std::size_t timeout_ms,
                          TimerCallback callback) = 0;
 
@@ -180,7 +181,7 @@ class Coordinator {
     }
     env.set_timer(kVoteTimeoutTimerId, vote_timeout_ms_,
                   [this](Environment& timer_env) {
-                    on_vote_timeout(timer_env);
+                    return on_vote_timeout(timer_env);
                   });
     return true;
   }
@@ -248,22 +249,22 @@ class Coordinator {
     return id >= 1 && id <= num_participants_;
   }
 
-  void on_vote_timeout(Environment& env) {
+  bool on_vote_timeout(Environment& env) {
     if (phase_ != Phase::CollectingVotes) {
-      return;
+      return true;
     }
     all_yes_ = false;
     decision_ = Decision::Abort;
     broadcast_decision(env);
+    return true;
   }
 
-  void on_ack_timeout(Environment& env) {
+  bool on_ack_timeout(Environment& /*env*/) {
     if (phase_ != Phase::CollectingAcks) {
-      return;
+      return true;
     }
     phase_ = Phase::Done;
-    // Wake blocking runtimes so they can observe completion and return.
-    env.send(kCoordinator, Ack{0});
+    return false;
   }
 
   void broadcast_decision(Environment& env) {
@@ -272,7 +273,7 @@ class Coordinator {
     }
     env.set_timer(kAckTimeoutTimerId, ack_timeout_ms_,
                   [this](Environment& timer_env) {
-                    on_ack_timeout(timer_env);
+                    return on_ack_timeout(timer_env);
                   });
     phase_ = Phase::CollectingAcks;
   }
@@ -325,7 +326,7 @@ class Participant {
         env.send(kCoordinator, VoteMsg{id_, vote});
         env.set_timer(kDecisionTimeoutTimerId, decision_timeout_ms_,
                       [this](Environment& timer_env) {
-                        on_decision_timeout(timer_env);
+                        return on_decision_timeout(timer_env);
                       });
         state_ = State::WaitDecision;
         return true;
@@ -356,16 +357,14 @@ class Participant {
  private:
   static constexpr TimerId kDecisionTimeoutTimerId = 1;
 
-  void on_decision_timeout(Environment& env) {
+  bool on_decision_timeout(Environment& /*env*/) {
     if (state_ != State::WaitDecision) {
-      return;
+      return true;
     }
 
     outcome_ = Decision::Abort;
     state_ = State::Done;
-
-    // Wake blocking runtimes so they can observe completion and return.
-    env.send(id_, DecisionMsg{Decision::Abort});
+    return false;
   }
 
   enum class State { WaitPrepare, WaitDecision, Done };
