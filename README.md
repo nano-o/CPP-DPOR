@@ -3,26 +3,13 @@
 A vibe-coded C++20 DPOR model-checking library inspired by Must.
 See the Must paper in docs/.
 
-
-## Goals
-
-- Keep a small stable API for consumers.
-- Make algorithm internals easy to evolve.
-- Ship as a reusable CMake package (`dpor::dpor`).
+There are some initial examples of use in the examples/ folder.
 
 ## Current model assumptions
 
-- The set of threads is fixed at program construction time — there is no
-  dynamic thread creation during exploration.
 - Asynchronous message-passing is the only supported communication model.
-- Blocking receives are supported.
-- Non-blocking receives are also supported in the current async model: they
-  may consume a compatible unread send or observe bottom (`⊥`) when no send is
-  taken.
-- Thread traces expose receive outcomes as `ObservedValueT<ValueT>`, so
-  thread functions can distinguish a payload from bottom.
-- `Block` events are internal to the DPOR engine (used for temporarily
-  unsatisfied blocking receives), not user-program events.
+- The set of threads is fixed at program construction time — there is no dynamic thread creation during exploration.
+- Support blocking and non-blocking receives (the latter can be used to model timeouts as in the 2PC-with-timeouts example) .
 
 ## Build
 
