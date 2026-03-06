@@ -50,6 +50,51 @@ cmake --build build/bench-release --target \
   dpor_two_phase_commit_timeout_benchmark
 ```
 
+## Perf profiling
+
+If you want a useful `perf` capture, use a separate profiling-oriented build so
+you keep optimization but also get debug info and reliable stacks:
+
+```bash
+cmake -S . -B build/perf -G Ninja \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DDPOR_BUILD_TESTING=ON \
+  -DDPOR_BUILD_EXAMPLES=ON \
+  -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -fno-omit-frame-pointer -fno-optimize-sibling-calls"
+
+cmake --build build/perf --target dpor_two_phase_commit_timeout_benchmark -j
+```
+
+Then record with a software clock event and DWARF unwinding. This avoids the
+hybrid `cpu_core` / `cpu_atom` split and usually produces cleaner user-space
+call stacks:
+
+```bash
+perf record -e cpu-clock --all-user -F 499 \
+  --call-graph dwarf,4096 \
+  -o perf-clean.data -- \
+  build/perf/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \
+  --mode dpor --participants 3 --iterations 1
+```
+
+If the sample count is too low, rerun the same command with a larger workload,
+for example `--iterations 3`.
+
+Useful follow-up reports:
+
+```bash
+perf report -i perf-clean.data --stdio --children -g graph,0.5,caller > perf-clean.report.txt
+
+perf report -i perf-clean.data --stdio --no-children --percent-limit 0.5
+```
+
+If stacks still look truncated, increase the kernel callchain depth before
+recording:
+
+```bash
+sudo sysctl -w kernel.perf_event_max_stack=512
+```
+
 ## Run examples
 
 Plain 2PC, DPOR plus oracle, 2 participants, crash injection enabled:
