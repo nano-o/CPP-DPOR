@@ -363,7 +363,11 @@ TEST_CASE("many non-blocking receives with no sends explore one execution",
   std::vector<ExplorationGraph> executions;
 
   config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
-    if (step < 3 && trace.size() == step) {
+    if (trace.size() != step) {
+      throw std::logic_error(
+          "non-blocking receive regression: bottom observations must remain in thread_trace");
+    }
+    if (step < 3) {
       return make_nonblocking_receive_label<Value>();
     }
     return std::nullopt;
@@ -450,14 +454,59 @@ TEST_CASE("receiver-first non-blocking receive explores bottom and matched execu
   REQUIRE(saw_matched);
 }
 
-TEST_CASE("backward revisit rewires non-blocking receive from bottom to later send",
+TEST_CASE("backward revisit rewires non-blocking receive from bottom in direct graph test",
+    "[algo][dpor][nonblocking]") {
+  ExplorationGraph graph;
+  const auto recv = graph.add_event(
+      1,
+      make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking));
+  graph.set_reads_from_bottom(recv);
+  const auto send = graph.add_event(2, SendLabel{.destination = 1, .value = "x"});
+
+  std::vector<ExplorationGraph> revisited_graphs;
+  VerifyResult result;
+  DporConfig config;
+  config.on_execution = [&revisited_graphs](const ExplorationGraph& g) {
+    revisited_graphs.push_back(g);
+  };
+
+  dpor::algo::detail::backward_revisit(config.program, graph, send, result, config, 0);
+
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(revisited_graphs.size() == 1);
+
+  const auto& revisited = revisited_graphs.front();
+  const auto new_recv = find_event_id_by_thread_index(revisited, 1, 0);
+  const auto new_send = find_event_id_by_thread_index(revisited, 2, 0);
+  REQUIRE(new_recv != ExplorationGraph::kNoSource);
+  REQUIRE(new_send != ExplorationGraph::kNoSource);
+
+  const auto rf_it = revisited.reads_from().find(new_recv);
+  REQUIRE(rf_it != revisited.reads_from().end());
+  REQUIRE(rf_it->second.is_send());
+  REQUIRE(rf_it->second.send_id() == new_send);
+
+  const auto* rf_send = as_send(revisited.event(new_send));
+  REQUIRE(rf_send != nullptr);
+  REQUIRE(rf_send->destination == 1);
+  REQUIRE(rf_send->value == "x");
+}
+
+TEST_CASE("non-blocking receive exposes bottom in trace for later control flow",
     "[algo][dpor][nonblocking]") {
   DporConfig config;
-  std::vector<ExplorationGraph> executions;
+  std::set<std::string> observed_pairs;
 
   config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
-      return make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking);
+      return make_nonblocking_receive_label<Value>();
+    }
+    if (step == 1 && trace.size() == 1) {
+      if (trace[0].is_bottom()) {
+        return SendLabel{.destination = 3, .value = "timeout"};
+      }
+      return SendLabel{.destination = 3, .value = trace[0].value()};
     }
     return std::nullopt;
   };
@@ -469,31 +518,30 @@ TEST_CASE("backward revisit rewires non-blocking receive from bottom to later se
     return std::nullopt;
   };
 
-  config.on_execution = [&executions](const ExplorationGraph& graph) {
-    executions.push_back(graph);
+  config.program.threads[3] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+    if (trace.empty()) {
+      return make_receive_label_from_values<Value>({"timeout", "x"});
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&observed_pairs](const ExplorationGraph& graph) {
+    const auto t1_trace = graph.thread_trace(1);
+    const auto t3_trace = graph.thread_trace(3);
+    REQUIRE(t1_trace.size() == 1);
+    REQUIRE(t3_trace.size() == 1);
+
+    if (t1_trace[0].is_bottom()) {
+      observed_pairs.insert("bottom->" + t3_trace[0].value());
+    } else {
+      observed_pairs.insert(t1_trace[0].value() + "->" + t3_trace[0].value());
+    }
   };
 
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 2);
-
-  bool saw_rewired_execution = false;
-  for (const auto& graph : executions) {
-    const auto recv_id = find_event_id_by_thread_index(graph, 1, 0);
-    const auto send_id = find_event_id_by_thread_index(graph, 2, 0);
-    REQUIRE(recv_id != ExplorationGraph::kNoSource);
-    REQUIRE(send_id != ExplorationGraph::kNoSource);
-    REQUIRE(graph.inserted_before_or_equal(recv_id, send_id));
-    REQUIRE_FALSE(graph.inserted_before_or_equal(send_id, recv_id));
-
-    const auto rf_it = graph.reads_from().find(recv_id);
-    REQUIRE(rf_it != graph.reads_from().end());
-    if (rf_it->second.is_send() && rf_it->second.send_id() == send_id) {
-      saw_rewired_execution = true;
-    }
-  }
-
-  REQUIRE(saw_rewired_execution);
+  REQUIRE(observed_pairs == std::set<std::string>{"bottom->timeout", "x->x"});
 }
 
 TEST_CASE("backward-revisit-heavy exploration does not produce duplicate execution graphs",

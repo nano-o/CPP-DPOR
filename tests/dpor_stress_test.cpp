@@ -320,6 +320,7 @@ struct ScriptOp {
   ThreadId destination{0};
   Value value{};
   std::vector<Value> values{};
+  ReceiveMode receive_mode{ReceiveMode::Blocking};
 };
 
 using ThreadScript = std::vector<ScriptOp>;
@@ -351,9 +352,9 @@ Program build_program_from_spec(const ProgramSpec& spec) {
               .value = trace.back().value(),
           };
         case ScriptOpKind::ReceiveAny:
-          return make_receive_label<Value>();
+          return make_receive_label<Value>(match_any_value<Value>(), op.receive_mode);
         case ScriptOpKind::ReceiveValues:
-          return make_receive_label_from_values<Value>(op.values);
+          return make_receive_label_from_values<Value>(op.values, op.receive_mode);
         case ScriptOpKind::ReceiveLastTraceValue:
           if (trace.empty()) {
             return std::nullopt;
@@ -383,6 +384,8 @@ Program build_program_from_spec(const ProgramSpec& spec) {
 
 std::string script_op_to_string(const ScriptOp& op) {
   std::ostringstream oss;
+  const auto receive_prefix =
+      op.receive_mode == ReceiveMode::NonBlocking ? "Rnb" : "Rb";
   switch (op.kind) {
     case ScriptOpKind::SendFixed:
       oss << "S(" << op.destination << "," << op.value << ")";
@@ -391,10 +394,10 @@ std::string script_op_to_string(const ScriptOp& op) {
       oss << "S(" << op.destination << ",trace[-1])";
       break;
     case ScriptOpKind::ReceiveAny:
-      oss << "R(*)";
+      oss << receive_prefix << "(*)";
       break;
     case ScriptOpKind::ReceiveValues:
-      oss << "R({";
+      oss << receive_prefix << "({";
       for (std::size_t i = 0; i < op.values.size(); ++i) {
         if (i != 0) {
           oss << ",";
@@ -452,6 +455,7 @@ std::vector<ProgramSpec> generate_stress_specs(
   std::uniform_int_distribution<int> receiver_pattern_dist(0, 7);
   std::bernoulli_distribution coin_flip(0.5);
   std::bernoulli_distribution one_in_three(1.0 / 3.0);
+  std::bernoulli_distribution nonblocking_receive(0.25);
 
   std::size_t attempts = 0;
   while (specs.size() < target_count && attempts < target_count * 80U) {
@@ -469,6 +473,16 @@ std::vector<ProgramSpec> generate_stress_specs(
     const Value v2_alt = kValues[(i2 + 1) % 3];
 
     ProgramSpec spec;
+    bool used_nonblocking_receive = false;
+    const auto choose_receive_mode = [&](const bool allow_nonblocking = true) {
+      if (!allow_nonblocking ||
+          used_nonblocking_receive ||
+          !nonblocking_receive(rng)) {
+        return ReceiveMode::Blocking;
+      }
+      used_nonblocking_receive = true;
+      return ReceiveMode::NonBlocking;
+    };
 
     auto& sender1_script = spec[sender1];
     if (coin_flip(rng)) {
@@ -514,52 +528,62 @@ std::vector<ProgramSpec> generate_stress_specs(
       case 0:
         receiver_script.push_back(ScriptOp{
             .kind = ScriptOpKind::ReceiveAny,
+            .receive_mode = choose_receive_mode(),
         });
         break;
       case 1:
         receiver_script.push_back(ScriptOp{
             .kind = ScriptOpKind::ReceiveValues,
             .values = {v1},
+            .receive_mode = choose_receive_mode(),
         });
         break;
       case 2:
         receiver_script.push_back(ScriptOp{
             .kind = ScriptOpKind::ReceiveValues,
             .values = {v2},
+            .receive_mode = choose_receive_mode(),
         });
         break;
       case 3:
         receiver_script.push_back(ScriptOp{
             .kind = ScriptOpKind::ReceiveAny,
+            .receive_mode = choose_receive_mode(),
         });
         receiver_script.push_back(ScriptOp{
             .kind = ScriptOpKind::ReceiveAny,
+            .receive_mode = choose_receive_mode(),
         });
         break;
       case 4:
         receiver_script.push_back(ScriptOp{
             .kind = ScriptOpKind::ReceiveValues,
             .values = {v1},
+            .receive_mode = choose_receive_mode(),
         });
         receiver_script.push_back(ScriptOp{
             .kind = ScriptOpKind::ReceiveValues,
             .values = {v2},
+            .receive_mode = choose_receive_mode(),
         });
         break;
       case 5:
         receiver_script.push_back(ScriptOp{
             .kind = ScriptOpKind::ReceiveValues,
             .values = {v2},
+            .receive_mode = choose_receive_mode(),
         });
         receiver_script.push_back(ScriptOp{
             .kind = ScriptOpKind::ReceiveValues,
             .values = {v1},
+            .receive_mode = choose_receive_mode(),
         });
         break;
       case 6:
         receiver_script.push_back(ScriptOp{
             .kind = ScriptOpKind::ReceiveValues,
             .values = {v1, v2},
+            .receive_mode = choose_receive_mode(),
         });
         break;
       case 7:
@@ -610,6 +634,20 @@ std::vector<ProgramSpec> generate_stress_specs(
   }
 
   return specs;
+}
+
+bool spec_uses_nonblocking_receive(const ProgramSpec& spec) {
+  for (const auto& [_, script] : spec) {
+    for (const auto& op : script) {
+      if ((op.kind == ScriptOpKind::ReceiveAny ||
+              op.kind == ScriptOpKind::ReceiveValues ||
+              op.kind == ScriptOpKind::ReceiveLastTraceValue) &&
+          op.receive_mode == ReceiveMode::NonBlocking) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 void require_dpor_matches_oracle(const Program& program, const std::string& description) {
@@ -667,6 +705,7 @@ TEST_CASE("Algorithm 1 stress: DPOR matches independent oracle on generated asyn
     "[algo][dpor][stress][paper]") {
   const auto specs = generate_stress_specs(72);
   REQUIRE(specs.size() == 72);
+  REQUIRE(std::any_of(specs.begin(), specs.end(), spec_uses_nonblocking_receive));
 
   for (const auto& spec : specs) {
     const auto program = build_program_from_spec(spec);
@@ -729,6 +768,54 @@ TEST_CASE("Algorithm 1 stress: trace-dependent receive predicates remain complet
   require_dpor_matches_oracle(
       program,
       "T1=[ND({a,b}),S(3,trace[0])]; T2=[S(3,b),S(3,a)]; T3=[R(*),R(x==trace[0])]");
+}
+
+TEST_CASE("Algorithm 1 stress: non-blocking receives expose bottom in traces",
+    "[algo][dpor][stress][paper][nonblocking]") {
+  Program program;
+
+  // T1: recv_nb(*); send(T3, timeout) on bottom, otherwise forward the value.
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_nonblocking_receive_label<Value>();
+    }
+    if (step == 1 && trace.size() == 1) {
+      if (trace[0].is_bottom()) {
+        return SendLabel{
+            .destination = 3,
+            .value = "timeout",
+        };
+      }
+      return SendLabel{
+          .destination = 3,
+          .value = trace[0].value(),
+      };
+    }
+    return std::nullopt;
+  };
+
+  // T2: send(T1, x)
+  program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{
+          .destination = 1,
+          .value = "x",
+      };
+    }
+    return std::nullopt;
+  };
+
+  // T3: recv({timeout, x})
+  program.threads[3] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+    if (trace.empty()) {
+      return make_receive_label_from_values<Value>({"timeout", "x"});
+    }
+    return std::nullopt;
+  };
+
+  require_dpor_matches_oracle(
+      program,
+      "T1=[Rnb(*),S(3,bottom?timeout:trace[0])]; T2=[S(1,x)]; T3=[Rb({timeout,x})]");
 }
 
 TEST_CASE("Algorithm 1 fuzz: DPOR matches oracle across many random seeds",
