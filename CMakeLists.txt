@@ -12,6 +12,7 @@ include(CTest)
 
 option(DPOR_BUILD_TESTING "Build test targets" ON)
 option(DPOR_BUILD_EXAMPLES "Build example targets" ON)
+option(DPOR_BUILD_BENCHMARKS "Build standalone benchmark targets" ON)
 option(DPOR_ENABLE_WARNINGS "Enable strict compiler warnings" ON)
 option(DPOR_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
@@ -97,6 +98,10 @@ endif()
 
 if(DPOR_BUILD_EXAMPLES)
   add_subdirectory(examples/minimal)
+  if(DPOR_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks/two_phase_commit)
+    add_subdirectory(benchmarks/two_phase_commit_timeout)
+  endif()
   if(DPOR_BUILD_TESTING)
     add_subdirectory(examples/two_phase_commit)
     add_subdirectory(examples/two_phase_commit_timeout)
