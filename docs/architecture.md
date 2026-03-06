@@ -9,13 +9,13 @@ The system is organized into three primary layers: **Model**, **Algorithm**, and
 The model layer defines the formal representation of concurrent executions and their properties.
 
 ### Events and Traces
-- **`EventT`**: The fundamental unit of execution. Events include `Send`, `Receive`, `ND` (non-deterministic choice), `Block` (an internal receive-wait marker inserted by DPOR), and `Error` (assertion or invariant violation). Each event is associated with a thread and a unique identifier.
-- **`ExecutionGraphT`**: Represents a single execution of the system. It stores a set of events and the **Reads-From (RF)** relation, which maps receive events to their corresponding send events.
+- **`EventT`**: The fundamental unit of execution. Events include `Send`, `Receive`, `ND` (non-deterministic choice), `Block` (an internal receive-wait marker inserted by DPOR), and `Error` (assertion or invariant violation). Receive labels can be blocking or non-blocking. Each event is associated with a thread and a unique identifier.
+- **`ExecutionGraphT`**: Represents a single execution of the system. It stores a set of events and the **Reads-From (RF)** relation, which maps receive events either to their corresponding send event or to bottom (`⊥`) for a non-blocking receive that did not consume a send.
 
 ### Relations and Reachability
 - **`Relation`**: Defines the **Program Order (PO)** and **Happens-Before (HB)** relations.
 - **`ExplorationGraphT`**: A specialized version of the execution graph used during DPOR exploration. It includes a **`PorfCache`** (based on vector clocks) that provides $O(1)$ reachability queries for the partial order.
-- **`Consistency`**: The `AsyncConsistencyCheckerT` validates that an execution graph is "consistent" (e.g., no causal cycles, matching send/receive values, no multiple consumes of a single send).
+- **`Consistency`**: The `AsyncConsistencyCheckerT` validates that an execution graph is "consistent" (e.g., no causal cycles, matching send/receive values, no multiple consumes of a single send, and no blocking receive reading bottom).
 
 ## 2. Algorithm Layer (`dpor::algo`)
 
@@ -23,11 +23,12 @@ The algorithm layer implements the core DPOR engine and the system-under-test (S
 
 ### Program Representation
 - **`ProgramT`**: Represents the system being checked. It consists of a set of **Thread Functions**, where each thread is a deterministic function of its observed trace.
-- **`ThreadFunctionT`**: A function that takes a thread's local history and returns the next event it will perform. The history contains only values observed from receives (`rf`) and nondeterministic choices; it does not include send/block/error events. The separate `step` argument is therefore required to represent local control-flow progress. Thread functions should not emit `Block`; DPOR inserts `Block` internally when a blocking receive has no compatible unread send.
+- **`ThreadFunctionT`**: A function that takes a thread's local history and returns the next event it will perform. The history is a sequence of `ObservedValueT<ValueT>` entries: receive outcomes (payload or bottom for non-blocking receives) and nondeterministic choices. It does not include send/block/error events. The separate `step` argument is therefore required to represent local control-flow progress. Thread functions should not emit `Block`; DPOR inserts `Block` internally when a blocking receive has no compatible unread send.
 
 ### DPOR Engine
 - **`dpor.hpp`**: Implements the core DPOR algorithm based on the "revisiting" approach (Enea et al., 2024).
-- **Exploration**: The engine recursively explores the space of consistent executions. It uses **backward revisiting** to identify alternative interleavings or message matches that could lead to new behaviors, and performs Must-style receive rescheduling before terminating an execution.
+- **`verify()` result**: DPOR reports `AllExecutionsExplored`, `ErrorFound`, or `DepthLimitReached`.
+- **Exploration**: The engine recursively explores the space of consistent executions. It uses **backward revisiting** to identify alternative interleavings or message matches that could lead to new behaviors, performs Must-style receive rescheduling before terminating an execution, and explores non-blocking receives both through compatible sends and the bottom branch.
 
 ## 3. API Layer (`dpor::api`)
 
@@ -41,6 +42,7 @@ The API layer provides the stable integration surface for users of the library.
 The library includes examples that demonstrate how to model distributed protocols:
 - **`minimal/`**: A basic example of setting up a `ProgramT` and running a DPOR session.
 - **`two_phase_commit/`**: A more complex case study modeling the Two-Phase Commit (2PC) protocol, including UDP network modeling and simulation logic.
+- **`two_phase_commit_timeout/`**: A 2PC variant that adds timers in the UDP runtime while keeping current DPOR exploration focused on async message interleavings.
 
 ---
 

@@ -48,15 +48,16 @@ This is required to preserve DPOR soundness/completeness assumptions.
 ### Semantics In Scope (Now)
 
 - communication model: async message passing only
-- receive semantics: blocking receives only
+- receive semantics: blocking receives plus the current async non-blocking mode, which may observe bottom (`⊥`) when no compatible unread send is taken
 - event kinds: send, receive, nondeterministic choice, block, error
 - `block` is an internal DPOR event used to represent waiting on a blocking receive; user thread callbacks/adapters must not emit `Block` directly
+- thread traces passed to `ThreadFunctionT` contain `ObservedValueT` entries, so non-blocking receives can contribute bottom observations to later control flow
 - receive compatibility: predicate/callable-based matching
 - exploration strategy: insertion-order execution graphs + backward revisiting
 
 ### Semantics Out of Scope (Now)
 
-- non-blocking receives / bottom (`⊥`) receive results
+- broader Must non-blocking semantics beyond the current async/bottom support
 - multiple communication models (`p2p`, `cd`, `mbox`) and their model-specific consistency rules
 - monitor-specific semantics for temporal properties
 
@@ -85,7 +86,7 @@ include/dpor/
   api/      → dpor::api    (Session — public entry point)
 src/api/    → only compiled source (session.cpp)
 tests/      → Catch2 test files
-examples/   → minimal/ and two_phase_commit/
+examples/   → minimal/, two_phase_commit/, and two_phase_commit_timeout/
 ```
 
 - Most code is **header-only templates** in `include/dpor/model/` and `include/dpor/algo/`
@@ -101,6 +102,7 @@ The engine in `include/dpor/algo/dpor.hpp` implements **Algorithm 1** from the M
 - `DporConfigT` — configuration: program, max_depth, on_execution observer callback
 
 Programs are defined via `ProgramT` / `ThreadFunctionT` in `include/dpor/algo/program.hpp`.
+Thread-function traces use `ObservedValueT` entries rather than raw payloads.
 
 ## PorfCache (Vector Clocks)
 
@@ -120,9 +122,11 @@ Programs are defined via `ProgramT` / `ThreadFunctionT` in `include/dpor/algo/pr
 | `relation_test.cpp` | Relation concept, ExplicitRelation, ProgramOrderRelation, compose, transitive_closure |
 | `consistency_test.cpp` | AsyncConsistencyCheckerT, all ConsistencyIssueCodes |
 | `exploration_graph_test.cpp` | ExplorationGraphT operations (restrict, with_rf, porf_contains, etc.) |
-| `dpor_test.cpp` | DPOR algorithm end-to-end (paper examples, known execution counts) |
-| `dpor_stress_test.cpp` | Randomized stress tests with multiple seeds |
-| `two_phase_commit_test.cpp` | 2PC protocol example (in `examples/two_phase_commit/`) |
+| `dpor_test.cpp` | DPOR algorithm end-to-end (paper examples, non-blocking receive coverage, oracle cross-checks) |
+| `dpor_stress_test.cpp` | Randomized stress tests with multiple seeds, including oracle-backed coverage |
+| `tests/support/oracle.hpp` | Exhaustive async oracle shared by DPOR correctness tests |
+| `examples/two_phase_commit/two_phase_commit_test.cpp` | 2PC protocol example |
+| `examples/two_phase_commit_timeout/two_phase_commit_test.cpp` | 2PC + timer behavior example |
 
 ## Prototype Policy
 

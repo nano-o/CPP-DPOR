@@ -11,9 +11,13 @@ See the Must paper in docs/.
 
 ## Current model assumptions
 
-- Receives are modeled as blocking only.
-- Non-blocking receive behavior is currently out of scope.
-- Asynchronous message-passing is the only supported model.
+- Asynchronous message-passing is the only supported communication model.
+- Blocking receives are supported.
+- Non-blocking receives are also supported in the current async model: they
+  may consume a compatible unread send or observe bottom (`⊥`) when no send is
+  taken.
+- Thread traces expose receive outcomes as `ObservedValueT<ValueT>`, so
+  thread functions can distinguish a payload from bottom.
 - `Block` events are internal to the DPOR engine (used for temporarily
   unsatisfied blocking receives), not user-program events.
 
@@ -27,6 +31,10 @@ ctest --preset debug
 
 Tests are written with Catch2 (v3). CMake uses a system Catch2 package if available.
 Paper-derived examples in current scope are in `tests/dpor_test.cpp` and tagged `[paper]`.
+`tests/dpor_test.cpp` and `tests/dpor_stress_test.cpp` also cross-check DPOR
+against an independent exhaustive async oracle in `tests/support/oracle.hpp`.
+When `max_depth` truncates exploration, `verify()` reports
+`DepthLimitReached`.
 
 If Catch2 is not installed and your environment has internet access, enable fetching:
 
@@ -94,6 +102,6 @@ Key properties:
 - `include/dpor/model`: core model types (events, relations, execution/exploration graphs)
 - `src`: implementation details
 - `tests`: unit/integration tests with CTest
-- `examples`: minimal usage examples
+- `examples`: `minimal/`, `two_phase_commit/`, and `two_phase_commit_timeout/`
 - `cmake`: packaging and build helper modules
 - `docs`: architecture notes
