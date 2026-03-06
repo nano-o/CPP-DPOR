@@ -1,5 +1,6 @@
 #include "dpor/algo/dpor.hpp"
 #include "dpor/model/consistency.hpp"
+#include "support/oracle.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -13,6 +14,7 @@
 namespace {
 using namespace dpor::algo;
 using namespace dpor::model;
+using dpor::test_support::require_dpor_matches_oracle;
 
 std::string event_signature(const Event& event) {
   std::ostringstream oss;
@@ -85,6 +87,9 @@ TEST_CASE("empty program explores 1 execution", "[algo][dpor]") {
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
+  require_dpor_matches_oracle(
+      config.program,
+      "empty program");
 }
 
 TEST_CASE("single thread with one send explores 1 execution", "[algo][dpor]") {
@@ -176,6 +181,9 @@ TEST_CASE("ND choice with 2 options explores 2 executions", "[algo][dpor]") {
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 2);
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[ND({a,b})]");
 }
 
 TEST_CASE("ND choice with 3 options explores 3 executions", "[algo][dpor]") {
@@ -228,6 +236,9 @@ TEST_CASE("two sends to same receiver explores 2 executions", "[algo][dpor]") {
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 2);
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[S(3,a)]; T2=[S(3,b)]; T3=[Rb(*)]");
 }
 
 // --- s+s+r example (paper Example 2.3) ---
@@ -257,6 +268,9 @@ TEST_CASE("s+s+r: two sends from one thread, one receive, explores 2 executions"
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 2);
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[S(2,a),S(2,b)]; T2=[Rb(*)]");
 }
 
 TEST_CASE("receiver-first schedule still explores both rf choices via backward revisit",
@@ -291,6 +305,9 @@ TEST_CASE("receiver-first schedule still explores both rf choices via backward r
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   // One execution where T1 reads from T2's send and one from T3's send.
   REQUIRE(result.executions_explored == 2);
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[Rb(*)]; T2=[S(1,a)]; T3=[S(1,b)]");
 }
 
 TEST_CASE("next-event converts an unsatisfied receive into an internal block",
@@ -355,6 +372,9 @@ TEST_CASE("non-blocking receive with no sends explores one bottom execution",
   const auto rf_it = graph.reads_from().find(0);
   REQUIRE(rf_it != graph.reads_from().end());
   REQUIRE(rf_it->second.is_bottom());
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[Rnb(*)]");
 }
 
 TEST_CASE("many non-blocking receives with no sends explore one execution",
@@ -542,6 +562,9 @@ TEST_CASE("non-blocking receive exposes bottom in trace for later control flow",
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 2);
   REQUIRE(observed_pairs == std::set<std::string>{"bottom->timeout", "x->x"});
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[Rnb(*),S(3,bottom?timeout:trace[0])]; T2=[S(1,x)]; T3=[Rb({timeout,x})]");
 }
 
 TEST_CASE("backward-revisit-heavy exploration does not produce duplicate execution graphs",
@@ -805,6 +828,9 @@ TEST_CASE("internal block suspends thread progress until receive is rescheduled"
   REQUIRE_FALSE(saw_completed_graph_with_block);
   REQUIRE_FALSE(saw_bad_t1_prefix);
   REQUIRE_FALSE(saw_bad_t3_receive);
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[Rb(*),S(3,done)]; T2=[S(1,msg)]; T3=[Rb({done})]");
 }
 
 TEST_CASE("multiple blocked receives are both rescheduled when matching sends appear",
@@ -908,6 +934,9 @@ TEST_CASE("multiple blocked receives are both rescheduled when matching sends ap
   REQUIRE_FALSE(missing_receiver_event);
   REQUIRE(t1_received_values == std::set<std::string>{"a", "a2"});
   REQUIRE(t2_received_values == std::set<std::string>{"b", "b2"});
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[Rb({a,a2})]; T2=[Rb({b,b2})]; T3=[S(1,a),S(2,b)]; T4=[S(1,a2),S(2,b2)]");
 }
 
 // --- ND choice affects subsequent behavior ---
@@ -1338,6 +1367,9 @@ TEST_CASE("paper ex 2.4: nondet failure target yields one execution per choice",
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 2);
   REQUIRE(received_failures == std::set<std::string>{"Fail(node1)", "Fail(node2)"});
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[ND({node1,node2}),S(2,Fail(trace[0]))]; T2=[Rb(*)]");
 }
 
 TEST_CASE("paper ex 2.6: selective receive filters stale value", "[algo][dpor][paper]") {
@@ -1368,6 +1400,9 @@ TEST_CASE("paper ex 2.6: selective receive filters stale value", "[algo][dpor][p
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[S(3,stale)]; T2=[S(3,fresh)]; T3=[Rb({fresh})]");
 }
 
 TEST_CASE("paper ex 2.7: ordered selective receives collapse ns+rn-sel to one execution",
@@ -1411,6 +1446,9 @@ TEST_CASE("paper ex 2.7: ordered selective receives collapse ns+rn-sel to one ex
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[S(4,1)]; T2=[S(4,2)]; T3=[S(4,3)]; T4=[Rb({1}),Rb({2}),Rb({3})]");
 }
 
 TEST_CASE("paper ex 2.8: receives can consume messages out of sender order with predicates",
@@ -1442,6 +1480,9 @@ TEST_CASE("paper ex 2.8: receives can consume messages out of sender order with 
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[S(2,1),S(2,2)]; T2=[Rb({2}),Rb({1})]");
 }
 
 TEST_CASE("paper ex 2.9: ns+r explores N executions (lazy ordering)", "[algo][dpor][paper]") {
@@ -1490,6 +1531,9 @@ TEST_CASE("paper ex 2.9: ns+r explores N executions (lazy ordering)", "[algo][dp
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 4);
   REQUIRE(first_receive_values == std::set<std::string>{"1", "2", "3", "4"});
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[S(5,1)]; T2=[S(5,2)]; T3=[S(5,3)]; T4=[S(5,4)]; T5=[Rb(*)]");
 }
 
 TEST_CASE("paper ex 4.1: blocked receive is rescheduled when sends appear",
@@ -1537,6 +1581,9 @@ TEST_CASE("paper ex 4.1: blocked receive is rescheduled when sends appear",
   REQUIRE(result.executions_explored == 2);
   REQUIRE(observed_receive_values == std::set<std::string>{"1", "2"});
   REQUIRE_FALSE(completed_graph_has_block);
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[Rb(*)]; T2=[S(1,1)]; T3=[S(1,2)]");
 }
 
 TEST_CASE("paper ex 4.2: backward revisit recovers missed rf option", "[algo][dpor][paper]") {
@@ -1578,6 +1625,9 @@ TEST_CASE("paper ex 4.2: backward revisit recovers missed rf option", "[algo][dp
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 2);
   REQUIRE(observed_receive_values == std::set<std::string>{"1", "2"});
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[S(2,1)]; T2=[Rb(*)]; T3=[S(2,2)]");
 }
 
 TEST_CASE("paper ex 4.3: revisiting condition avoids duplicate exploration in s+s+r-br",
@@ -1635,4 +1685,7 @@ TEST_CASE("paper ex 4.3: revisiting condition avoids duplicate exploration in s+
 
   const std::set<std::string> unique_signatures(signatures.begin(), signatures.end());
   REQUIRE(unique_signatures.size() == signatures.size());
+  require_dpor_matches_oracle(
+      config.program,
+      "T1=[S(1,0),Rb(*)]; T2=[S(4,1)]; T3=[S(4,2)]; T4=[Rb(*)]; T5=[S(1,42)]");
 }

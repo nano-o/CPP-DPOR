@@ -1,5 +1,6 @@
 #include "dpor/algo/dpor.hpp"
 #include "dpor/model/consistency.hpp"
+#include "support/oracle.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -21,290 +22,7 @@
 namespace {
 using namespace dpor::algo;
 using namespace dpor::model;
-
-std::string event_signature(const Event& event) {
-  std::ostringstream oss;
-  oss << "t" << event.thread << ":i" << event.index << ":";
-  if (const auto* send = as_send(event)) {
-    oss << "S(dst=" << send->destination << ",v=" << send->value << ")";
-  } else if (const auto* nd = as_nondeterministic_choice(event)) {
-    oss << "ND(v=" << nd->value << ")";
-  } else if (const auto* recv = as_receive(event)) {
-    oss << (recv->is_nonblocking() ? "Rnb" : "Rb");
-  } else if (is_block(event)) {
-    oss << "B";
-  } else if (is_error(event)) {
-    oss << "E";
-  }
-  return oss.str();
-}
-
-std::string graph_signature(const ExplorationGraph& graph) {
-  std::vector<std::string> events;
-  events.reserve(graph.events().size());
-  for (const auto& event : graph.events()) {
-    events.push_back(event_signature(event));
-  }
-  std::sort(events.begin(), events.end());
-
-  std::vector<std::string> rf_edges;
-  rf_edges.reserve(graph.reads_from().size());
-  for (const auto& [recv_id, source] : graph.reads_from()) {
-    if (source.is_bottom()) {
-      rf_edges.push_back("BOTTOM->" + event_signature(graph.event(recv_id)));
-      continue;
-    }
-    rf_edges.push_back(
-        event_signature(graph.event(source.send_id())) + "->" + event_signature(graph.event(recv_id)));
-  }
-  std::sort(rf_edges.begin(), rf_edges.end());
-
-  std::ostringstream oss;
-  for (const auto& event : events) {
-    oss << event << ";";
-  }
-  oss << "|";
-  for (const auto& edge : rf_edges) {
-    oss << edge << ";";
-  }
-  return oss.str();
-}
-
-struct OracleTransition {
-  ThreadId thread{};
-  EventLabel label{};
-  std::optional<ExplorationGraph::ReadsFromSource> rf_source{};
-};
-
-std::vector<ThreadId> sorted_thread_ids(const Program& program) {
-  std::vector<ThreadId> thread_ids;
-  thread_ids.reserve(program.threads.size());
-  for (const auto& [tid, _] : program.threads) {
-    thread_ids.push_back(tid);
-  }
-  std::sort(thread_ids.begin(), thread_ids.end());
-  return thread_ids;
-}
-
-bool has_compatible_unread_send(
-    const ExplorationGraph& graph,
-    const ThreadId tid,
-    const ReceiveLabel& recv) {
-  for (const auto send_id : graph.unread_send_event_ids()) {
-    const auto* send = as_send(graph.event(send_id));
-    if (send != nullptr &&
-        send->destination == tid &&
-        recv.accepts(send->value)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-ExplorationGraph::EventId find_last_event_in_thread(
-    const ExplorationGraph& graph,
-    const ThreadId tid) {
-  ExplorationGraph::EventId last_id = ExplorationGraph::kNoSource;
-  EventIndex last_index = 0;
-  for (ExplorationGraph::EventId id = 0; id < graph.event_count(); ++id) {
-    const auto& evt = graph.event(id);
-    if (evt.thread == tid &&
-        (last_id == ExplorationGraph::kNoSource || evt.index > last_index)) {
-      last_id = id;
-      last_index = evt.index;
-    }
-  }
-  return last_id;
-}
-
-std::vector<OracleTransition> enumerate_enabled_transitions(
-    const Program& program,
-    const ExplorationGraph& graph) {
-  const auto thread_ids = sorted_thread_ids(program);
-
-  std::vector<OracleTransition> transitions;
-
-  for (const auto tid : thread_ids) {
-    if (graph.thread_is_terminated(tid)) {
-      continue;
-    }
-
-    const auto& thread_fn = program.threads.at(tid);
-    const auto trace = graph.thread_trace(tid);
-    const auto step = graph.thread_event_count(tid);
-    const auto next_label = thread_fn(trace, step);
-    if (!next_label.has_value()) {
-      continue;
-    }
-
-    if (std::holds_alternative<BlockLabel>(*next_label)) {
-      throw std::logic_error(
-          "stress program returned BlockLabel; blocks are internal to DPOR");
-    }
-
-    if (const auto* recv = std::get_if<ReceiveLabel>(&*next_label)) {
-      bool found_compatible = false;
-      for (const auto send_id : graph.unread_send_event_ids()) {
-        const auto* send = as_send(graph.event(send_id));
-        if (send == nullptr ||
-            send->destination != tid ||
-            !recv->accepts(send->value)) {
-          continue;
-        }
-        found_compatible = true;
-        transitions.push_back(OracleTransition{
-            .thread = tid,
-            .label = *next_label,
-            .rf_source = ExplorationGraph::ReadsFromSource::from_send(send_id),
-        });
-      }
-      if (recv->is_nonblocking()) {
-        transitions.push_back(OracleTransition{
-            .thread = tid,
-            .label = *next_label,
-            .rf_source = ExplorationGraph::ReadsFromSource::bottom(),
-        });
-      } else if (!found_compatible) {
-        // Must Example 4.1 behavior: unsatisfied blocking receives add Block.
-        transitions.push_back(OracleTransition{
-            .thread = tid,
-            .label = EventLabel{BlockLabel{}},
-            .rf_source = std::nullopt,
-        });
-      }
-      continue;
-    }
-
-    if (const auto* nd = std::get_if<NondeterministicChoiceLabel>(&*next_label)) {
-      if (nd->choices.empty()) {
-        transitions.push_back(OracleTransition{
-            .thread = tid,
-            .label = *next_label,
-            .rf_source = std::nullopt,
-        });
-        continue;
-      }
-
-      for (const auto& choice : nd->choices) {
-        auto label = *nd;
-        label.value = choice;
-        transitions.push_back(OracleTransition{
-            .thread = tid,
-            .label = EventLabel{label},
-            .rf_source = std::nullopt,
-        });
-      }
-      continue;
-    }
-
-    transitions.push_back(OracleTransition{
-        .thread = tid,
-        .label = *next_label,
-        .rf_source = std::nullopt,
-    });
-  }
-
-  return transitions;
-}
-
-std::vector<ExplorationGraph> enumerate_reschedulable_graphs(
-    const Program& program,
-    const ExplorationGraph& graph) {
-  std::vector<ExplorationGraph> rescheduled;
-  const auto thread_ids = sorted_thread_ids(program);
-
-  for (const auto tid : thread_ids) {
-    const auto last_id = find_last_event_in_thread(graph, tid);
-    if (last_id == ExplorationGraph::kNoSource ||
-        !is_block(graph.event(last_id))) {
-      continue;
-    }
-
-    std::unordered_set<ExplorationGraph::EventId> keep_set;
-    keep_set.reserve(graph.event_count());
-    for (ExplorationGraph::EventId id = 0; id < graph.event_count(); ++id) {
-      if (id != last_id) {
-        keep_set.insert(id);
-      }
-    }
-    auto unblocked = graph.restrict(keep_set);
-
-    const auto& thread_fn = program.threads.at(tid);
-    const auto trace = unblocked.thread_trace(tid);
-    const auto step = unblocked.thread_event_count(tid);
-    const auto next_label = thread_fn(trace, step);
-    if (!next_label.has_value()) {
-      throw std::logic_error(
-          "rescheduling failed in oracle: blocked thread became done");
-    }
-    if (std::holds_alternative<BlockLabel>(*next_label)) {
-      throw std::logic_error(
-          "stress program returned BlockLabel; blocks are internal to DPOR");
-    }
-    const auto* recv = std::get_if<ReceiveLabel>(&*next_label);
-    if (recv == nullptr) {
-      throw std::logic_error(
-          "rescheduling failed in oracle: blocked thread is not waiting on receive");
-    }
-    if (recv->is_nonblocking()) {
-      throw std::logic_error(
-          "rescheduling failed in oracle: blocked thread became non-blocking receive");
-    }
-
-    if (has_compatible_unread_send(unblocked, tid, *recv)) {
-      rescheduled.push_back(std::move(unblocked));
-    }
-  }
-
-  return rescheduled;
-}
-
-void enumerate_consistent_executions(
-    const Program& program,
-    const ExplorationGraph& graph,
-    AsyncConsistencyChecker& checker,
-    std::set<std::string>& signatures) {
-  const auto transitions = enumerate_enabled_transitions(program, graph);
-  if (!transitions.empty()) {
-    for (const auto& transition : transitions) {
-      auto next_graph = graph;
-      const auto event_id = next_graph.add_event(transition.thread, transition.label);
-      if (transition.rf_source.has_value()) {
-        if (transition.rf_source->is_bottom()) {
-          next_graph.set_reads_from_bottom(event_id);
-        } else {
-          next_graph.set_reads_from(event_id, transition.rf_source->send_id());
-        }
-      }
-
-      // Soundness oracle follows Must's "visit-if-consistent" rule.
-      const auto consistency = checker.check(next_graph.execution_graph());
-      if (!consistency.is_consistent()) {
-        continue;
-      }
-
-      enumerate_consistent_executions(program, next_graph, checker, signatures);
-    }
-    return;
-  }
-
-  const auto rescheduled = enumerate_reschedulable_graphs(program, graph);
-  if (!rescheduled.empty()) {
-    for (const auto& unblocked : rescheduled) {
-      enumerate_consistent_executions(program, unblocked, checker, signatures);
-    }
-    return;
-  }
-
-  signatures.insert(graph_signature(graph));
-}
-
-std::set<std::string> collect_oracle_signatures(const Program& program) {
-  AsyncConsistencyChecker checker;
-  std::set<std::string> signatures;
-  enumerate_consistent_executions(program, ExplorationGraph{}, checker, signatures);
-  return signatures;
-}
+using dpor::test_support::require_dpor_matches_oracle;
 
 enum class ScriptOpKind {
   SendFixed,
@@ -347,6 +65,10 @@ Program build_program_from_spec(const ProgramSpec& spec) {
           if (trace.empty()) {
             return std::nullopt;
           }
+          if (trace.back().is_bottom()) {
+            throw std::logic_error(
+                "SendFromLastTrace requires a concrete prior observation");
+          }
           return SendLabel{
               .destination = op.destination,
               .value = trace.back().value(),
@@ -362,7 +84,8 @@ Program build_program_from_spec(const ProgramSpec& spec) {
           return make_receive_label<Value>(
               [expected = trace.back()](const Value& candidate) {
                 return candidate == expected;
-              });
+              },
+              op.receive_mode);
         case ScriptOpKind::NondeterministicChoice:
           if (!op.values.empty()) {
             return NondeterministicChoiceLabel{
@@ -407,7 +130,7 @@ std::string script_op_to_string(const ScriptOp& op) {
       oss << "})";
       break;
     case ScriptOpKind::ReceiveLastTraceValue:
-      oss << "R(trace[-1])";
+      oss << receive_prefix << "(trace[-1])";
       break;
     case ScriptOpKind::NondeterministicChoice:
       oss << "ND({";
@@ -473,6 +196,8 @@ std::vector<ProgramSpec> generate_stress_specs(
     const Value v2_alt = kValues[(i2 + 1) % 3];
 
     ProgramSpec spec;
+    // Keep at most one non-blocking receive per generated spec so the oracle
+    // remains cheap while still exercising nb-receive semantics.
     bool used_nonblocking_receive = false;
     const auto choose_receive_mode = [&](const bool allow_nonblocking = true) {
       if (!allow_nonblocking ||
@@ -589,9 +314,11 @@ std::vector<ProgramSpec> generate_stress_specs(
       case 7:
         receiver_script.push_back(ScriptOp{
             .kind = ScriptOpKind::ReceiveAny,
+            .receive_mode = choose_receive_mode(),
         });
         receiver_script.push_back(ScriptOp{
             .kind = ScriptOpKind::ReceiveLastTraceValue,
+            .receive_mode = choose_receive_mode(),
         });
         break;
       default:
@@ -648,56 +375,6 @@ bool spec_uses_nonblocking_receive(const ProgramSpec& spec) {
     }
   }
   return false;
-}
-
-void require_dpor_matches_oracle(const Program& program, const std::string& description) {
-  const auto oracle_signatures = collect_oracle_signatures(program);
-
-  std::vector<std::string> dpor_observed;
-  std::set<std::string> dpor_unique;
-  AsyncConsistencyChecker checker;
-  bool found_inconsistent_graph = false;
-
-  DporConfig config;
-  config.program = program;
-  config.on_execution = [&](const ExplorationGraph& graph) {
-    const auto consistency = checker.check(graph.execution_graph());
-    if (!consistency.is_consistent()) {
-      found_inconsistent_graph = true;
-    }
-    const auto sig = graph_signature(graph);
-    dpor_observed.push_back(sig);
-    dpor_unique.insert(sig);
-  };
-
-  const auto result = verify(config);
-
-  std::set<std::string> missing_from_dpor;
-  std::set<std::string> unexpected_in_dpor;
-  std::set_difference(
-      oracle_signatures.begin(),
-      oracle_signatures.end(),
-      dpor_unique.begin(),
-      dpor_unique.end(),
-      std::inserter(missing_from_dpor, missing_from_dpor.end()));
-  std::set_difference(
-      dpor_unique.begin(),
-      dpor_unique.end(),
-      oracle_signatures.begin(),
-      oracle_signatures.end(),
-      std::inserter(unexpected_in_dpor, unexpected_in_dpor.end()));
-
-  INFO("stress program: " << description);
-  INFO("oracle signatures: " << oracle_signatures.size());
-  INFO("dpor executions_explored: " << result.executions_explored);
-  INFO("dpor unique signatures: " << dpor_unique.size());
-  INFO("missing signatures: " << missing_from_dpor.size());
-  INFO("unexpected signatures: " << unexpected_in_dpor.size());
-
-  REQUIRE_FALSE(found_inconsistent_graph);
-  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
-  REQUIRE(dpor_unique.size() == dpor_observed.size());
-  REQUIRE(dpor_unique == oracle_signatures);
 }
 }  // namespace
 
