@@ -87,9 +87,8 @@ template <typename ValueT>
 [[nodiscard]] inline std::optional<std::pair<model::ThreadId, model::EventLabelT<ValueT>>>
 compute_next_event(
     const ProgramT<ValueT>& program,
-    const model::ExplorationGraphT<ValueT>& graph) {
-  const auto thread_ids = sorted_thread_ids(program);
-
+    const model::ExplorationGraphT<ValueT>& graph,
+    const std::vector<model::ThreadId>& thread_ids) {
   for (const auto tid : thread_ids) {
     // Skip threads that have terminated (block or error).
     if (graph.thread_is_terminated(tid)) {
@@ -351,7 +350,8 @@ inline void visit(
     model::ExplorationGraphT<ValueT> graph,
     VerifyResult& result,
     const DporConfigT<ValueT>& config,
-    std::size_t depth);
+    std::size_t depth,
+    const std::vector<model::ThreadId>& thread_ids);
 
 template <typename ValueT>
 inline void visit_if_consistent(
@@ -359,7 +359,8 @@ inline void visit_if_consistent(
     model::ExplorationGraphT<ValueT> graph,
     VerifyResult& result,
     const DporConfigT<ValueT>& config,
-    std::size_t depth);
+    std::size_t depth,
+    const std::vector<model::ThreadId>& thread_ids);
 
 // Must Example 4.1: before declaring completion, check whether a previously
 // blocked receive can now be unblocked due to newly-added sends. If one exists,
@@ -370,27 +371,13 @@ template <typename ValueT>
     const model::ExplorationGraphT<ValueT>& graph,
     VerifyResult& result,
     const DporConfigT<ValueT>& config,
-    std::size_t depth) {
+    std::size_t depth,
+    const std::vector<model::ThreadId>& thread_ids) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
   constexpr auto kNoSource = model::ExplorationGraphT<ValueT>::kNoSource;
 
-  auto find_last_event_in_thread = [&graph](const model::ThreadId tid) -> EvId {
-    EvId last_id = kNoSource;
-    model::EventIndex last_index = 0;
-    for (EvId id = 0; id < graph.event_count(); ++id) {
-      const auto& evt = graph.event(id);
-      if (evt.thread == tid &&
-          (last_id == kNoSource || evt.index > last_index)) {
-        last_id = id;
-        last_index = evt.index;
-      }
-    }
-    return last_id;
-  };
-
-  const auto thread_ids = sorted_thread_ids(program);
   for (const auto tid : thread_ids) {
-    const auto last_id = find_last_event_in_thread(tid);
+    const auto last_id = graph.last_event_id(tid);
     if (last_id == kNoSource || !model::is_block(graph.event(last_id))) {
       continue;
     }
@@ -431,7 +418,7 @@ template <typename ValueT>
       continue;
     }
 
-    visit(program, std::move(unblocked_graph), result, config, depth);
+    visit(program, std::move(unblocked_graph), result, config, depth, thread_ids);
     return true;
   }
 
@@ -448,7 +435,8 @@ inline void backward_revisit(
     typename model::ExplorationGraphT<ValueT>::EventId send_id,
     VerifyResult& result,
     const DporConfigT<ValueT>& config,
-    std::size_t depth) {
+    std::size_t depth,
+    const std::vector<model::ThreadId>& thread_ids) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
 
   if (result.kind == VerifyResultKind::ErrorFound) {
@@ -552,7 +540,7 @@ inline void backward_revisit(
     }
 
     auto revisited = restricted.with_rf(new_recv_id, new_send_id);
-    visit_if_consistent(program, std::move(revisited), result, config, depth);
+    visit_if_consistent(program, std::move(revisited), result, config, depth, thread_ids);
   }
 }
 
@@ -563,7 +551,8 @@ inline void visit_if_consistent(
     model::ExplorationGraphT<ValueT> graph,
     VerifyResult& result,
     const DporConfigT<ValueT>& config,
-    std::size_t depth) {
+    std::size_t depth,
+    const std::vector<model::ThreadId>& thread_ids) {
   if (result.kind == VerifyResultKind::ErrorFound) {
     return;
   }
@@ -574,7 +563,7 @@ inline void visit_if_consistent(
     return;  // Inconsistent — prune.
   }
 
-  visit(program, std::move(graph), result, config, depth);
+  visit(program, std::move(graph), result, config, depth, thread_ids);
 }
 
 // VISIT_P(G): main recursive procedure of Algorithm 1.
@@ -584,7 +573,8 @@ inline void visit(
     model::ExplorationGraphT<ValueT> graph,
     VerifyResult& result,
     const DporConfigT<ValueT>& config,
-    std::size_t depth) {
+    std::size_t depth,
+    const std::vector<model::ThreadId>& thread_ids) {
   if (result.kind == VerifyResultKind::ErrorFound) {
     return;
   }
@@ -597,10 +587,10 @@ inline void visit(
   }
 
   // Try to compute the next event.
-  const auto next = compute_next_event(program, graph);
+  const auto next = compute_next_event(program, graph, thread_ids);
 
   if (!next.has_value()) {
-    if (reschedule_blocked_receive_if_enabled(program, graph, result, config, depth)) {
+    if (reschedule_blocked_receive_if_enabled(program, graph, result, config, depth, thread_ids)) {
       return;
     }
     // No more events: this is a complete execution.
@@ -632,7 +622,7 @@ inline void visit(
       // No choices specified: just use the value as-is.
       auto new_graph = graph;
       static_cast<void>(new_graph.add_event(tid, label));
-      visit(program, std::move(new_graph), result, config, depth + 1);
+      visit(program, std::move(new_graph), result, config, depth + 1, thread_ids);
       return;
     }
 
@@ -644,7 +634,7 @@ inline void visit(
       nd_label.value = choice;
       auto new_graph = graph;
       static_cast<void>(new_graph.add_event(tid, model::EventLabelT<ValueT>{nd_label}));
-      visit(program, std::move(new_graph), result, config, depth + 1);
+      visit(program, std::move(new_graph), result, config, depth + 1, thread_ids);
     }
     return;
   }
@@ -669,13 +659,13 @@ inline void visit(
       auto new_graph = graph;
       const auto recv_id = new_graph.add_event(tid, label);
       new_graph.set_reads_from(recv_id, send_id);
-      visit_if_consistent(program, std::move(new_graph), result, config, depth + 1);
+      visit_if_consistent(program, std::move(new_graph), result, config, depth + 1, thread_ids);
     }
     if (recv->is_nonblocking()) {
       auto new_graph = graph;
       const auto recv_id = new_graph.add_event(tid, label);
       new_graph.set_reads_from_bottom(recv_id);
-      visit_if_consistent(program, std::move(new_graph), result, config, depth + 1);
+      visit_if_consistent(program, std::move(new_graph), result, config, depth + 1, thread_ids);
     }
     return;
   }
@@ -686,11 +676,11 @@ inline void visit(
     const auto send_id = new_graph.add_event(tid, label);
 
     // Backward revisit: try to reassign existing receives to read from this new send.
-    backward_revisit(program, new_graph, send_id, result, config, depth + 1);
+    backward_revisit(program, new_graph, send_id, result, config, depth + 1, thread_ids);
 
     // Forward continuation: continue exploration with the send added.
     if (result.kind != VerifyResultKind::ErrorFound) {
-      visit(program, std::move(new_graph), result, config, depth + 1);
+      visit(program, std::move(new_graph), result, config, depth + 1, thread_ids);
     }
     return;
   }
@@ -699,7 +689,7 @@ inline void visit(
   if (std::holds_alternative<model::BlockLabel>(label)) {
     auto new_graph = graph;
     static_cast<void>(new_graph.add_event(tid, label));
-    visit(program, std::move(new_graph), result, config, depth + 1);
+    visit(program, std::move(new_graph), result, config, depth + 1, thread_ids);
     return;
   }
 }
@@ -711,7 +701,8 @@ template <typename ValueT>
 [[nodiscard]] inline VerifyResult verify(const DporConfigT<ValueT>& config) {
   VerifyResult result;
   model::ExplorationGraphT<ValueT> empty_graph;
-  detail::visit(config.program, std::move(empty_graph), result, config, 0);
+  const auto thread_ids = detail::sorted_thread_ids(config.program);
+  detail::visit(config.program, std::move(empty_graph), result, config, 0, thread_ids);
   return result;
 }
 

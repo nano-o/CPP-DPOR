@@ -320,7 +320,7 @@ TEST_CASE("next-event converts an unsatisfied receive into an internal block",
     return std::nullopt;
   };
 
-  const auto next = dpor::algo::detail::compute_next_event(program, ExplorationGraph{});
+  const auto next = dpor::algo::detail::compute_next_event(program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program));
   REQUIRE(next.has_value());
   REQUIRE(next->first == 1);
   REQUIRE(std::holds_alternative<BlockLabel>(next->second));
@@ -336,7 +336,7 @@ TEST_CASE("next-event does not block an unsatisfied non-blocking receive",
     return std::nullopt;
   };
 
-  const auto next = dpor::algo::detail::compute_next_event(program, ExplorationGraph{});
+  const auto next = dpor::algo::detail::compute_next_event(program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program));
   REQUIRE(next.has_value());
   REQUIRE(next->first == 1);
   REQUIRE(std::holds_alternative<ReceiveLabel>(next->second));
@@ -490,7 +490,7 @@ TEST_CASE("backward revisit rewires non-blocking receive from bottom in direct g
     revisited_graphs.push_back(g);
   };
 
-  dpor::algo::detail::backward_revisit(config.program, graph, send, result, config, 0);
+  dpor::algo::detail::backward_revisit(config.program, graph, send, result, config, 0, dpor::algo::detail::sorted_thread_ids(config.program));
 
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
@@ -770,7 +770,7 @@ TEST_CASE("internal block suspends thread progress until receive is rescheduled"
   };
 
   // At the empty graph, T1 has no compatible send and must be internally blocked.
-  const auto first = dpor::algo::detail::compute_next_event(program, ExplorationGraph{});
+  const auto first = dpor::algo::detail::compute_next_event(program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program));
   REQUIRE(first.has_value());
   REQUIRE(first->first == 1);
   REQUIRE(std::holds_alternative<BlockLabel>(first->second));
@@ -873,13 +873,13 @@ TEST_CASE("multiple blocked receives are both rescheduled when matching sends ap
 
   // At the beginning, both receiver threads should become internally blocked.
   ExplorationGraph partial;
-  const auto first = dpor::algo::detail::compute_next_event(program, partial);
+  const auto first = dpor::algo::detail::compute_next_event(program, partial, dpor::algo::detail::sorted_thread_ids(program));
   REQUIRE(first.has_value());
   REQUIRE(first->first == 1);
   REQUIRE(std::holds_alternative<BlockLabel>(first->second));
   static_cast<void>(partial.add_event(first->first, first->second));
 
-  const auto second = dpor::algo::detail::compute_next_event(program, partial);
+  const auto second = dpor::algo::detail::compute_next_event(program, partial, dpor::algo::detail::sorted_thread_ids(program));
   REQUIRE(second.has_value());
   REQUIRE(second->first == 2);
   REQUIRE(std::holds_alternative<BlockLabel>(second->second));
@@ -1076,7 +1076,7 @@ TEST_CASE("backward revisit must reject candidates when a deleted event violates
   VerifyResult result;
   DporConfig config;
   dpor::algo::detail::backward_revisit(
-      config.program, graph, s41, result, config, 0);
+      config.program, graph, s41, result, config, 0, dpor::algo::detail::sorted_thread_ids(config.program));
 
   // With the Deleted-set guard from Algorithm 1, this revisit should be blocked.
   REQUIRE(result.executions_explored == 0);
@@ -1095,7 +1095,7 @@ TEST_CASE("line-10 revisit filter blocks revisits when receive already reaches t
 
   VerifyResult result;
   DporConfig config;
-  dpor::algo::detail::backward_revisit(config.program, graph, send, result, config, 0);
+  dpor::algo::detail::backward_revisit(config.program, graph, send, result, config, 0, dpor::algo::detail::sorted_thread_ids(config.program));
   REQUIRE(result.executions_explored == 0);
 }
 
@@ -1128,7 +1128,7 @@ TEST_CASE("deleted-set check rejects revisit when any deleted event fails (mixed
 
   VerifyResult result;
   DporConfig config;
-  dpor::algo::detail::backward_revisit(config.program, graph, s41, result, config, 0);
+  dpor::algo::detail::backward_revisit(config.program, graph, s41, result, config, 0, dpor::algo::detail::sorted_thread_ids(config.program));
   REQUIRE(result.executions_explored == 0);
 }
 
@@ -1150,7 +1150,7 @@ TEST_CASE("backward revisit preserves intended rf endpoint after restrict/remap"
     revisited_graphs.push_back(g);
   };
 
-  dpor::algo::detail::backward_revisit(config.program, graph, s_new, result, config, 0);
+  dpor::algo::detail::backward_revisit(config.program, graph, s_new, result, config, 0, dpor::algo::detail::sorted_thread_ids(config.program));
 
   REQUIRE(result.executions_explored == 1);
   REQUIRE(revisited_graphs.size() == 1);
@@ -1191,7 +1191,7 @@ TEST_CASE("only compatible receives in destination thread are revisited",
     revisited_graphs.push_back(g);
   };
 
-  dpor::algo::detail::backward_revisit(config.program, graph, s_new, result, config, 0);
+  dpor::algo::detail::backward_revisit(config.program, graph, s_new, result, config, 0, dpor::algo::detail::sorted_thread_ids(config.program));
 
   REQUIRE(result.executions_explored == 1);
   REQUIRE(revisited_graphs.size() == 1);

@@ -20,6 +20,7 @@
 #include "dpor/model/relation.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -33,6 +34,13 @@
 #include <vector>
 
 namespace dpor::model {
+
+// Per-thread structural metadata maintained incrementally by add_event().
+// Enables O(1) thread_event_count(), thread_is_terminated(), and last_event_id().
+struct ThreadState {
+  std::size_t event_count{0};
+  std::size_t last_event_id{std::numeric_limits<std::size_t>::max()};
+};
 
 struct PorfCache {
   std::vector<std::vector<std::size_t>> clocks;
@@ -53,12 +61,17 @@ class ExplorationGraphT {
 
   ExplorationGraphT() = default;
 
-  // Add an event, tracking insertion order.
+  // Add an event, tracking insertion order and per-thread metadata.
   [[nodiscard]] EventId add_event(ThreadId thread, EventLabelT<ValueT> label) {
     const auto id = graph_.add_event(thread, std::move(label));
     insertion_order_.push_back(id);
     insertion_position_[id] = insertion_order_.size() - 1U;
     porf_cache_ = nullptr;
+
+    auto& ts = thread_state_[thread];
+    assert(ts.last_event_id == kNoSource || event(id).index > event(ts.last_event_id).index);
+    ts.event_count++;
+    ts.last_event_id = id;
     return id;
   }
 
@@ -135,61 +148,53 @@ class ExplorationGraphT {
   // DPOR's next-event selection skips such threads. Blocked receive threads
   // may later be rescheduled by the algorithm.
   [[nodiscard]] bool thread_is_terminated(ThreadId tid) const {
-    // Find the last event (by event index) for this thread.
-    EventId last_id = kNoSource;
-    EventIndex last_index = 0;
-    for (EventId id = 0; id < event_count(); ++id) {
-      const auto& evt = event(id);
-      if (evt.thread == tid) {
-        if (last_id == kNoSource || evt.index > last_index) {
-          last_id = id;
-          last_index = evt.index;
-        }
-      }
-    }
-    if (last_id == kNoSource) {
+    const auto it = thread_state_.find(tid);
+    if (it == thread_state_.end()) {
       return false;  // No events for this thread yet.
     }
-    const auto& last_evt = event(last_id);
+    const auto& last_evt = event(it->second.last_event_id);
     return is_block(last_evt) || is_error(last_evt);
   }
 
   // Count events belonging to the given thread.
   [[nodiscard]] std::size_t thread_event_count(ThreadId tid) const {
-    std::size_t count = 0;
-    for (EventId id = 0; id < event_count(); ++id) {
-      if (event(id).thread == tid) {
-        ++count;
-      }
+    const auto it = thread_state_.find(tid);
+    if (it == thread_state_.end()) {
+      return 0;
     }
-    return count;
+    return it->second.event_count;
+  }
+
+  // Returns the last event ID for the given thread, or kNoSource if no events.
+  [[nodiscard]] EventId last_event_id(ThreadId tid) const {
+    const auto it = thread_state_.find(tid);
+    if (it == thread_state_.end()) {
+      return kNoSource;
+    }
+    return it->second.last_event_id;
   }
 
   // Extract the value sequence visible to a thread: values from receives (via rf)
   // and ND choices, in program order.
+  // Per-thread events appear in monotonic index order in the events vector
+  // (guaranteed by add_event's auto-indexing), so no sort is needed.
   [[nodiscard]] std::vector<ObservedValueT<ValueT>> thread_trace(ThreadId tid) const {
-    // Gather events for this thread, sorted by event index (program order).
-    std::vector<std::pair<EventIndex, EventId>> thread_events;
-    for (EventId id = 0; id < event_count(); ++id) {
-      const auto& evt = event(id);
-      if (evt.thread == tid) {
-        thread_events.emplace_back(evt.index, id);
-      }
-    }
-    std::sort(thread_events.begin(), thread_events.end());
-
     std::vector<ObservedValueT<ValueT>> trace;
+    trace.reserve(thread_event_count(tid));
     const auto& rf = reads_from();
 
-    for (const auto& [_, id] : thread_events) {
+    for (EventId id = 0; id < event_count(); ++id) {
       const auto& evt = event(id);
+      if (evt.thread != tid) {
+        continue;
+      }
       if (const auto* recv = as_receive(evt)) {
-        auto it = rf.find(id);
-        if (it != rf.end()) {
-          if (it->second.is_bottom()) {
+        auto rf_it = rf.find(id);
+        if (rf_it != rf.end()) {
+          if (rf_it->second.is_bottom()) {
             trace.push_back(BottomValue{});
           } else {
-            const auto& source_evt = event(it->second.send_id());
+            const auto& source_evt = event(rf_it->second.send_id());
             if (const auto* send = as_send(source_evt)) {
               trace.push_back(send->value);
             }
@@ -343,6 +348,7 @@ class ExplorationGraphT {
   ExecutionGraphT<ValueT> graph_{};
   std::vector<EventId> insertion_order_{};
   std::unordered_map<EventId, std::size_t> insertion_position_{};
+  std::unordered_map<ThreadId, ThreadState> thread_state_{};
   mutable std::shared_ptr<PorfCache> porf_cache_{};
 
   void ensure_porf_cache() const {

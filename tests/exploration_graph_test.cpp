@@ -463,3 +463,151 @@ TEST_CASE(
   REQUIRE_THROWS_AS(g.porf_contains(s, 999), std::out_of_range);
   REQUIRE_THROWS_AS(g.porf_contains(999, r), std::out_of_range);
 }
+
+// --- thread_event_count ---
+
+TEST_CASE("thread_event_count tracks events per thread", "[model][exploration_graph][thread_state]") {
+  ExplorationGraph g;
+  REQUIRE(g.thread_event_count(1) == 0);
+  REQUIRE(g.thread_event_count(99) == 0);
+
+  static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "a"}));
+  REQUIRE(g.thread_event_count(1) == 1);
+  REQUIRE(g.thread_event_count(2) == 0);
+
+  static_cast<void>(g.add_event(2, make_receive_label<Value>()));
+  REQUIRE(g.thread_event_count(1) == 1);
+  REQUIRE(g.thread_event_count(2) == 1);
+
+  static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "b"}));
+  REQUIRE(g.thread_event_count(1) == 2);
+}
+
+// --- thread_is_terminated ---
+
+TEST_CASE("thread_is_terminated after sends", "[model][exploration_graph][thread_state]") {
+  ExplorationGraph g;
+  REQUIRE_FALSE(g.thread_is_terminated(1));
+
+  static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "a"}));
+  REQUIRE_FALSE(g.thread_is_terminated(1));
+}
+
+TEST_CASE("thread_is_terminated after block", "[model][exploration_graph][thread_state]") {
+  ExplorationGraph g;
+  static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "a"}));
+  static_cast<void>(g.add_event(1, BlockLabel{}));
+  REQUIRE(g.thread_is_terminated(1));
+}
+
+TEST_CASE("thread_is_terminated after error", "[model][exploration_graph][thread_state]") {
+  ExplorationGraph g;
+  static_cast<void>(g.add_event(1, ErrorLabel{}));
+  REQUIRE(g.thread_is_terminated(1));
+}
+
+TEST_CASE("thread_is_terminated after receives", "[model][exploration_graph][thread_state]") {
+  ExplorationGraph g;
+  static_cast<void>(g.add_event(1, make_receive_label<Value>()));
+  REQUIRE_FALSE(g.thread_is_terminated(1));
+}
+
+TEST_CASE("thread_is_terminated for nonexistent thread", "[model][exploration_graph][thread_state]") {
+  ExplorationGraph g;
+  static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "a"}));
+  REQUIRE_FALSE(g.thread_is_terminated(99));
+}
+
+// --- last_event_id ---
+
+TEST_CASE("last_event_id returns kNoSource for empty/nonexistent thread",
+    "[model][exploration_graph][thread_state]") {
+  ExplorationGraph g;
+  REQUIRE(g.last_event_id(1) == ExplorationGraph::kNoSource);
+  REQUIRE(g.last_event_id(99) == ExplorationGraph::kNoSource);
+}
+
+TEST_CASE("last_event_id tracks most recent event", "[model][exploration_graph][thread_state]") {
+  ExplorationGraph g;
+  const auto a = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
+  REQUIRE(g.last_event_id(1) == a);
+
+  const auto b = g.add_event(1, SendLabel{.destination = 2, .value = "b"});
+  REQUIRE(g.last_event_id(1) == b);
+
+  // Other thread unaffected.
+  REQUIRE(g.last_event_id(2) == ExplorationGraph::kNoSource);
+}
+
+// --- thread_trace after with_rf retargets ---
+
+TEST_CASE("thread_trace after with_rf retargets a receive",
+    "[model][exploration_graph][thread_state]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
+  const auto r = g.add_event(2, make_receive_label<Value>());
+  g.set_reads_from(r, s1);
+
+  REQUIRE(g.thread_trace(2).size() == 1);
+  REQUIRE(g.thread_trace(2)[0] == "x");
+
+  const auto g2 = g.with_rf(r, s2);
+  REQUIRE(g2.thread_trace(2).size() == 1);
+  REQUIRE(g2.thread_trace(2)[0] == "y");
+
+  // Original unchanged.
+  REQUIRE(g.thread_trace(2)[0] == "x");
+}
+
+// --- thread_trace after restrict ---
+
+TEST_CASE("thread_trace after restrict remaps correctly",
+    "[model][exploration_graph][thread_state]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
+  const auto r1 = g.add_event(2, make_receive_label<Value>());
+  const auto r2 = g.add_event(2, make_receive_label<Value>());
+  g.set_reads_from(r1, s1);
+  g.set_reads_from(r2, s2);
+
+  // Full trace for thread 2: ["x", "y"]
+  REQUIRE(g.thread_trace(2).size() == 2);
+
+  // Restrict to {s2, r2} — only the second send-receive pair.
+  const auto restricted = g.restrict({s2, r2});
+  REQUIRE(restricted.event_count() == 2);
+
+  const auto trace = restricted.thread_trace(2);
+  REQUIRE(trace.size() == 1);
+  REQUIRE(trace[0] == "y");
+}
+
+// --- thread_event_count and thread_is_terminated after restrict ---
+
+TEST_CASE("thread_event_count correct after restrict",
+    "[model][exploration_graph][thread_state]") {
+  ExplorationGraph g;
+  const auto a = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
+  static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "b"}));
+  static_cast<void>(g.add_event(2, make_receive_label<Value>()));
+
+  const auto restricted = g.restrict({a});
+  REQUIRE(restricted.thread_event_count(1) == 1);
+  REQUIRE(restricted.thread_event_count(2) == 0);
+}
+
+TEST_CASE("thread_is_terminated correct after restrict removes block",
+    "[model][exploration_graph][thread_state]") {
+  ExplorationGraph g;
+  const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
+  const auto b = g.add_event(1, BlockLabel{});
+
+  REQUIRE(g.thread_is_terminated(1));
+
+  // Restrict to just the send — block removed.
+  const auto restricted = g.restrict({s});
+  REQUIRE_FALSE(restricted.thread_is_terminated(1));
+  static_cast<void>(b);
+}
