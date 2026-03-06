@@ -258,6 +258,57 @@ TEST_CASE("Coordinator cancels vote timeout after collecting all votes",
   REQUIRE(count_decision_sends(env, tpc::Decision::Commit) == 2);
 }
 
+TEST_CASE("Participant arms decision timeout after voting and cancels it on decision",
+          "[two_phase_commit][protocol][timer]") {
+  tpc::Participant participant(1, /*decision_timeout_ms=*/10);
+  RecordingEnv env;
+  env.fixed_vote = tpc::Vote::Yes;
+
+  REQUIRE(participant.start(env));
+  REQUIRE(env.sent.empty());
+  REQUIRE(env.set_timer_calls == 0);
+
+  REQUIRE(participant.receive(env, tpc::Prepare{}));
+  REQUIRE(env.set_timer_calls == 1);
+  REQUIRE(env.sent.size() == 1);
+
+  const auto* vote = std::get_if<tpc::VoteMsg>(&env.sent.front().second);
+  REQUIRE(vote != nullptr);
+  REQUIRE(vote->from == 1);
+  REQUIRE(vote->vote == tpc::Vote::Yes);
+
+  REQUIRE_FALSE(
+      participant.receive(env, tpc::DecisionMsg{tpc::Decision::Commit}));
+  REQUIRE(participant.outcome() == tpc::Decision::Commit);
+  REQUIRE(env.cancel_timer_calls == 1);
+  REQUIRE_FALSE(env.fire_single_timer());
+  REQUIRE(env.sent.size() == 2);
+
+  const auto* ack = std::get_if<tpc::Ack>(&env.sent.back().second);
+  REQUIRE(ack != nullptr);
+  REQUIRE(ack->from == 1);
+}
+
+TEST_CASE("Participant timeout causes local abort while waiting for decision",
+          "[two_phase_commit][protocol][timer]") {
+  tpc::Participant participant(1, /*decision_timeout_ms=*/10);
+  RecordingEnv env;
+  env.fixed_vote = tpc::Vote::Yes;
+
+  REQUIRE(participant.start(env));
+  REQUIRE(participant.receive(env, tpc::Prepare{}));
+  REQUIRE(participant.outcome() == std::nullopt);
+
+  REQUIRE(env.fire_single_timer());
+  REQUIRE(participant.outcome() == tpc::Decision::Abort);
+
+  // Once the timeout fires, the participant stays aborted even if a late
+  // decision is delivered.
+  REQUIRE_FALSE(
+      participant.receive(env, tpc::DecisionMsg{tpc::Decision::Commit}));
+  REQUIRE(participant.outcome() == tpc::Decision::Abort);
+}
+
 // ---------------------------------------------------------------------------
 // DPOR tests
 // ---------------------------------------------------------------------------
@@ -823,4 +874,18 @@ TEST_CASE("UDP: shutdown with pending timers exits cleanly",
   env.run(proto);
   // If we get here, shutdown was clean.
   REQUIRE(true);
+}
+
+TEST_CASE("UDP: participant locally aborts when decision timer fires",
+          "[two_phase_commit][udp][timer]") {
+  auto pm = make_localhost_port_map(1);
+
+  tpc::UdpEnvironment coordinator_sender(tpc::kCoordinator, pm);
+  tpc::UdpEnvironment participant_env(1, pm, tpc::Vote::Yes);
+  tpc::Participant participant(1, /*decision_timeout_ms=*/10);
+
+  coordinator_sender.send(1, tpc::Prepare{});
+  participant_env.run(participant);
+
+  REQUIRE(participant.outcome() == tpc::Decision::Abort);
 }

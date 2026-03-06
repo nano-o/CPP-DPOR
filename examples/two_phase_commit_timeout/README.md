@@ -117,6 +117,10 @@ This timeout variant extends the environment with `set_timer()` /
 - The coordinator sets a vote-collection timer in `start()`. If the timer
   fires before all unique participant votes arrive, it broadcasts
   `DECISION ABORT` and transitions to ack collection.
+- Each participant sets a decision-wait timer immediately after sending its
+  vote. If that timer fires before any decision arrives, the participant
+  locally aborts and exits. This is intentionally unsafe and exists only to
+  exercise timeout behavior in the example.
 - Current limitation: there is no ack-collection timeout. After deciding
   (including timeout-triggered Abort), the coordinator still waits for unique
   acks from all participants. If some participants never process the decision,
@@ -124,7 +128,8 @@ This timeout variant extends the environment with `set_timer()` /
 - `UdpEnvironment` implements timers and dispatches callbacks inside `run()`.
 - `SimEnvironment` timer methods are currently stubs.
 - DPOR exploration in this example currently models message/vote/crash behavior,
-  not timer events.
+  not timer events. Coordinator and participant timeouts are therefore only
+  exercised by the protocol-state-machine and UDP tests.
 
 ## UDP runtime behavior
 
@@ -147,6 +152,9 @@ The protocol-state-machine tests additionally check:
 - out-of-phase and duplicate acks are ignored while collecting acks
 - vote-timeout expiry forces `DECISION ABORT`
 - collecting all votes cancels the vote timer
+- participants arm a decision-wait timer after voting
+- participants cancel that timer when a decision arrives
+- participant timeout triggers a local abort
 
 The UDP tests additionally check runtime transport and timer behavior:
 
@@ -154,6 +162,7 @@ The UDP tests additionally check runtime transport and timer behavior:
 - localhost send/receive works end to end
 - full UDP protocol runs commit or abort as expected
 - repeated random-vote UDP runs preserve agreement
+- a participant can locally abort if no decision arrives before its timer fires
 - timer callback fires without incoming UDP traffic
 - canceled timer does not fire
 - replacing a timer id keeps only the newest callback
@@ -189,7 +198,7 @@ cmake --build --preset debug
 # DPOR exploration/invariants only:
 ./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[two_phase_commit]~[protocol]~[udp]"
 
-# Coordinator protocol-state-machine checks, including vote-timeout behavior:
+# Protocol-state-machine checks, including coordinator and participant timeouts:
 ./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[protocol]"
 
 # UDP transport tests (this also includes the UDP timer tests):

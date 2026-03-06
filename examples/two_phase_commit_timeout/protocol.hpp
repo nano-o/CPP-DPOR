@@ -280,7 +280,9 @@ class Coordinator {
 
 class Participant {
  public:
-  explicit Participant(ParticipantId id) : id_(id) {}
+  explicit Participant(ParticipantId id,
+                       std::size_t decision_timeout_ms = 1000)
+      : id_(id), decision_timeout_ms_(decision_timeout_ms) {}
 
   // Kick off the protocol: participant waits for Prepare, so it just
   // signals that it needs a message.
@@ -296,17 +298,27 @@ class Participant {
   bool receive(Environment& env, const Message& msg) {
     switch (state_) {
       case State::WaitPrepare: {
+        if (!std::holds_alternative<Prepare>(msg)) {
+          return true;
+        }
         // Got Prepare — vote and send it.
         auto vote = env.get_vote();
         env.send(kCoordinator, VoteMsg{id_, vote});
+        env.set_timer(kDecisionTimeoutTimerId, decision_timeout_ms_,
+                      [this](Environment& timer_env) {
+                        on_decision_timeout(timer_env);
+                      });
         state_ = State::WaitDecision;
         return true;
       }
       case State::WaitDecision: {
         const auto* dec = std::get_if<DecisionMsg>(&msg);
-        if (dec != nullptr) {
-          outcome_ = dec->decision;
+        if (dec == nullptr) {
+          return true;
         }
+
+        env.cancel_timer(kDecisionTimeoutTimerId);
+        outcome_ = dec->decision;
         env.send(kCoordinator, Ack{id_});
         state_ = State::Done;
         return false;
@@ -323,9 +335,24 @@ class Participant {
   }
 
  private:
+  static constexpr TimerId kDecisionTimeoutTimerId = 1;
+
+  void on_decision_timeout(Environment& env) {
+    if (state_ != State::WaitDecision) {
+      return;
+    }
+
+    outcome_ = Decision::Abort;
+    state_ = State::Done;
+
+    // Wake blocking runtimes so they can observe completion and return.
+    env.send(id_, DecisionMsg{Decision::Abort});
+  }
+
   enum class State { WaitPrepare, WaitDecision, Done };
 
   ParticipantId id_;
+  std::size_t decision_timeout_ms_;
   State state_ = State::WaitPrepare;
   std::optional<Decision> outcome_;
 };
