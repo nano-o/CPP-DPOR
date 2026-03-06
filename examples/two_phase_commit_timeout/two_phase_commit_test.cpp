@@ -29,16 +29,36 @@ using namespace tpc_sim;
 // Trace helpers
 // ---------------------------------------------------------------------------
 
-// Participant trace layout (program order):
-//   [0] = received Prepare (serialized)
-//   [1] = vote ND choice ("YES" / "NO")
-//   [2] = received DecisionMsg (serialized) -- only if coordinator didn't crash
+static std::vector<model::ExplorationGraph::EventId>
+thread_event_ids_in_program_order(const model::ExplorationGraph& graph,
+                                  model::ThreadId tid) {
+  std::vector<std::pair<model::EventIndex, model::ExplorationGraph::EventId>>
+      indexed_events;
+  for (model::ExplorationGraph::EventId id = 0; id < graph.event_count(); ++id) {
+    const auto& evt = graph.event(id);
+    if (evt.thread == tid) {
+      indexed_events.emplace_back(evt.index, id);
+    }
+  }
+  std::sort(indexed_events.begin(), indexed_events.end());
+
+  std::vector<model::ExplorationGraph::EventId> result;
+  result.reserve(indexed_events.size());
+  for (const auto& [_, id] : indexed_events) {
+    result.push_back(id);
+  }
+  return result;
+}
+
 static std::string get_participant_vote(
     const model::ExplorationGraph& graph,
     tpc::ParticipantId pid) {
-  auto trace = graph.thread_trace(participant_to_thread(pid));
-  if (trace.size() >= 2) {
-    return trace[1].value();
+  for (const auto id :
+       thread_event_ids_in_program_order(graph, participant_to_thread(pid))) {
+    const auto* nd = model::as_nondeterministic_choice(graph.event(id));
+    if (nd != nullptr) {
+      return nd->value;
+    }
   }
   return {};
 }
@@ -46,22 +66,54 @@ static std::string get_participant_vote(
 static std::optional<std::string> get_participant_decision(
     const model::ExplorationGraph& graph,
     tpc::ParticipantId pid) {
-  auto trace = graph.thread_trace(participant_to_thread(pid));
-  if (trace.size() >= 3) {
-    return trace[2].value();
+  for (const auto id :
+       thread_event_ids_in_program_order(graph, participant_to_thread(pid))) {
+    const auto* recv = model::as_receive(graph.event(id));
+    if (recv == nullptr) {
+      continue;
+    }
+    auto rf_it = graph.reads_from().find(id);
+    if (rf_it == graph.reads_from().end() || rf_it->second.is_bottom()) {
+      continue;
+    }
+    const auto* send = model::as_send(graph.event(rf_it->second.send_id()));
+    if (send == nullptr) {
+      continue;
+    }
+    if (std::holds_alternative<tpc::DecisionMsg>(tpc::deserialize(send->value))) {
+      return send->value;
+    }
   }
   return std::nullopt;
 }
 
-// Coordinator trace layout (program order, with N participants):
-//   [0..N-1] = received votes (serialized VoteMsg)
-//   [N]      = crash ND choice ("no_crash" / "crash")
+static bool participant_timed_out_locally(
+    const model::ExplorationGraph& graph,
+    tpc::ParticipantId pid) {
+  for (const auto id :
+       thread_event_ids_in_program_order(graph, participant_to_thread(pid))) {
+    if (model::as_receive(graph.event(id)) == nullptr) {
+      continue;
+    }
+    auto rf_it = graph.reads_from().find(id);
+    if (rf_it != graph.reads_from().end() && rf_it->second.is_bottom()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool coordinator_crashed(const model::ExplorationGraph& graph,
-                                std::size_t num_participants) {
-  auto trace =
-      graph.thread_trace(participant_to_thread(tpc::kCoordinator));
-  if (trace.size() > num_participants) {
-    return trace[num_participants] == "crash";
+                                std::size_t /*num_participants*/) {
+  for (const auto id : thread_event_ids_in_program_order(
+           graph, participant_to_thread(tpc::kCoordinator))) {
+    const auto* nd = model::as_nondeterministic_choice(graph.event(id));
+    if (nd == nullptr) {
+      continue;
+    }
+    if (nd->choices == std::vector<std::string>{"no_crash", "crash"}) {
+      return nd->value == "crash";
+    }
   }
   return false;
 }
@@ -355,6 +407,215 @@ TEST_CASE("Participant timeout causes local abort while waiting for decision",
 }
 
 // ---------------------------------------------------------------------------
+// Simulation adapter tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SimEnvironment captures timer-free waits as blocking receives",
+          "[two_phase_commit][simulation][timer]") {
+  struct WaitForMessage {
+    bool start(tpc::Environment& /*env*/) { return true; }
+    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
+      return false;
+    }
+  };
+
+  WaitForMessage protocol;
+  ThreadTrace trace;
+  SimEnvironment env(participant_to_thread, /*target_io=*/0, trace,
+                     /*trace_offset=*/0);
+
+  const auto label = run_and_capture(protocol, env);
+  REQUIRE(label.has_value());
+  const auto* recv = std::get_if<ReceiveLabel>(&*label);
+  REQUIRE(recv != nullptr);
+  REQUIRE(recv->is_blocking());
+}
+
+TEST_CASE("SimEnvironment captures timer-armed waits as non-blocking receives",
+          "[two_phase_commit][simulation][timer]") {
+  struct WaitWithTimer {
+    bool start(tpc::Environment& env) {
+      env.set_timer(1, 10, [](tpc::Environment& /*timer_env*/) {
+        return false;
+      });
+      return true;
+    }
+    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
+      return false;
+    }
+  };
+
+  WaitWithTimer protocol;
+  ThreadTrace trace;
+  SimEnvironment env(participant_to_thread, /*target_io=*/0, trace,
+                     /*trace_offset=*/0);
+
+  const auto label = run_and_capture(protocol, env);
+  REQUIRE(label.has_value());
+  const auto* recv = std::get_if<ReceiveLabel>(&*label);
+  REQUIRE(recv != nullptr);
+  REQUIRE(recv->is_nonblocking());
+}
+
+TEST_CASE("SimEnvironment returns to blocking receive after timer cancellation",
+          "[two_phase_commit][simulation][timer]") {
+  struct WaitWithCanceledTimer {
+    bool start(tpc::Environment& env) {
+      env.set_timer(1, 10, [](tpc::Environment& /*timer_env*/) {
+        return false;
+      });
+      env.cancel_timer(1);
+      return true;
+    }
+    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
+      return false;
+    }
+  };
+
+  WaitWithCanceledTimer protocol;
+  ThreadTrace trace;
+  SimEnvironment env(participant_to_thread, /*target_io=*/0, trace,
+                     /*trace_offset=*/0);
+
+  const auto label = run_and_capture(protocol, env);
+  REQUIRE(label.has_value());
+  const auto* recv = std::get_if<ReceiveLabel>(&*label);
+  REQUIRE(recv != nullptr);
+  REQUIRE(recv->is_blocking());
+}
+
+TEST_CASE("SimEnvironment replays bottom as timer firing",
+          "[two_phase_commit][simulation][timer]") {
+  struct TimerThenSend {
+    bool timer_fired = false;
+
+    bool start(tpc::Environment& env) {
+      env.set_timer(1, 10, [this](tpc::Environment& timer_env) {
+        timer_fired = true;
+        timer_env.send(1, tpc::Prepare{});
+        return false;
+      });
+      return true;
+    }
+
+    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
+      return false;
+    }
+  };
+
+  TimerThenSend protocol;
+  ThreadTrace trace{model::ObservedValue::bottom()};
+  SimEnvironment env(participant_to_thread, /*target_io=*/1, trace,
+                     /*trace_offset=*/0);
+
+  const auto label = run_and_capture(protocol, env);
+  REQUIRE(protocol.timer_fired);
+  REQUIRE(label.has_value());
+  const auto* send = std::get_if<SendLabel>(&*label);
+  REQUIRE(send != nullptr);
+  REQUIRE(send->destination == participant_to_thread(1));
+  REQUIRE(send->value == tpc::serialize(tpc::Prepare{}));
+}
+
+TEST_CASE("SimEnvironment replays timer-callback sends before later target steps",
+          "[two_phase_commit][simulation][timer]") {
+  struct TimerSendThenWait {
+    bool timer_fired = false;
+
+    bool start(tpc::Environment& env) {
+      env.set_timer(1, 10, [this](tpc::Environment& timer_env) {
+        timer_fired = true;
+        timer_env.send(1, tpc::Prepare{});
+        return true;
+      });
+      return true;
+    }
+
+    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
+      return false;
+    }
+  };
+
+  TimerSendThenWait protocol;
+  ThreadTrace trace{model::ObservedValue::bottom()};
+  SimEnvironment env(participant_to_thread, /*target_io=*/2, trace,
+                     /*trace_offset=*/0);
+
+  const auto label = run_and_capture(protocol, env);
+  REQUIRE(protocol.timer_fired);
+  REQUIRE(label.has_value());
+  const auto* recv = std::get_if<ReceiveLabel>(&*label);
+  REQUIRE(recv != nullptr);
+  REQUIRE(recv->is_blocking());
+}
+
+TEST_CASE("SimEnvironment refreshes the active timer when the id is reused",
+          "[two_phase_commit][simulation][timer]") {
+  struct ReplaceTimer {
+    bool old_timer_fired = false;
+    bool new_timer_fired = false;
+
+    bool start(tpc::Environment& env) {
+      env.set_timer(1, 10, [this](tpc::Environment& timer_env) {
+        old_timer_fired = true;
+        timer_env.send(1, tpc::Prepare{});
+        return false;
+      });
+      env.set_timer(1, 20, [this](tpc::Environment& timer_env) {
+        new_timer_fired = true;
+        timer_env.send(1, tpc::Ack{1});
+        return false;
+      });
+      return true;
+    }
+
+    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
+      return false;
+    }
+  };
+
+  ReplaceTimer protocol;
+  ThreadTrace trace{model::ObservedValue::bottom()};
+  SimEnvironment env(participant_to_thread, /*target_io=*/1, trace,
+                     /*trace_offset=*/0);
+
+  const auto label = run_and_capture(protocol, env);
+  REQUIRE_FALSE(protocol.old_timer_fired);
+  REQUIRE(protocol.new_timer_fired);
+  REQUIRE(label.has_value());
+  const auto* send = std::get_if<SendLabel>(&*label);
+  REQUIRE(send != nullptr);
+  REQUIRE(send->destination == participant_to_thread(1));
+  REQUIRE(send->value == tpc::serialize(tpc::Ack{1}));
+}
+
+TEST_CASE("SimEnvironment rejects multiple simultaneous active timers",
+          "[two_phase_commit][simulation][timer]") {
+  struct WaitWithTwoTimers {
+    bool start(tpc::Environment& env) {
+      env.set_timer(1, 10, [](tpc::Environment& /*timer_env*/) {
+        return true;
+      });
+      env.set_timer(2, 10, [](tpc::Environment& /*timer_env*/) {
+        return false;
+      });
+      return true;
+    }
+
+    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
+      return false;
+    }
+  };
+
+  WaitWithTwoTimers protocol;
+  ThreadTrace trace;
+  SimEnvironment env(participant_to_thread, /*target_io=*/0, trace,
+                     /*trace_offset=*/0);
+
+  REQUIRE_THROWS_AS(run_and_capture(protocol, env), std::logic_error);
+}
+
+// ---------------------------------------------------------------------------
 // DPOR tests
 // ---------------------------------------------------------------------------
 
@@ -367,10 +628,34 @@ TEST_CASE("2PC basic exploration with 2 participants",
 
   const auto result = algo::verify(config);
   REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
-  // No-crash: 4 vote combos * 4 orderings = 16
-  // Crash:    4 vote combos * 2 orderings = 8
-  // Total: 24
-  REQUIRE(result.executions_explored == 24);
+  // The old 4 vote-combos * 4 delivery-orderings accounting no longer applies:
+  // every timer-armed wait adds a bottom branch alongside message matches.
+  // For 2 participants this timer-inclusive model explores 876 no-crash
+  // executions, plus 20 additional crash branches at the decision boundary.
+  REQUIRE(result.executions_explored == 896);
+}
+
+TEST_CASE("2PC DPOR explores participant local timeout executions",
+          "[two_phase_commit]") {
+  constexpr std::size_t kNumParticipants = 2;
+  auto prog = make_two_phase_commit_program(kNumParticipants,
+                                            /*inject_crash=*/false);
+
+  bool saw_local_timeout = false;
+
+  algo::DporConfig config;
+  config.program = std::move(prog);
+  config.on_execution = [&](const model::ExplorationGraph& graph) {
+    for (std::size_t pid = 1; pid <= kNumParticipants; ++pid) {
+      if (participant_timed_out_locally(graph, pid)) {
+        saw_local_timeout = true;
+      }
+    }
+  };
+
+  const auto result = algo::verify(config);
+  REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(saw_local_timeout);
 }
 
 TEST_CASE("2PC agreement invariant: all decided participants agree",
@@ -480,7 +765,7 @@ TEST_CASE("2PC crash behavior: no participant decides after coordinator crash",
   REQUIRE_FALSE(invariant_violated);
 }
 
-TEST_CASE("2PC without crashes explores 16 executions for 2 participants",
+TEST_CASE("2PC without crashes explores timeout-inclusive executions for 2 participants",
           "[two_phase_commit]") {
   auto prog = make_two_phase_commit_program(2, /*inject_crash=*/false);
 
@@ -489,8 +774,8 @@ TEST_CASE("2PC without crashes explores 16 executions for 2 participants",
 
   const auto result = algo::verify(config);
   REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
-  // 4 vote combinations (2x2) * 4 message delivery orderings = 16
-  REQUIRE(result.executions_explored == 16);
+  // Regression baseline for the timer-inclusive no-crash state space.
+  REQUIRE(result.executions_explored == 876);
 }
 
 TEST_CASE("2PC scales to 3 participants", "[two_phase_commit]") {

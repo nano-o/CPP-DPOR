@@ -44,6 +44,41 @@ using Program = dpor::algo::Program;
 struct CrashInjected {};
 struct StepBoundaryReached {};
 
+struct SimReceiveResult {
+  enum class Kind {
+    ReplayedMessage,
+    ReplayedTimerFire,
+    CapturedReceive,
+  };
+
+  Kind kind;
+  std::optional<tpc::Message> message{};
+  // Used only for ReplayedTimerFire: true means the timer callback kept the
+  // protocol waiting for input, false means it completed the protocol.
+  bool needs_message{true};
+
+  [[nodiscard]] static SimReceiveResult replayed_message(tpc::Message msg) {
+    return SimReceiveResult{
+        .kind = Kind::ReplayedMessage,
+        .message = std::move(msg),
+    };
+  }
+
+  [[nodiscard]] static SimReceiveResult replayed_timer_fire(
+      bool keep_waiting) {
+    return SimReceiveResult{
+        .kind = Kind::ReplayedTimerFire,
+        .needs_message = keep_waiting,
+    };
+  }
+
+  [[nodiscard]] static SimReceiveResult captured_receive() {
+    return SimReceiveResult{
+        .kind = Kind::CapturedReceive,
+    };
+  }
+};
+
 class SimEnvironment : public tpc::Environment {
  public:
   SimEnvironment(
@@ -115,30 +150,56 @@ class SimEnvironment : public tpc::Environment {
     throw StepBoundaryReached{};
   }
 
-  // Produce a ReceiveLabel for the current I/O, or replay from trace.
-  // Returns nullopt if this is the target I/O (label stored in result_),
-  // or the replayed message if fast-forwarding.
-  std::optional<tpc::Message> sim_receive() {
+  // Produce the next receive-step action for the current I/O, or replay it
+  // from trace. When a timer is active, receives become non-blocking and
+  // bottom in the trace means the timer fired.
+  SimReceiveResult sim_receive() {
     auto current = io_count_++;
 
     if (current < target_io_) {
-      // Fast-forward: past receive, replay value from trace.
+      // Fast-forward: past receive, replay either a message or a timeout.
       auto idx = trace_offset_ + trace_consume_count_++;
-      return tpc::deserialize(trace_.at(idx).value());
+      const auto& observed = trace_.at(idx);
+      if (observed.is_bottom()) {
+        // Timer callbacks execute synchronously during replay. Any send/choice
+        // they trigger flows through the normal interceptors below, so it is
+        // either fast-forwarded (current < target_io_) or captured as the
+        // target event (current == target_io_).
+        return SimReceiveResult::replayed_timer_fire(fire_active_timer());
+      }
+      return SimReceiveResult::replayed_message(
+          tpc::deserialize(observed.value()));
     }
 
     // This is the target I/O operation.
-    result_ = dpor::model::make_receive_label<dpor::model::Value>();
-    return std::nullopt;
+    if (has_active_timer()) {
+      result_ =
+          dpor::model::make_nonblocking_receive_label<dpor::model::Value>();
+    } else {
+      result_ = dpor::model::make_receive_label<dpor::model::Value>();
+    }
+    return SimReceiveResult::captured_receive();
   }
 
-  void set_timer(tpc::TimerId /*id*/, std::size_t /*timeout_ms*/,
-                 tpc::TimerCallback /*callback*/) override {
-    // Stub: simulation timer support not yet implemented.
+  void set_timer(tpc::TimerId id, std::size_t /*timeout_ms*/,
+                 tpc::TimerCallback callback) override {
+    // Matching UdpEnvironment, setting the same timer id refreshes/replaces it.
+    // A different id would mean multiple simultaneously-active timers, which
+    // this simplified adapter does not encode in bottom observations.
+    if (active_timer_.has_value() && active_timer_->id != id) {
+      throw std::logic_error(
+          "SimEnvironment supports at most one active timer per thread");
+    }
+    active_timer_ = ActiveTimer{
+        .id = id,
+        .callback = std::move(callback),
+    };
   }
 
-  void cancel_timer(tpc::TimerId /*id*/) override {
-    // Stub: simulation timer support not yet implemented.
+  void cancel_timer(tpc::TimerId id) override {
+    if (active_timer_.has_value() && active_timer_->id == id) {
+      active_timer_.reset();
+    }
   }
 
   [[nodiscard]] std::optional<EventLabel> result() const {
@@ -146,6 +207,28 @@ class SimEnvironment : public tpc::Environment {
   }
 
  private:
+  struct ActiveTimer {
+    tpc::TimerId id;
+    tpc::TimerCallback callback;
+  };
+
+  [[nodiscard]] bool has_active_timer() const noexcept {
+    return active_timer_.has_value();
+  }
+
+  [[nodiscard]] bool fire_active_timer() {
+    if (!active_timer_.has_value()) {
+      throw std::logic_error(
+          "trace requested timer firing but no timer is active");
+    }
+    // Return the timer callback's continuation flag:
+    // true => protocol is still waiting for input
+    // false => protocol finished during the callback
+    auto callback = std::move(active_timer_->callback);
+    active_timer_.reset();
+    return callback(*this);
+  }
+
   std::function<dpor::model::ThreadId(tpc::ParticipantId)> id_map_;
   std::size_t target_io_;
   const ThreadTrace& trace_;
@@ -156,6 +239,7 @@ class SimEnvironment : public tpc::Environment {
   std::size_t trace_consume_count_{0};
   std::optional<EventLabel> result_;
   bool crash_injected_{false};
+  std::optional<ActiveTimer> active_timer_;
 };
 
 // ---------------------------------------------------------------------------
@@ -183,12 +267,16 @@ std::optional<EventLabel> run_and_capture(
   try {
     bool needs_message = obj.start(env);
     while (needs_message) {
-      auto replayed = env.sim_receive();
-      if (!replayed) {
+      auto receive_step = env.sim_receive();
+      if (receive_step.kind == SimReceiveResult::Kind::CapturedReceive) {
         // Target I/O was a receive — label is stored in env.result().
         return env.result();
       }
-      needs_message = obj.receive(env, *replayed);
+      if (receive_step.kind == SimReceiveResult::Kind::ReplayedTimerFire) {
+        needs_message = receive_step.needs_message;
+        continue;
+      }
+      needs_message = obj.receive(env, *receive_step.message);
     }
     // Protocol finished before reaching target I/O.
     return std::nullopt;

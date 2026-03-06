@@ -111,7 +111,7 @@ simple replay strategy:
 
 The cost is O(step) per call, which is negligible for small protocols.
 
-## Timers and current DPOR scope
+## Timers in DPOR and UDP
 
 This timeout variant extends the environment with `set_timer()` /
 `cancel_timer()` and exercises timer behavior in the UDP runtime.
@@ -128,12 +128,17 @@ This timeout variant extends the environment with `set_timer()` /
   completes without waiting further. This prevents the coordinator from hanging
   when a participant times out and never sends its ack.
 - `UdpEnvironment` implements timers and dispatches callbacks inside `run()`.
-- Timer-driven completion is handled directly by the runtime; it does not rely
-  on fabricated protocol messages to wake the event loop.
-- `SimEnvironment` timer methods are currently stubs.
-- DPOR exploration in this example currently models message/vote/crash behavior,
-  not timer events. Coordinator and participant timeouts are therefore only
-  exercised by the protocol-state-machine and UDP tests.
+- `SimEnvironment` now tracks active timers during replay. When a thread waits
+  for input with no active timer, the adapter emits a blocking receive. When a
+  timer is active, the adapter emits a non-blocking receive, and a bottom
+  observation means that active timer fired.
+- Timer callbacks are replayed directly; the adapter does not fabricate special
+  timeout messages to wake the protocol.
+- This example assumes at most one active timer per thread at a receive point.
+  The simulation enforces that assumption and throws if the protocol violates
+  it, because plain bottom does not encode timer identity.
+- DPOR exploration in this example therefore models message, vote, crash, and
+  timer races through the existing receive/bottom semantics.
 
 ## UDP runtime behavior
 
@@ -161,6 +166,13 @@ The protocol-state-machine tests additionally check:
 - participants arm a decision-wait timer after voting
 - participants cancel that timer when a decision arrives
 - participant timeout triggers a local abort
+
+The simulation-adapter tests additionally check:
+
+- waits without active timers produce blocking receives
+- waits with an active timer produce non-blocking receives
+- canceling the active timer returns the wait to blocking mode
+- bottom replay fires the active timer callback
 
 The UDP tests additionally check runtime transport and timer behavior:
 
