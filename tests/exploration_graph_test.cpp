@@ -63,6 +63,17 @@ TEST_CASE("thread_trace includes ND choice values", "[model][exploration_graph]"
   REQUIRE(trace[1] == "choice_b");
 }
 
+TEST_CASE("thread_trace includes bottom for non-blocking receives",
+    "[model][exploration_graph]") {
+  ExplorationGraph g;
+  const auto r = g.add_event(2, make_nonblocking_receive_label<Value>());
+  g.set_reads_from_bottom(r);
+
+  const auto trace = g.thread_trace(2);
+  REQUIRE(trace.size() == 1);
+  REQUIRE(trace[0].is_bottom());
+}
+
 TEST_CASE("thread_trace returns empty for thread with only sends", "[model][exploration_graph]") {
   ExplorationGraph g;
   static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "x"}));
@@ -103,6 +114,19 @@ TEST_CASE("restrict preserves rf edges between kept events", "[model][exploratio
   REQUIRE(restricted.event_count() == 2);
   // The rf edge should be preserved (with remapped IDs).
   REQUIRE(restricted.reads_from().size() == 1);
+}
+
+TEST_CASE("restrict preserves bottom rf assignments for kept receives",
+    "[model][exploration_graph]") {
+  ExplorationGraph g;
+  const auto r = g.add_event(2, make_nonblocking_receive_label<Value>());
+  static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "x"}));
+  g.set_reads_from_bottom(r);
+
+  const auto restricted = g.restrict({r});
+  REQUIRE(restricted.event_count() == 1);
+  REQUIRE(restricted.reads_from().size() == 1);
+  REQUIRE(restricted.reads_from().at(0).is_bottom());
 }
 
 TEST_CASE("restrict drops rf edges when one endpoint is removed", "[model][exploration_graph]") {
@@ -150,6 +174,19 @@ TEST_CASE("with_rf returns copy with changed rf", "[model][exploration_graph]") 
   REQUIRE(g.reads_from().at(r) == s1);
   // Copy has new rf.
   REQUIRE(g2.reads_from().at(r) == s2);
+}
+
+TEST_CASE("with_bottom_rf returns copy with changed rf", "[model][exploration_graph]") {
+  ExplorationGraph g;
+  const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r = g.add_event(2, make_nonblocking_receive_label<Value>());
+
+  g.set_reads_from(r, s);
+
+  const auto g2 = g.with_bottom_rf(r);
+
+  REQUIRE(g.reads_from().at(r).is_send());
+  REQUIRE(g2.reads_from().at(r).is_bottom());
 }
 
 // --- with_nd_value ---

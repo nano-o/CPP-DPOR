@@ -124,7 +124,7 @@ class SimEnvironment : public tpc::Environment {
     if (current < target_io_) {
       // Fast-forward: past receive, replay value from trace.
       auto idx = trace_offset_ + trace_consume_count_++;
-      return tpc::deserialize(trace_.at(idx));
+      return tpc::deserialize(trace_.at(idx).value());
     }
 
     // This is the target I/O operation.

@@ -131,3 +131,9 @@ This codebase is currently a prototype.
 - there is no backward-compatibility commitment
 - prioritize clean iteration over preserving old APIs
 - when better structure is identified, prefer replacing APIs instead of layering compatibility shims
+
+## Workspace Changes
+
+- Ignore unrelated untracked workspace changes by default.
+- Do not remove or rewrite unrelated untracked files unless the user explicitly asks for that.
+- Still stop and ask if an unexpected change overlaps the files being modified or creates ambiguity about task correctness.

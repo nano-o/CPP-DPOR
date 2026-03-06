@@ -21,8 +21,8 @@ std::string event_signature(const Event& event) {
     oss << "S(dst=" << send->destination << ",v=" << send->value << ")";
   } else if (const auto* nd = as_nondeterministic_choice(event)) {
     oss << "ND(v=" << nd->value << ")";
-  } else if (is_receive(event)) {
-    oss << "R";
+  } else if (const auto* recv = as_receive(event)) {
+    oss << (recv->is_nonblocking() ? "Rnb" : "Rb");
   } else if (is_block(event)) {
     oss << "B";
   } else if (is_error(event)) {
@@ -41,9 +41,13 @@ std::string graph_signature(const ExplorationGraph& graph) {
 
   std::vector<std::string> rf_edges;
   rf_edges.reserve(graph.reads_from().size());
-  for (const auto& [recv_id, send_id] : graph.reads_from()) {
+  for (const auto& [recv_id, source] : graph.reads_from()) {
+    if (source.is_bottom()) {
+      rf_edges.push_back("BOTTOM->" + event_signature(graph.event(recv_id)));
+      continue;
+    }
     rf_edges.push_back(
-        event_signature(graph.event(send_id)) + "->" + event_signature(graph.event(recv_id)));
+        event_signature(graph.event(source.send_id())) + "->" + event_signature(graph.event(recv_id)));
   }
   std::sort(rf_edges.begin(), rf_edges.end());
 
@@ -305,6 +309,193 @@ TEST_CASE("next-event converts an unsatisfied receive into an internal block",
   REQUIRE(std::holds_alternative<BlockLabel>(next->second));
 }
 
+TEST_CASE("next-event does not block an unsatisfied non-blocking receive",
+    "[algo][dpor][nonblocking]") {
+  Program program;
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_nonblocking_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+
+  const auto next = dpor::algo::detail::compute_next_event(program, ExplorationGraph{});
+  REQUIRE(next.has_value());
+  REQUIRE(next->first == 1);
+  REQUIRE(std::holds_alternative<ReceiveLabel>(next->second));
+  REQUIRE(std::get<ReceiveLabel>(next->second).is_nonblocking());
+}
+
+TEST_CASE("non-blocking receive with no sends explores one bottom execution",
+    "[algo][dpor][nonblocking]") {
+  DporConfig config;
+  std::vector<ExplorationGraph> executions;
+
+  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_nonblocking_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&executions](const ExplorationGraph& graph) {
+    executions.push_back(graph);
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(executions.size() == 1);
+
+  const auto& graph = executions.front();
+  REQUIRE(graph.event_count() == 1);
+  REQUIRE(is_receive(graph.event(0)));
+  REQUIRE_FALSE(is_block(graph.event(0)));
+
+  const auto rf_it = graph.reads_from().find(0);
+  REQUIRE(rf_it != graph.reads_from().end());
+  REQUIRE(rf_it->second.is_bottom());
+}
+
+TEST_CASE("many non-blocking receives with no sends explore one execution",
+    "[algo][dpor][nonblocking]") {
+  DporConfig config;
+  std::vector<ExplorationGraph> executions;
+
+  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step < 3 && trace.size() == step) {
+      return make_nonblocking_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&executions](const ExplorationGraph& graph) {
+    executions.push_back(graph);
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(executions.size() == 1);
+
+  const auto& graph = executions.front();
+  REQUIRE(graph.event_count() == 3);
+  REQUIRE_FALSE(std::any_of(
+      graph.events().begin(),
+      graph.events().end(),
+      [](const Event& event) { return is_block(event); }));
+
+  const auto trace = graph.thread_trace(1);
+  REQUIRE(trace.size() == 3);
+  REQUIRE(std::all_of(trace.begin(), trace.end(), [](const auto& observed) {
+    return observed.is_bottom();
+  }));
+}
+
+TEST_CASE("receiver-first non-blocking receive explores bottom and matched executions",
+    "[algo][dpor][nonblocking]") {
+  DporConfig config;
+  std::vector<ExplorationGraph> executions;
+
+  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking);
+    }
+    return std::nullopt;
+  };
+
+  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "x"};
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&executions](const ExplorationGraph& graph) {
+    executions.push_back(graph);
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 2);
+  REQUIRE(executions.size() == 2);
+
+  bool saw_bottom = false;
+  bool saw_matched = false;
+
+  for (const auto& graph : executions) {
+    REQUIRE_FALSE(std::any_of(
+        graph.events().begin(),
+        graph.events().end(),
+        [](const Event& event) { return is_block(event); }));
+
+    const auto recv_id = find_event_id_by_thread_index(graph, 1, 0);
+    REQUIRE(recv_id != ExplorationGraph::kNoSource);
+    const auto rf_it = graph.reads_from().find(recv_id);
+    REQUIRE(rf_it != graph.reads_from().end());
+
+    if (rf_it->second.is_bottom()) {
+      saw_bottom = true;
+      continue;
+    }
+
+    const auto* send = as_send(graph.event(rf_it->second.send_id()));
+    REQUIRE(send != nullptr);
+    REQUIRE(send->value == "x");
+    REQUIRE(send->destination == 1);
+    saw_matched = true;
+  }
+
+  REQUIRE(saw_bottom);
+  REQUIRE(saw_matched);
+}
+
+TEST_CASE("backward revisit rewires non-blocking receive from bottom to later send",
+    "[algo][dpor][nonblocking]") {
+  DporConfig config;
+  std::vector<ExplorationGraph> executions;
+
+  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking);
+    }
+    return std::nullopt;
+  };
+
+  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "x"};
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&executions](const ExplorationGraph& graph) {
+    executions.push_back(graph);
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 2);
+
+  bool saw_rewired_execution = false;
+  for (const auto& graph : executions) {
+    const auto recv_id = find_event_id_by_thread_index(graph, 1, 0);
+    const auto send_id = find_event_id_by_thread_index(graph, 2, 0);
+    REQUIRE(recv_id != ExplorationGraph::kNoSource);
+    REQUIRE(send_id != ExplorationGraph::kNoSource);
+    REQUIRE(graph.inserted_before_or_equal(recv_id, send_id));
+    REQUIRE_FALSE(graph.inserted_before_or_equal(send_id, recv_id));
+
+    const auto rf_it = graph.reads_from().find(recv_id);
+    REQUIRE(rf_it != graph.reads_from().end());
+    if (rf_it->second.is_send() && rf_it->second.send_id() == send_id) {
+      saw_rewired_execution = true;
+    }
+  }
+
+  REQUIRE(saw_rewired_execution);
+}
+
 TEST_CASE("backward-revisit-heavy exploration does not produce duplicate execution graphs",
     "[algo][dpor][regression]") {
   DporConfig config;
@@ -445,7 +636,7 @@ TEST_CASE("three-thread chain: thread 1 sends to 2, thread 2 forwards to 3", "[a
       return make_receive_label<Value>();
     }
     if (step == 1 && trace.size() == 1) {
-      return SendLabel{.destination = 3, .value = trace[0]};
+      return SendLabel{.destination = 3, .value = trace[0].value()};
     }
     return std::nullopt;
   };
@@ -553,8 +744,8 @@ TEST_CASE("internal block suspends thread progress until receive is rescheduled"
       return;
     }
 
-    const auto* src = as_send(graph.event(rf_it->second));
-    if (src == nullptr || src->value != "done" || graph.event(rf_it->second).thread != 1) {
+    const auto* src = as_send(graph.event(rf_it->second.send_id()));
+    if (src == nullptr || src->value != "done" || graph.event(rf_it->second.send_id()).thread != 1) {
       saw_bad_t3_receive = true;
       return;
     }
@@ -651,8 +842,8 @@ TEST_CASE("multiple blocked receives are both rescheduled when matching sends ap
       return;
     }
 
-    const auto* src1 = as_send(graph.event(rf1->second));
-    const auto* src2 = as_send(graph.event(rf2->second));
+    const auto* src1 = as_send(graph.event(rf1->second.send_id()));
+    const auto* src2 = as_send(graph.event(rf2->second.send_id()));
     if (src1 == nullptr || src2 == nullptr) {
       missing_receiver_event = true;
       return;
@@ -695,7 +886,7 @@ TEST_CASE("ND choice value visible in subsequent trace", "[algo][dpor]") {
     }
     if (step == 1 && trace.size() == 1) {
       // Send the ND choice value.
-      return SendLabel{.destination = 2, .value = trace[0]};
+      return SendLabel{.destination = 2, .value = trace[0].value()};
     }
     return std::nullopt;
   };
@@ -897,7 +1088,7 @@ TEST_CASE("backward revisit preserves intended rf endpoint after restrict/remap"
   const auto rf_it = revisited.reads_from().find(new_receive_id);
   REQUIRE(rf_it != revisited.reads_from().end());
 
-  const auto* rf_send = as_send(revisited.event(rf_it->second));
+  const auto* rf_send = as_send(revisited.event(rf_it->second.send_id()));
   REQUIRE(rf_send != nullptr);
   REQUIRE(rf_send->destination == 4);
   REQUIRE(rf_send->value == "new");
@@ -939,8 +1130,8 @@ TEST_CASE("only compatible receives in destination thread are revisited",
   REQUIRE(rb_rf != revisited.reads_from().end());
   REQUIRE(ra_rf != revisited.reads_from().end());
 
-  const auto* rb_send = as_send(revisited.event(rb_rf->second));
-  const auto* ra_send = as_send(revisited.event(ra_rf->second));
+  const auto* rb_send = as_send(revisited.event(rb_rf->second.send_id()));
+  const auto* ra_send = as_send(revisited.event(ra_rf->second.send_id()));
   REQUIRE(rb_send != nullptr);
   REQUIRE(ra_send != nullptr);
 
@@ -948,7 +1139,7 @@ TEST_CASE("only compatible receives in destination thread are revisited",
   REQUIRE(rb_send->destination == 4);
   REQUIRE(ra_send->value == "a");
   REQUIRE(ra_send->destination == 4);
-  REQUIRE(revisited.event(ra_rf->second).thread == 3);
+  REQUIRE(revisited.event(ra_rf->second.send_id()).thread == 3);
 }
 
 TEST_CASE("tiebreaker should not pick an already-consumed send", "[algo][dpor][regression]") {
@@ -960,6 +1151,7 @@ TEST_CASE("tiebreaker should not pick an already-consumed send", "[algo][dpor][r
   const auto r1 = graph.add_event(3, make_receive_label<Value>());
 
   graph.set_reads_from(r0, s1);  // s1 already consumed
+  graph.set_reads_from(r1, s2);  // r1 must have a current source under blocking semantics
 
   const auto chosen = dpor::algo::detail::get_cons_tiebreaker(graph, r1);
   REQUIRE(chosen == s2);
@@ -1025,6 +1217,23 @@ TEST_CASE("receive revisit condition rejects rf source outside G|Previous", "[al
   REQUIRE_FALSE(dpor::algo::detail::revisit_condition(graph, receive, revisiting_send));
 }
 
+TEST_CASE("non-blocking receive revisit condition requires bottom source",
+    "[algo][dpor][nonblocking]") {
+  ExplorationGraph graph;
+  const auto receive = graph.add_event(
+      1,
+      make_nonblocking_receive_label<Value>());
+  const auto send = graph.add_event(
+      2,
+      SendLabel{.destination = 1, .value = "x"});
+
+  graph.set_reads_from_bottom(receive);
+  REQUIRE(dpor::algo::detail::revisit_condition(graph, receive, send));
+
+  graph.set_reads_from(receive, send);
+  REQUIRE_FALSE(dpor::algo::detail::revisit_condition(graph, receive, send));
+}
+
 TEST_CASE("ND revisit condition should use min(S), not insertion order", "[algo][dpor][regression]") {
   ExplorationGraph graph;
   const auto nd = graph.add_event(
@@ -1054,7 +1263,10 @@ TEST_CASE("paper ex 2.4: nondet failure target yields one execution per choice",
       };
     }
     if (step == 1 && trace.size() == 1) {
-      return SendLabel{.destination = 2, .value = "Fail(" + trace[0] + ")"};
+      return SendLabel{
+          .destination = 2,
+          .value = "Fail(" + trace[0].value() + ")",
+      };
     }
     return std::nullopt;
   };
@@ -1070,7 +1282,7 @@ TEST_CASE("paper ex 2.4: nondet failure target yields one execution per choice",
   config.on_execution = [&received_failures](const ExplorationGraph& graph) {
     const auto trace = graph.thread_trace(2);
     if (!trace.empty()) {
-      received_failures.insert(trace[0]);
+      received_failures.insert(trace[0].value());
     }
   };
 
@@ -1222,7 +1434,7 @@ TEST_CASE("paper ex 2.9: ns+r explores N executions (lazy ordering)", "[algo][dp
   config.on_execution = [&first_receive_values](const ExplorationGraph& graph) {
     const auto trace = graph.thread_trace(5);
     if (!trace.empty()) {
-      first_receive_values.insert(trace[0]);
+      first_receive_values.insert(trace[0].value());
     }
   };
 
@@ -1268,7 +1480,7 @@ TEST_CASE("paper ex 4.1: blocked receive is rescheduled when sends appear",
     }
     const auto trace = graph.thread_trace(1);
     if (!trace.empty()) {
-      observed_receive_values.insert(trace[0]);
+      observed_receive_values.insert(trace[0].value());
     }
   };
 
@@ -1310,7 +1522,7 @@ TEST_CASE("paper ex 4.2: backward revisit recovers missed rf option", "[algo][dp
   config.on_execution = [&observed_receive_values](const ExplorationGraph& graph) {
     const auto trace = graph.thread_trace(2);
     if (!trace.empty()) {
-      observed_receive_values.insert(trace[0]);
+      observed_receive_values.insert(trace[0].value());
     }
   };
 

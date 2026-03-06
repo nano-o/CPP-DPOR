@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <limits>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -29,12 +30,53 @@ namespace dpor::model {
 template <typename ValueT>
 class ExplorationGraphT;
 
+template <typename EventIdT>
+struct ReadsFromSourceT {
+  std::optional<EventIdT> send{};
+
+  [[nodiscard]] static ReadsFromSourceT from_send(EventIdT source) {
+    return ReadsFromSourceT{
+        .send = source,
+    };
+  }
+
+  [[nodiscard]] static ReadsFromSourceT bottom() {
+    return ReadsFromSourceT{};
+  }
+
+  [[nodiscard]] bool is_send() const noexcept {
+    return send.has_value();
+  }
+
+  [[nodiscard]] bool is_bottom() const noexcept {
+    return !send.has_value();
+  }
+
+  [[nodiscard]] EventIdT send_id() const {
+    if (!send.has_value()) {
+      throw std::logic_error("reads-from source is bottom");
+    }
+    return *send;
+  }
+
+  [[nodiscard]] bool operator==(EventIdT other) const noexcept {
+    return send == other;
+  }
+
+  bool operator==(const ReadsFromSourceT&) const = default;
+};
+
+template <typename EventIdT>
+[[nodiscard]] inline bool operator==(EventIdT lhs, const ReadsFromSourceT<EventIdT>& rhs) noexcept {
+  return rhs == lhs;
+}
+
 template <typename ValueT>
 class ExecutionGraphT {
  public:
   using EventId = std::size_t;
   using Event = EventT<ValueT>;
-  using ReadsFromSource = EventId;
+  using ReadsFromSource = ReadsFromSourceT<EventId>;
   using ReadsFromRelation = std::unordered_map<EventId, ReadsFromSource>;
 
   // Normal insertion path: assign event index automatically per thread.
@@ -71,8 +113,16 @@ class ExecutionGraphT {
     return events_.size() - 1U;
   }
 
-  void set_reads_from(EventId receive_event_id, ReadsFromSource source) {
+  void set_reads_from_source(EventId receive_event_id, ReadsFromSource source) {
     reads_from_[receive_event_id] = source;
+  }
+
+  void set_reads_from(EventId receive_event_id, EventId source_id) {
+    set_reads_from_source(receive_event_id, ReadsFromSource::from_send(source_id));
+  }
+
+  void set_reads_from_bottom(EventId receive_event_id) {
+    set_reads_from_source(receive_event_id, ReadsFromSource::bottom());
   }
 
   [[nodiscard]] bool is_valid_event_id(EventId event_id) const noexcept {
@@ -108,14 +158,19 @@ class ExecutionGraphT {
         throw std::invalid_argument("reads-from relation target event is not a receive");
       }
 
-      if (!is_valid_event_id(source)) {
+      if (source.is_bottom()) {
+        continue;
+      }
+
+      const auto source_id = source.send_id();
+      if (!is_valid_event_id(source_id)) {
         throw std::invalid_argument("reads-from relation source refers to an unknown send event id");
       }
-      if (!is_send(events_[source])) {
+      if (!is_send(events_[source_id])) {
         throw std::invalid_argument("reads-from relation source event is not a send");
       }
 
-      relation.add_edge(source, receive_id);
+      relation.add_edge(source_id, receive_id);
     }
 
     return relation;
@@ -147,7 +202,9 @@ class ExecutionGraphT {
     std::unordered_set<EventId> consumed_send_ids;
     consumed_send_ids.reserve(reads_from_.size());
     for (const auto& [_, source] : reads_from_) {
-      consumed_send_ids.insert(source);
+      if (source.is_send()) {
+        consumed_send_ids.insert(source.send_id());
+      }
     }
 
     std::vector<EventId> unread;

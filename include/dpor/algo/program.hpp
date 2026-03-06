@@ -21,7 +21,10 @@
 namespace dpor::algo {
 
 template <typename ValueT>
-using ThreadTraceT = std::vector<ValueT>;
+using ThreadTraceEntryT = model::ObservedValueT<ValueT>;
+
+template <typename ValueT>
+using ThreadTraceT = std::vector<ThreadTraceEntryT<ValueT>>;
 
 // Thread step function. Must be deterministic and side-effect-free: the same
 // (trace, step) arguments must always produce the same event label. DPOR
@@ -44,6 +47,7 @@ struct ProgramT {
 };
 
 using ThreadTrace = ThreadTraceT<model::Value>;
+using ThreadTraceEntry = ThreadTraceEntryT<model::Value>;
 using ThreadFunction = ThreadFunctionT<model::Value>;
 using Program = ProgramT<model::Value>;
 

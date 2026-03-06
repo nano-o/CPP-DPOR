@@ -47,6 +47,7 @@ class ExplorationGraphT {
  public:
   using EventId = typename ExecutionGraphT<ValueT>::EventId;
   using Event = EventT<ValueT>;
+  using ReadsFromSource = typename ExecutionGraphT<ValueT>::ReadsFromSource;
 
   static constexpr EventId kNoSource = std::numeric_limits<EventId>::max();
 
@@ -63,6 +64,16 @@ class ExplorationGraphT {
 
   void set_reads_from(EventId receive_id, EventId source_id) {
     graph_.set_reads_from(receive_id, source_id);
+    porf_cache_ = nullptr;
+  }
+
+  void set_reads_from_source(EventId receive_id, ReadsFromSource source) {
+    graph_.set_reads_from_source(receive_id, std::move(source));
+    porf_cache_ = nullptr;
+  }
+
+  void set_reads_from_bottom(EventId receive_id) {
+    graph_.set_reads_from_bottom(receive_id);
     porf_cache_ = nullptr;
   }
 
@@ -156,7 +167,7 @@ class ExplorationGraphT {
 
   // Extract the value sequence visible to a thread: values from receives (via rf)
   // and ND choices, in program order.
-  [[nodiscard]] std::vector<ValueT> thread_trace(ThreadId tid) const {
+  [[nodiscard]] std::vector<ObservedValueT<ValueT>> thread_trace(ThreadId tid) const {
     // Gather events for this thread, sorted by event index (program order).
     std::vector<std::pair<EventIndex, EventId>> thread_events;
     for (EventId id = 0; id < event_count(); ++id) {
@@ -167,7 +178,7 @@ class ExplorationGraphT {
     }
     std::sort(thread_events.begin(), thread_events.end());
 
-    std::vector<ValueT> trace;
+    std::vector<ObservedValueT<ValueT>> trace;
     const auto& rf = reads_from();
 
     for (const auto& [_, id] : thread_events) {
@@ -175,9 +186,13 @@ class ExplorationGraphT {
       if (const auto* recv = as_receive(evt)) {
         auto it = rf.find(id);
         if (it != rf.end()) {
-          const auto& source_evt = event(it->second);
-          if (const auto* send = as_send(source_evt)) {
-            trace.push_back(send->value);
+          if (it->second.is_bottom()) {
+            trace.push_back(BottomValue{});
+          } else {
+            const auto& source_evt = event(it->second.send_id());
+            if (const auto* send = as_send(source_evt)) {
+              trace.push_back(send->value);
+            }
           }
         }
       } else if (const auto* nd = as_nondeterministic_choice(evt)) {
@@ -224,10 +239,17 @@ class ExplorationGraphT {
 
     // Remap reads-from edges.
     const auto& rf = reads_from();
-    for (const auto& [recv_id, source_id] : rf) {
+    for (const auto& [recv_id, source] : rf) {
       auto recv_it = id_map.find(recv_id);
-      auto source_it = id_map.find(source_id);
-      if (recv_it != id_map.end() && source_it != id_map.end()) {
+      if (recv_it == id_map.end()) {
+        continue;
+      }
+      if (source.is_bottom()) {
+        result.set_reads_from_bottom(recv_it->second);
+        continue;
+      }
+      auto source_it = id_map.find(source.send_id());
+      if (source_it != id_map.end()) {
         result.set_reads_from(recv_it->second, source_it->second);
       }
     }
@@ -239,6 +261,18 @@ class ExplorationGraphT {
   [[nodiscard]] ExplorationGraphT with_rf(EventId recv, EventId send) const {
     auto copy = *this;
     copy.set_reads_from(recv, send);
+    return copy;
+  }
+
+  [[nodiscard]] ExplorationGraphT with_rf_source(EventId recv, ReadsFromSource source) const {
+    auto copy = *this;
+    copy.set_reads_from_source(recv, std::move(source));
+    return copy;
+  }
+
+  [[nodiscard]] ExplorationGraphT with_bottom_rf(EventId recv) const {
+    auto copy = *this;
+    copy.set_reads_from_bottom(recv);
     return copy;
   }
 
@@ -360,13 +394,17 @@ class ExplorationGraphT {
     }
 
     // rf edges: send -> recv (with same validation as rf_relation()).
-    for (const auto& [recv_id, source_id] : reads_from()) {
+    for (const auto& [recv_id, source] : reads_from()) {
       if (!is_valid_event_id(recv_id)) {
         throw std::invalid_argument("reads-from relation refers to an unknown receive event id");
       }
       if (!is_receive(event(recv_id))) {
         throw std::invalid_argument("reads-from relation target event is not a receive");
       }
+      if (source.is_bottom()) {
+        continue;
+      }
+      const auto source_id = source.send_id();
       if (!is_valid_event_id(source_id)) {
         throw std::invalid_argument("reads-from relation source refers to an unknown send event id");
       }
@@ -411,8 +449,10 @@ class ExplorationGraphT {
     // Pre-compute rf target mapping: recv_id -> source_id.
     // All edges are already validated by the adjacency-building loop above.
     std::unordered_map<EventId, EventId> rf_source;
-    for (const auto& [recv_id, source_id] : reads_from()) {
-      rf_source[recv_id] = source_id;
+    for (const auto& [recv_id, source] : reads_from()) {
+      if (source.is_send()) {
+        rf_source[recv_id] = source.send_id();
+      }
     }
 
     // Pre-compute po predecessor: for each event that has a po predecessor.

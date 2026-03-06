@@ -135,6 +135,28 @@ TEST_CASE("receive using match-any predicate is consistent", "[model][consistenc
   REQUIRE(result.is_consistent());
 }
 
+TEST_CASE("non-blocking receive reading bottom is consistent", "[model][consistency]") {
+  ExecutionGraph graph;
+  const auto r = graph.add_event(2, make_nonblocking_receive_label<Value>());
+  graph.set_reads_from_bottom(r);
+
+  const AsyncConsistencyChecker checker;
+  const auto result = checker.check(graph);
+  REQUIRE(result.is_consistent());
+}
+
+TEST_CASE("blocking receive reading bottom reports BlockingReceiveReadsBottom",
+    "[model][consistency]") {
+  ExecutionGraph graph;
+  const auto r = graph.add_event(2, make_receive_label<Value>());
+  graph.set_reads_from_bottom(r);
+
+  const AsyncConsistencyChecker checker;
+  const auto result = checker.check(graph);
+  REQUIRE_FALSE(result.is_consistent());
+  REQUIRE(has_issue(result, ConsistencyIssueCode::BlockingReceiveReadsBottom));
+}
+
 // --- InvalidEventReference ---
 
 TEST_CASE("reads-from with invalid receive id reports InvalidEventReference",

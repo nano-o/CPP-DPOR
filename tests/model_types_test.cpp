@@ -92,6 +92,23 @@ TEST_CASE("execution graph tracks po and rf relations", "[model][graph]") {
   REQUIRE(graph.event(recv_id).index == 0);
 }
 
+TEST_CASE("execution graph stores bottom reads-from without consuming sends", "[model][graph]") {
+  dpor::model::ExecutionGraph graph;
+  const auto send_id = graph.add_event(1, dpor::model::SendLabel{.destination = 2, .value = "x"});
+  const auto recv_id = graph.add_event(
+      2,
+      dpor::model::make_nonblocking_receive_label<dpor::model::Value>());
+
+  graph.set_reads_from_bottom(recv_id);
+
+  REQUIRE(graph.reads_from().size() == 1);
+  REQUIRE(graph.reads_from().at(recv_id).is_bottom());
+  REQUIRE(graph.unread_send_event_ids() == std::vector<dpor::model::NodeId>{send_id});
+
+  const auto rf = graph.rf_relation();
+  REQUIRE_FALSE(rf.contains(send_id, recv_id));
+}
+
 TEST_CASE("async consistency checker accepts well-formed graph", "[model][consistency]") {
   dpor::model::ExecutionGraph graph;
   const auto send_id = graph.add_event(1, dpor::model::SendLabel{.destination = 2, .value = "ok"});

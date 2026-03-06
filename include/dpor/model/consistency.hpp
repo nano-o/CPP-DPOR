@@ -15,6 +15,7 @@ enum class ConsistencyIssueCode {
   ReadsFromTargetNotReceive,
   ReadsFromSourceNotSend,
   MissingReadsFromForReceive,
+  BlockingReceiveReadsBottom,
   SendConsumedMultipleTimes,
   ReceiveDestinationMismatch,
   ReceiveValueMismatch,
@@ -58,7 +59,7 @@ class AsyncConsistencyCheckerT {
         valid_rf_edges;
     valid_rf_edges.reserve(graph.reads_from().size());
 
-    for (const auto& [receive_id, source_id] : graph.reads_from()) {
+    for (const auto& [receive_id, source] : graph.reads_from()) {
       bool has_valid_ids = true;
 
       if (!graph.is_valid_event_id(receive_id)) {
@@ -68,12 +69,15 @@ class AsyncConsistencyCheckerT {
             "reads-from target references unknown event id " + std::to_string(receive_id));
         has_valid_ids = false;
       }
-      if (!graph.is_valid_event_id(source_id)) {
-        add_issue(
-            result,
-            ConsistencyIssueCode::InvalidEventReference,
-            "reads-from source references unknown event id " + std::to_string(source_id));
-        has_valid_ids = false;
+      if (source.is_send()) {
+        const auto source_id = source.send_id();
+        if (!graph.is_valid_event_id(source_id)) {
+          add_issue(
+              result,
+              ConsistencyIssueCode::InvalidEventReference,
+              "reads-from source references unknown event id " + std::to_string(source_id));
+          has_valid_ids = false;
+        }
       }
 
       if (!has_valid_ids) {
@@ -83,8 +87,6 @@ class AsyncConsistencyCheckerT {
       receive_has_source[receive_id] = true;
 
       const auto& receive_event = graph.event(receive_id);
-      const auto& source_event = graph.event(source_id);
-
       bool has_valid_endpoint_kinds = true;
       if (!is_receive(receive_event)) {
         add_issue(
@@ -93,12 +95,16 @@ class AsyncConsistencyCheckerT {
             "reads-from target event " + std::to_string(receive_id) + " is not a receive");
         has_valid_endpoint_kinds = false;
       }
-      if (!is_send(source_event)) {
-        add_issue(
-            result,
-            ConsistencyIssueCode::ReadsFromSourceNotSend,
-            "reads-from source event " + std::to_string(source_id) + " is not a send");
-        has_valid_endpoint_kinds = false;
+      if (source.is_send()) {
+        const auto source_id = source.send_id();
+        const auto& source_event = graph.event(source_id);
+        if (!is_send(source_event)) {
+          add_issue(
+              result,
+              ConsistencyIssueCode::ReadsFromSourceNotSend,
+              "reads-from source event " + std::to_string(source_id) + " is not a send");
+          has_valid_endpoint_kinds = false;
+        }
       }
 
       if (!has_valid_endpoint_kinds) {
@@ -106,8 +112,25 @@ class AsyncConsistencyCheckerT {
       }
 
       const auto* receive_label = as_receive(receive_event);
+      if (receive_label == nullptr) {
+        continue;
+      }
+
+      if (source.is_bottom()) {
+        if (receive_label->is_blocking()) {
+          add_issue(
+              result,
+              ConsistencyIssueCode::BlockingReceiveReadsBottom,
+              "blocking receive event " + std::to_string(receive_id) +
+                  " reads from bottom");
+        }
+        continue;
+      }
+
+      const auto source_id = source.send_id();
+      const auto& source_event = graph.event(source_id);
       const auto* send_label = as_send(source_event);
-      if (receive_label == nullptr || send_label == nullptr) {
+      if (send_label == nullptr) {
         continue;
       }
 
@@ -147,7 +170,7 @@ class AsyncConsistencyCheckerT {
             result,
             ConsistencyIssueCode::MissingReadsFromForReceive,
             "receive event " + std::to_string(event_id) +
-                " has no reads-from source (blocking receives must read exactly one send)");
+                " has no reads-from assignment");
       }
     }
 

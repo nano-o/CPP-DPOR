@@ -38,7 +38,7 @@ static std::string get_participant_vote(
     tpc::ParticipantId pid) {
   auto trace = graph.thread_trace(participant_to_thread(pid));
   if (trace.size() >= 2) {
-    return trace[1];
+    return trace[1].value();
   }
   return {};
 }
@@ -48,7 +48,7 @@ static std::optional<std::string> get_participant_decision(
     tpc::ParticipantId pid) {
   auto trace = graph.thread_trace(participant_to_thread(pid));
   if (trace.size() >= 3) {
-    return trace[2];
+    return trace[2].value();
   }
   return std::nullopt;
 }
@@ -80,11 +80,15 @@ static void dump_global_trace(const model::ExplorationGraph& graph) {
       // Show which send was matched via reads-from.
       auto it = graph.reads_from().find(id);
       if (it != graph.reads_from().end()) {
-        const auto& src = graph.event(it->second);
-        if (const auto* s = model::as_send(src)) {
-          std::cerr << " receive(val=" << s->value << ")";
+        if (it->second.is_bottom()) {
+          std::cerr << " receive(bottom)";
         } else {
-          std::cerr << " receive(src=" << it->second << ")";
+          const auto& src = graph.event(it->second.send_id());
+          if (const auto* s = model::as_send(src)) {
+            std::cerr << " receive(val=" << s->value << ")";
+          } else {
+            std::cerr << " receive(src=" << it->second.send_id() << ")";
+          }
         }
       } else {
         std::cerr << " receive(unmatched)";

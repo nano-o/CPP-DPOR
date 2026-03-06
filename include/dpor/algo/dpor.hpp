@@ -114,7 +114,8 @@ compute_next_event(
 
     // If it's a receive, check if there's at least one compatible unread send.
     if (const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&label)) {
-      if (!has_compatible_unread_send(graph, tid, *recv)) {
+      if (recv->is_blocking() &&
+          !has_compatible_unread_send(graph, tid, *recv)) {
         // Must-style behavior: represent an unsatisfied blocking receive as a
         // Block event and continue with other threads.
         return std::pair{
@@ -165,12 +166,15 @@ get_cons_tiebreaker(
     const model::ExplorationGraphT<ValueT>& graph,
     typename model::ExplorationGraphT<ValueT>::EventId recv) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
-  constexpr auto kNoSource = model::ExplorationGraphT<ValueT>::kNoSource;
 
   const auto& recv_evt = graph.event(recv);
   const auto* recv_label = model::as_receive(recv_evt);
   if (recv_label == nullptr) {
     throw std::logic_error("get_cons_tiebreaker invariant violated: event is not a receive");
+  }
+  if (recv_label->is_nonblocking()) {
+    throw std::logic_error(
+        "get_cons_tiebreaker invariant violated: event is not a blocking receive");
   }
 
   // Find all compatible sends that are available for recv to read from:
@@ -186,7 +190,11 @@ get_cons_tiebreaker(
     throw std::logic_error(
         "get_cons_tiebreaker invariant violated: receive missing reads-from source");
   }
-  const auto current_rf_source = rf_it->second;
+  if (rf_it->second.is_bottom()) {
+    throw std::logic_error(
+        "get_cons_tiebreaker invariant violated: blocking receive reads from bottom");
+  }
+  const auto current_rf_source = rf_it->second.send_id();
 
   std::vector<Candidate> candidates;
   for (const auto send_id : graph.unread_send_event_ids()) {
@@ -205,14 +213,12 @@ get_cons_tiebreaker(
   }
 
   // Also include the send that recv currently reads from (consumed by recv itself).
-  if (current_rf_source != kNoSource) {
-    const auto& send_evt = graph.event(current_rf_source);
-    const auto* send_label = model::as_send(send_evt);
-    if (send_label != nullptr &&
-        send_label->destination == recv_evt.thread &&
-        recv_label->accepts(send_label->value)) {
-      candidates.push_back(Candidate{current_rf_source, send_evt.thread});
-    }
+  const auto& send_evt = graph.event(current_rf_source);
+  const auto* send_label = model::as_send(send_evt);
+  if (send_label != nullptr &&
+      send_label->destination == recv_evt.thread &&
+      recv_label->accepts(send_label->value)) {
+    candidates.push_back(Candidate{current_rf_source, send_evt.thread});
   }
 
   // Sort by sender thread ID (tid-minimal), then by event ID for stability.
@@ -250,6 +256,15 @@ template <typename ValueT>
 
   const auto& evt = graph.event(e);
 
+  if (const auto* recv = model::as_receive(evt); recv != nullptr && recv->is_nonblocking()) {
+    auto rf_it = graph.reads_from().find(e);
+    if (rf_it == graph.reads_from().end()) {
+      throw std::logic_error(
+          "revisit_condition invariant violated: non-blocking receive missing reads-from source");
+    }
+    return rf_it->second.is_bottom();
+  }
+
   // ND choice: val(e) == min(S).
   // NOTE: This branch requires ValueT to provide operator< (for min_element)
   // and operator== (for comparison). If ValueT lacks these, verify<T>() will
@@ -269,7 +284,9 @@ template <typename ValueT>
     for (const auto ep : previous) {
       if (model::is_receive(graph.event(ep))) {
         auto it = graph.reads_from().find(ep);
-        if (it != graph.reads_from().end() && it->second == e) {
+        if (it != graph.reads_from().end() &&
+            it->second.is_send() &&
+            it->second.send_id() == e) {
           return false;  // A receive in Previous reads from e.
         }
       }
@@ -309,11 +326,17 @@ template <typename ValueT>
     throw std::logic_error(
         "revisit_condition invariant violated: receive missing reads-from source");
   }
-  const auto current_rf_original = rf_it->second;
+  if (rf_it->second.is_bottom()) {
+    throw std::logic_error(
+        "revisit_condition invariant violated: blocking receive reads from bottom");
+  }
+  const auto current_rf_original = rf_it->second.send_id();
   auto rf_map_it = id_map.find(current_rf_original);
   if (rf_map_it == id_map.end()) {
-    throw std::logic_error(
-        "revisit_condition invariant violated: reads-from source missing from Previous");
+    // This is a normal blocking-receive failure case, not an invariant break:
+    // Algorithm 1 compares rf(e) against a tiebreaker computed on G|Previous,
+    // so if the current source is not in Previous the equality cannot hold.
+    return false;
   }
   const EvId remapped_rf = rf_map_it->second;
 
@@ -399,6 +422,10 @@ template <typename ValueT>
     if (recv == nullptr) {
       throw std::logic_error(
           "blocked thread did not produce a receive after unblocking");
+    }
+    if (recv->is_nonblocking()) {
+      throw std::logic_error(
+          "blocked thread produced a non-blocking receive after unblocking");
     }
     if (!has_compatible_unread_send(unblocked_graph, tid, *recv)) {
       continue;
@@ -642,6 +669,12 @@ inline void visit(
       auto new_graph = graph;
       const auto recv_id = new_graph.add_event(tid, label);
       new_graph.set_reads_from(recv_id, send_id);
+      visit_if_consistent(program, std::move(new_graph), result, config, depth + 1);
+    }
+    if (recv->is_nonblocking()) {
+      auto new_graph = graph;
+      const auto recv_id = new_graph.add_event(tid, label);
+      new_graph.set_reads_from_bottom(recv_id);
       visit_if_consistent(program, std::move(new_graph), result, config, depth + 1);
     }
     return;

@@ -16,6 +16,7 @@
 #include <concepts>
 #include <cstdint>
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
@@ -26,6 +27,57 @@ namespace dpor::model {
 using ThreadId = std::uint32_t;
 using EventIndex = std::uint32_t;
 using Value = std::string;
+
+enum class ReceiveMode { Blocking, NonBlocking };
+
+struct BottomValue {
+  bool operator==(const BottomValue&) const = default;
+};
+
+template <typename ValueT>
+struct ObservedValueT {
+  std::variant<ValueT, BottomValue> data;
+
+  ObservedValueT() : data(BottomValue{}) {}
+
+  ObservedValueT(ValueT value) : data(std::move(value)) {}
+
+  ObservedValueT(BottomValue bottom) : data(bottom) {}
+
+  [[nodiscard]] bool is_bottom() const noexcept {
+    return std::holds_alternative<BottomValue>(data);
+  }
+
+  [[nodiscard]] const ValueT* as_value() const noexcept {
+    return std::get_if<ValueT>(&data);
+  }
+
+  [[nodiscard]] const ValueT& value() const {
+    const auto* observed = as_value();
+    if (observed == nullptr) {
+      throw std::logic_error("observed value is bottom");
+    }
+    return *observed;
+  }
+
+  [[nodiscard]] static ObservedValueT bottom() {
+    return ObservedValueT{BottomValue{}};
+  }
+
+  [[nodiscard]] bool operator==(const ObservedValueT&) const = default;
+
+  [[nodiscard]] bool operator==(const ValueT& other) const {
+    const auto* observed = as_value();
+    return observed != nullptr && *observed == other;
+  }
+};
+
+template <typename ValueT>
+[[nodiscard]] inline bool operator==(const ValueT& lhs, const ObservedValueT<ValueT>& rhs) {
+  return rhs == lhs;
+}
+
+using ObservedValue = ObservedValueT<Value>;
 
 // Receive matcher predicate. Must be deterministic and side-effect-free: the
 // same ValueT input must always produce the same bool result. DPOR soundness
@@ -41,8 +93,17 @@ using ReceiveMatchFnT = std::function<bool(const ValueT&)>;
 
 template <typename ValueT>
 struct ReceiveLabelT {
+  ReceiveMode mode{ReceiveMode::Blocking};
   // Predicate deciding whether this receive may consume a candidate payload.
   ReceiveMatchFnT<ValueT> matches{[](const ValueT&) { return true; }};
+
+  [[nodiscard]] bool is_blocking() const noexcept {
+    return mode == ReceiveMode::Blocking;
+  }
+
+  [[nodiscard]] bool is_nonblocking() const noexcept {
+    return mode == ReceiveMode::NonBlocking;
+  }
 
   [[nodiscard]] bool accepts(const ValueT& value) const {
     return matches(value);
@@ -98,21 +159,31 @@ template <typename ValueT>
 
 template <typename ValueT>
 [[nodiscard]] inline ReceiveLabelT<ValueT> make_receive_label(
-    ReceiveMatchFnT<ValueT> matcher = match_any_value<ValueT>()) {
+    ReceiveMatchFnT<ValueT> matcher = match_any_value<ValueT>(),
+    ReceiveMode mode = ReceiveMode::Blocking) {
   return ReceiveLabelT<ValueT>{
+      .mode = mode,
       .matches = std::move(matcher),
   };
 }
 
 template <typename ValueT>
+[[nodiscard]] inline ReceiveLabelT<ValueT> make_nonblocking_receive_label(
+    ReceiveMatchFnT<ValueT> matcher = match_any_value<ValueT>()) {
+  return make_receive_label<ValueT>(std::move(matcher), ReceiveMode::NonBlocking);
+}
+
+template <typename ValueT>
   requires std::equality_comparable<ValueT>
 [[nodiscard]] inline ReceiveLabelT<ValueT> make_receive_label_from_values(
-    std::vector<ValueT> accepted_values) {
+    std::vector<ValueT> accepted_values,
+    ReceiveMode mode = ReceiveMode::Blocking) {
   return make_receive_label<ValueT>(
       [accepted_values = std::move(accepted_values)](const ValueT& candidate) {
         return std::find(accepted_values.begin(), accepted_values.end(), candidate) !=
                accepted_values.end();
-      });
+      },
+      mode);
 }
 
 template <typename ValueT>

@@ -29,8 +29,8 @@ std::string event_signature(const Event& event) {
     oss << "S(dst=" << send->destination << ",v=" << send->value << ")";
   } else if (const auto* nd = as_nondeterministic_choice(event)) {
     oss << "ND(v=" << nd->value << ")";
-  } else if (is_receive(event)) {
-    oss << "R";
+  } else if (const auto* recv = as_receive(event)) {
+    oss << (recv->is_nonblocking() ? "Rnb" : "Rb");
   } else if (is_block(event)) {
     oss << "B";
   } else if (is_error(event)) {
@@ -49,9 +49,13 @@ std::string graph_signature(const ExplorationGraph& graph) {
 
   std::vector<std::string> rf_edges;
   rf_edges.reserve(graph.reads_from().size());
-  for (const auto& [recv_id, send_id] : graph.reads_from()) {
+  for (const auto& [recv_id, source] : graph.reads_from()) {
+    if (source.is_bottom()) {
+      rf_edges.push_back("BOTTOM->" + event_signature(graph.event(recv_id)));
+      continue;
+    }
     rf_edges.push_back(
-        event_signature(graph.event(send_id)) + "->" + event_signature(graph.event(recv_id)));
+        event_signature(graph.event(source.send_id())) + "->" + event_signature(graph.event(recv_id)));
   }
   std::sort(rf_edges.begin(), rf_edges.end());
 
@@ -69,7 +73,7 @@ std::string graph_signature(const ExplorationGraph& graph) {
 struct OracleTransition {
   ThreadId thread{};
   EventLabel label{};
-  std::optional<ExplorationGraph::EventId> rf_source{};
+  std::optional<ExplorationGraph::ReadsFromSource> rf_source{};
 };
 
 std::vector<ThreadId> sorted_thread_ids(const Program& program) {
@@ -151,10 +155,16 @@ std::vector<OracleTransition> enumerate_enabled_transitions(
         transitions.push_back(OracleTransition{
             .thread = tid,
             .label = *next_label,
-            .rf_source = send_id,
+            .rf_source = ExplorationGraph::ReadsFromSource::from_send(send_id),
         });
       }
-      if (!found_compatible) {
+      if (recv->is_nonblocking()) {
+        transitions.push_back(OracleTransition{
+            .thread = tid,
+            .label = *next_label,
+            .rf_source = ExplorationGraph::ReadsFromSource::bottom(),
+        });
+      } else if (!found_compatible) {
         // Must Example 4.1 behavior: unsatisfied blocking receives add Block.
         transitions.push_back(OracleTransition{
             .thread = tid,
@@ -236,6 +246,10 @@ std::vector<ExplorationGraph> enumerate_reschedulable_graphs(
       throw std::logic_error(
           "rescheduling failed in oracle: blocked thread is not waiting on receive");
     }
+    if (recv->is_nonblocking()) {
+      throw std::logic_error(
+          "rescheduling failed in oracle: blocked thread became non-blocking receive");
+    }
 
     if (has_compatible_unread_send(unblocked, tid, *recv)) {
       rescheduled.push_back(std::move(unblocked));
@@ -256,7 +270,11 @@ void enumerate_consistent_executions(
       auto next_graph = graph;
       const auto event_id = next_graph.add_event(transition.thread, transition.label);
       if (transition.rf_source.has_value()) {
-        next_graph.set_reads_from(event_id, *transition.rf_source);
+        if (transition.rf_source->is_bottom()) {
+          next_graph.set_reads_from_bottom(event_id);
+        } else {
+          next_graph.set_reads_from(event_id, transition.rf_source->send_id());
+        }
       }
 
       // Soundness oracle follows Must's "visit-if-consistent" rule.
@@ -330,7 +348,7 @@ Program build_program_from_spec(const ProgramSpec& spec) {
           }
           return SendLabel{
               .destination = op.destination,
-              .value = trace.back(),
+              .value = trace.back().value(),
           };
         case ScriptOpKind::ReceiveAny:
           return make_receive_label<Value>();
@@ -671,7 +689,7 @@ TEST_CASE("Algorithm 1 stress: trace-dependent receive predicates remain complet
     if (step == 1 && trace.size() == 1) {
       return SendLabel{
           .destination = 3,
-          .value = trace[0],
+          .value = trace[0].value(),
       };
     }
     return std::nullopt;
@@ -701,7 +719,7 @@ TEST_CASE("Algorithm 1 stress: trace-dependent receive predicates remain complet
     }
     if (step == 1 && trace.size() == 1) {
       return make_receive_label<Value>(
-          [expected = trace[0]](const Value& candidate) {
+          [expected = trace[0].value()](const Value& candidate) {
             return candidate == expected;
           });
     }
