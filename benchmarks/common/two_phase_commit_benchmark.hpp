@@ -130,11 +130,11 @@ template <typename Fn>
 
 inline void print_measurements(
     std::string_view label,
-    const std::vector<Measurement>& measurements) {
+    const std::vector<Measurement>& measurements,
+    bool show_paths) {
   if (measurements.empty()) {
     return;
   }
-  const bool show_paths = measurements.front().paths_explored > 0;
 
   const auto minmax = std::minmax_element(
       measurements.begin(),
@@ -263,7 +263,7 @@ inline int run_two_phase_commit_benchmark(
           options.inject_crash,
           false,
           make_program);
-      detail::print_measurements("DPOR", dpor_measurements);
+      detail::print_measurements("DPOR", dpor_measurements, false);
     }
 
     if (options.mode == detail::Options::Mode::Oracle ||
@@ -274,7 +274,7 @@ inline int run_two_phase_commit_benchmark(
           options.inject_crash,
           true,
           make_program);
-      detail::print_measurements("Oracle", oracle_measurements);
+      detail::print_measurements("Oracle", oracle_measurements, true);
     }
 
     if (!dpor_measurements.empty() && !oracle_measurements.empty() &&
