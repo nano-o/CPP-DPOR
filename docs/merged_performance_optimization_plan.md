@@ -246,9 +246,9 @@ Landing 1 measurement result:
   - `unread_send_event_ids()`: `1.72%`
   - `ensure_porf_cache()`: `1.50%`
   - `porf_contains()`: `0.66%`
-- Conclusion: Landing 1 appears structurally correct but not sufficient for end-to-end speedup on this workload. Landing 2 remains the right next step, because full PORF construction / topological work still dominates the DPOR-specific cost cluster.
+- Conclusion: Landing 1 appears structurally correct but not sufficient for end-to-end speedup on this workload. Landing 2 is now skipped in the mainline plan. The prototype notes below remain useful as justification for skipping it, but the next implementation work should move to Phase 5.
 
-#### Landing 2: Warm-Cache Incremental PORF Extension
+#### Landing 2: Warm-Cache Incremental PORF Extension (Skipped)
 
 Goal:
 
@@ -332,35 +332,172 @@ Landing 2 measurement result:
   - or the deep copy of the parent cache largely cancels out the rebuild it replaces
 - Conclusion: the Landing 2 idea was valid enough to prototype, but not valuable enough to keep. The current tree keeps Landing 1 only. The next priority should move to graph-materialization / allocator reduction on the forward path, with revisit-heavy materialization still visible as a secondary concern.
 
-Measurement plan:
+Phase 4 closeout:
 
-1. land Landing 1
-2. run targeted tests, then `ctest --preset debug --output-on-failure`
-3. rerun the timeout benchmark and `perf`
-4. only then land Landing 2
-5. rerun the same benchmark and `perf` again before considering Phase 5
+1. keep Landing 1 in tree
+2. skip Landing 2 unless a later profile shows full PORF rebuilds becoming dominant again
+3. use the Landing 1 and reverted-Landing-2 measurements as the handoff rationale for Phase 5
 
 ### Phase 5: Eliminate Common-Case Branch Copies In One Worker
 
-After the Phase 4 measurements, this is now the most plausible next major step. The profile is increasingly allocator/materialization-heavy, and the clone-and-extend PORF path did not buy enough runtime to justify keeping the extra machinery, let alone doing more PORF-local refinement before addressing branch-state copying more directly.
+After the Phase 4 measurements, this is now the most plausible next major step. The current profile is still allocator/materialization-heavy, and the remaining whole-graph copies in `visit()` are now a cleaner target than more PORF-local work.
 
-If phases 1 through 4 still leave graph-copying dominant after re-measurement, move to the larger structural change:
+Phase 5 scope:
 
-1. add checkpoint and rollback support to `ExplorationGraphT`
-2. keep that rollback state worker-local
-3. rewrite the common forward branches in `visit()` to mutate, recurse, and roll back
-4. keep explicit isolated snapshot creation at any future parallel task boundary
+- remove full-graph value copies from the common forward branches in `visit()`
+- keep all mutation worker-local to one recursion stack
+- preserve the current revisit logic (`restrict()`, `with_rf()`, `revisit_condition()`, `backward_revisit()`) except for minimal signature adjustments needed to call the new recursion helper
+- preserve the current by-value ownership model at the task-spawn boundary for any future parallel search
 
-This is the point where the plan begins to use local mutation, but only inside one worker's recursion stack.
+Phase 5 non-goals:
 
-This phase is intentionally limited to the common forward path. The send-handling path still calls `backward_revisit()`, and that code currently depends on `restrict()` plus `with_rf()` over remapped event IDs. Those revisit-specific paths should continue to create independent materialized state until Phase 6 provides a safer replacement.
+- do not redesign revisit materialization yet; that remains Phase 6
+- do not try to preserve or incrementally extend `PorfCache` across rollback in the first implementation
+- do not weaken the rule that every graph recursively explored by `visit()` must already be fully consistent
+- do not introduce shared mutable graph state across workers
 
-If this phase is implemented, keep the by-value ownership model at the task-spawn boundary. A reasonable shape is a by-value spawn-facing wrapper that calls an internal by-reference recursive helper inside one worker.
+Implementation plan:
+
+#### Landing 1: Worker-Local Checkpoint / Rollback Infrastructure
+
+Goal:
+
+- make `ExplorationGraphT` cheap to mutate temporarily and then restore exactly
+
+API shape:
+
+- add a small worker-local `Checkpoint` token to `ExplorationGraphT`
+- add `checkpoint()` and `rollback(Checkpoint)` on `ExplorationGraphT`
+- optionally add a tiny RAII helper (`ScopedRollback` or equivalent) so `visit()` cannot accidentally miss a rollback on an early return
+- the token should just capture the current rollback frontier (for example, undo-log sizes or equivalent logical mutation counts); no separate shared stack of checkpoints is required
+
+Implementation shape:
+
+1. keep rollback state inside `ExplorationGraphT`; it is worker-local bookkeeping, not part of the graph's logical value
+2. make `Checkpoint` token-based rather than stack-based:
+   - each recursive call frame takes one checkpoint before mutating
+   - `rollback(token)` undoes mutations back to that token's frontier
+   - recursion gives the needed LIFO behavior naturally, without a global checkpoint stack API
+3. add an event-append undo log that records enough state to undo one `add_event()`:
+   - appended event id
+   - thread id
+   - appended per-thread event index
+   - previous `ThreadState`
+   - previous `next_event_index_by_thread_` entry for that thread
+4. add an `rf`-assignment undo log that records enough state to undo one `set_reads_from*()`:
+   - receive id
+   - whether the receive previously had an `rf` entry
+   - previous `ReadsFromSource`, if any
+5. extend `ExecutionGraphT` only with the minimal internal hooks needed to support rollback:
+   - pop the last appended event
+   - erase a used event index from the owning thread's set
+   - restore `next_event_index_by_thread_`
+   - clear or restore a `reads_from_` entry
+   - note explicitly that the `used_event_indices_by_thread_` update is the one rollback step that is not a pure vector truncation/restore; it is an `unordered_set<EventIndex>::erase()` and should be implemented and measured as such
+6. let rollback restore logical contents, not storage capacity:
+   - vectors and dense `reads_from_` storage may keep reserved capacity after rollback
+   - the important invariant is exact logical state restoration, not shrinking memory on every undo
+7. always clear `porf_cache_` on mutation and on rollback in the first implementation
+8. checkpoint/rollback must also save and restore the Phase 4 metadata:
+   - `known_acyclic_`
+   - `pending_fresh_receive_id_`
+9. copy-producing operations (`restrict()`, `with_rf()`, `with_bottom_rf()`, ordinary graph copy/snapshot paths) must not retain worker-local undo history from the source graph; copied graphs should start with empty rollback history even if they preserve the same logical execution state
+10. this clean-copy rule matters especially for the send branch after Landing 2:
+   - `backward_revisit()` must inspect the currently mutated parent graph, so the fresh send is visible to `porf_contains()` and restriction logic
+   - any `restrict()` / `with_rf()` graphs materialized inside `backward_revisit()` must still be independent values with empty rollback history
+
+Landing 1 tests:
+
+- append one event, then roll back to the empty graph
+- append a receive, assign `rf`, then roll back and confirm both the event and its `rf` entry disappear
+- overwrite an existing `rf` entry, then roll back and confirm the previous source is restored
+- token-based checkpoints compose correctly across nested recursive use; one explicit nested-checkpoint unit test is enough, but the implementation does not need a separate checkpoint stack
+- `thread_event_count()`, `last_event_id()`, `thread_trace()`, insertion order, and `inserted_before_or_equal()` all match the pre-mutation state after rollback
+- `known_acyclic_` and `pending_fresh_receive_id_` are restored correctly across rollback
+- checkpoint -> append receive -> assign `rf` -> rollback -> append a different receive -> assign a different `rf` source still preserves correct `known_acyclic_` tracking on the restored graph
+- warming `porf_cache_`, mutating, and rolling back remains correct even though the cache is conservatively dropped
+- copying a graph after Landing 1 produces an independent logical graph with no borrowed worker-local rollback history
+- `restrict()` and `with_rf()` also produce independent graphs with no borrowed worker-local rollback history when called from a graph that already has rollback history
+
+#### Landing 2: Rewrite Forward Recursion To Mutate, Recurse, Roll Back
+
+Goal:
+
+- remove `auto new_graph = graph` from the common forward branches without touching revisit-heavy materialization yet
+
+Recursive shape:
+
+1. keep `verify()` as the spawn-facing, by-value entry point
+2. add an internal worker-local recursive helper shape where:
+   - `visit(...)` takes `ExplorationGraphT&`
+   - `visit_if_consistent(...)` takes `ExplorationGraphT&`
+3. keep by-reference recursion strictly inside one worker; any future task split must still hand an owned graph value to the other worker
+
+Branch rewrite:
+
+1. error branch
+   - checkpoint
+   - append the terminal error event
+   - publish the execution / error result
+   - if `config.on_execution` is set, call it before rollback so the observer sees the terminal error event on a fully materialized branch-local graph
+   - roll back before returning to the caller's branch
+2. ND branch
+   - one checkpoint per choice
+   - append the chosen ND event
+   - recurse
+   - roll back
+3. receive branch
+   - collect compatible unread sends before mutating
+   - for each compatible send: checkpoint, append receive, set `rf`, call `visit_if_consistent()`, roll back
+   - for non-blocking receives: do the same for the bottom branch
+4. send branch
+   - checkpoint
+   - append the send once
+   - run `backward_revisit()` against the currently mutated graph, so the fresh send is visible to revisit checks and any cache warming via `porf_contains()`
+   - recurse forward on that same mutated graph
+   - roll back after both the revisit work and the forward continuation finish
+5. block branch
+   - checkpoint
+   - append the internal `Block` event
+   - recurse
+   - roll back
+
+Observer ordering rule:
+
+- at every `config.on_execution(graph)` callback, the observer must see a complete branch-local graph state for that execution
+- error branch: callback happens after the error event is appended and before rollback
+- normal completion branch: callback happens at the base case on the current fully materialized graph; caller checkpoints are rolled back only after that recursive call returns
+- no callback should ever observe a partially rolled-back graph
+
+Intentional hold-outs for Phase 6:
+
+- `backward_revisit()` may continue to materialize via `restrict()` plus `with_rf()`
+- `revisit_condition()` may continue to build restricted graphs
+- `reschedule_blocked_receive_if_enabled()` may continue to use `restrict()` to drop the block event
+
+Landing 2 tests:
+
+- existing DPOR end-to-end tests and oracle-backed tests remain unchanged
+- add one targeted regression that mixes ND, send, blocking receive, non-blocking receive, and error/block paths so execution sets are compared before and after the refactor
+- confirm observer callbacks always see fully materialized branch-local graphs:
+  - terminal error execution before rollback
+  - ordinary completed execution before the caller unwinds and rolls back its checkpoint
+- confirm the send branch still exposes the appended send to `backward_revisit()`, while the caller-visible graph after rollback does not retain it
+- confirm `restrict()` / `with_rf()` materialized during `backward_revisit()` remain independent graphs with clean rollback state even when the parent graph is currently mutated and has rollback history
+
+Phase 5 measurement plan:
+
+1. land Landing 1 with rollback-focused unit tests
+2. land Landing 2 and rerun focused DPOR tests, then `ctest --preset debug --output-on-failure`
+3. rerun the timeout benchmark and `perf`
+4. confirm that whole-graph copy construction / destruction largely disappears from the common forward `visit()` path
+5. only then decide whether Phase 6 revisit-specific work is still justified
 
 Expected result:
 
-- largest reduction in ordinary branch-state materialization
-- preserved compatibility with future parallel search through explicit task snapshots
+- largest remaining reduction in ordinary branch-state materialization
+- lower allocator pressure on the forward path
+- remaining graph materialization should become more concentrated in revisit-specific helpers, making Phase 6 a cleaner follow-up target
 
 ### Phase 6: Tackle Revisit-Specific Materialization
 
@@ -380,10 +517,11 @@ This phase is intentionally later because it is more complex and easier to get w
 4. unify cycle work without changing diagnostics
 5. re-measure and confirm whether the dominant remaining costs are cycle/PORF, unread-send scanning, or graph materialization
 6. Phase 4 Landing 1: internal known-acyclic propagation for the append-only forward path, so the checker can skip cold cycle queries there
-7. re-measure, then optionally prototype Phase 4 Landing 2: warm-cache PORF clone-and-extend for the same append-only forward path, but keep it only if it clears a clear perf/complexity bar
-8. worker-local rollback plus explicit task snapshots if graph-copy/materialization costs are still dominant after the completed Phase 4 measurements; this is now the recommended next step
-9. revisit-specific restricted views or other deeper structural work only if revisit-heavy materialization still dominates after the forward path is cheaper
-10. reserve hot vectors and other minor adjacency-building cleanups where perf justifies them
+7. skip Phase 4 Landing 2 in the mainline plan; keep the reverted prototype only as a data point unless later profiling changes the tradeoff
+8. Phase 5 Landing 1: worker-local checkpoint/rollback infrastructure, including rollback-focused tests and empty-history copy semantics for materialized graphs
+9. Phase 5 Landing 2: reference-based forward recursion in `visit()`, while leaving revisit materialization intentionally unchanged
+10. Phase 6: revisit-specific restricted views or other deeper structural work only if revisit-heavy materialization still dominates after the forward path is cheaper
+11. reserve hot vectors and other minor adjacency-building cleanups where perf justifies them
 
 ## Why This Order
 
