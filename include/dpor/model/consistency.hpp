@@ -61,7 +61,14 @@ class AsyncConsistencyCheckerT {
 
   [[nodiscard]] ConsistencyResult check(const ExplorationGraphT<ValueT>& graph) const {
     auto validation = validate_graph<false>(graph.execution_graph());
-    if (validation.cycle_query_safe && graph.has_causal_cycle()) {
+    if (!validation.cycle_query_safe) {
+      return validation.result;
+    }
+
+    const bool has_cycle = graph.has_porf_cache()
+        ? graph.has_causal_cycle()
+        : graph.has_causal_cycle_without_cache();
+    if (has_cycle) {
       add_causal_cycle_issue(validation.result);
     }
     return validation.result;

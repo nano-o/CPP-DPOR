@@ -335,6 +335,26 @@ TEST_CASE("two-thread cycle detected as causal cycle", "[model][exploration_grap
   REQUIRE(g.has_causal_cycle());
 }
 
+TEST_CASE(
+    "cycle-only causal check avoids populating porf cache",
+    "[model][exploration_graph][porf_cache]") {
+  ExplorationGraph g;
+  const auto r1 = g.add_event(1, make_receive_label<Value>());
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
+  const auto r2 = g.add_event(2, make_receive_label<Value>());
+  const auto s2 = g.add_event(2, SendLabel{.destination = 1, .value = "b"});
+
+  g.set_reads_from(r1, s2);
+  g.set_reads_from(r2, s1);
+
+  REQUIRE_FALSE(g.has_porf_cache());
+  REQUIRE(g.has_causal_cycle_without_cache());
+  REQUIRE_FALSE(g.has_porf_cache());
+
+  REQUIRE(g.has_causal_cycle());
+  REQUIRE(g.has_porf_cache());
+}
+
 // --- PorfCache tests ---
 
 TEST_CASE("multi-hop porf reachability via rf and po", "[model][exploration_graph][porf_cache]") {
@@ -492,6 +512,9 @@ TEST_CASE(
 
   // Baseline relation construction rejects this graph.
   REQUIRE_THROWS_AS(g.rf_relation(), std::invalid_argument);
+  REQUIRE_FALSE(g.has_porf_cache());
+  REQUIRE_THROWS_AS(g.has_causal_cycle_without_cache(), std::invalid_argument);
+  REQUIRE_FALSE(g.has_porf_cache());
   // has_causal_cycle should surface the same malformed-rf error.
   REQUIRE_THROWS_AS(g.has_causal_cycle(), std::invalid_argument);
 }

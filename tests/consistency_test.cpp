@@ -617,6 +617,40 @@ TEST_CASE("exploration-graph checker overload still reports cycle with non-struc
   REQUIRE(has_issue(exploration_result, ConsistencyIssueCode::CausalCycle));
 }
 
+TEST_CASE("exploration-graph checker overload leaves cold porf cache untouched",
+    "[model][consistency][exploration_graph]") {
+  ExplorationGraph graph;
+  const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
+  graph.set_reads_from(r, s);
+
+  REQUIRE_FALSE(graph.has_porf_cache());
+
+  const AsyncConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE(result.is_consistent());
+  REQUIRE_FALSE(graph.has_porf_cache());
+}
+
+TEST_CASE("exploration-graph checker overload reuses warm porf cache",
+    "[model][consistency][exploration_graph]") {
+  ExplorationGraph graph;
+  const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
+  graph.set_reads_from(r, s);
+
+  REQUIRE_FALSE(graph.has_porf_cache());
+  REQUIRE(graph.porf_contains(s, r));
+  REQUIRE(graph.has_porf_cache());
+
+  const AsyncConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE(result.is_consistent());
+  REQUIRE(graph.has_porf_cache());
+}
+
 // --- Custom value type ---
 
 TEST_CASE("consistency checker works with custom value type", "[model][consistency]") {
