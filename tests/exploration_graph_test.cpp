@@ -316,6 +316,39 @@ TEST_CASE("rewriting rf on a pre-existing receive clears known acyclicity",
   REQUIRE_FALSE(g.is_known_acyclic());
 }
 
+TEST_CASE("malformed rf assignments clear known acyclicity",
+    "[model][exploration_graph][known_acyclic]") {
+  SECTION("invalid source id") {
+    ExplorationGraph g;
+    static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "x"}));
+    const auto r = g.add_event(2, make_receive_label<Value>());
+
+    REQUIRE(g.is_known_acyclic());
+    g.set_reads_from(r, 999);
+    REQUIRE_FALSE(g.is_known_acyclic());
+  }
+
+  SECTION("source event is not a send") {
+    ExplorationGraph g;
+    const auto other_r = g.add_event(1, make_receive_label<Value>());
+    const auto r = g.add_event(2, make_receive_label<Value>());
+
+    REQUIRE(g.is_known_acyclic());
+    g.set_reads_from(r, other_r);
+    REQUIRE_FALSE(g.is_known_acyclic());
+  }
+
+  SECTION("invalid receive id") {
+    ExplorationGraph g;
+    const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+    static_cast<void>(g.add_event(2, make_receive_label<Value>()));
+
+    REQUIRE(g.is_known_acyclic());
+    g.set_reads_from(999, s);
+    REQUIRE_FALSE(g.is_known_acyclic());
+  }
+}
+
 TEST_CASE("restrict and rf-copy helpers clear known acyclicity",
     "[model][exploration_graph][known_acyclic]") {
   ExplorationGraph g;

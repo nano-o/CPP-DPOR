@@ -590,6 +590,28 @@ TEST_CASE("exploration-graph checker overload preserves malformed rf diagnostics
   REQUIRE_FALSE(has_issue(exploration_result, ConsistencyIssueCode::CausalCycle));
 }
 
+TEST_CASE("exploration-graph checker overload still reports cycle alongside malformed rf diagnostics",
+    "[model][consistency][exploration_graph]") {
+  ExplorationGraph graph;
+
+  const auto r1 = graph.add_event(1, make_receive_label<Value>());
+  const auto s1 = graph.add_event(1, SendLabel{.destination = 2, .value = "a"});
+  const auto r2 = graph.add_event(2, make_receive_label<Value>());
+  const auto s2 = graph.add_event(2, SendLabel{.destination = 1, .value = "b"});
+
+  graph.set_reads_from(r1, s2);
+  graph.set_reads_from(r2, s1);
+  graph.set_reads_from(12345, s1);
+
+  const AsyncConsistencyChecker checker;
+  const auto execution_result = checker.check(graph.execution_graph());
+  const auto exploration_result = checker.check(graph);
+
+  REQUIRE(issue_codes(exploration_result) == issue_codes(execution_result));
+  REQUIRE(has_issue(exploration_result, ConsistencyIssueCode::InvalidEventReference));
+  REQUIRE(has_issue(exploration_result, ConsistencyIssueCode::CausalCycle));
+}
+
 TEST_CASE("exploration-graph checker overload still reports cycle with non-structural issues",
     "[model][consistency][exploration_graph]") {
   ExplorationGraph graph;

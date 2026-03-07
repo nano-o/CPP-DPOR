@@ -89,19 +89,24 @@ class ExplorationGraphT {
   void set_reads_from(EventId receive_id, EventId source_id) {
     graph_.set_reads_from(receive_id, source_id);
     porf_cache_ = nullptr;
-    update_acyclicity_after_rf_assignment(receive_id);
+    update_acyclicity_after_rf_assignment(
+        receive_id,
+        ReadsFromSource::from_send(source_id));
   }
 
   void set_reads_from_source(EventId receive_id, ReadsFromSource source) {
+    const auto source_copy = source;
     graph_.set_reads_from_source(receive_id, std::move(source));
     porf_cache_ = nullptr;
-    update_acyclicity_after_rf_assignment(receive_id);
+    update_acyclicity_after_rf_assignment(receive_id, source_copy);
   }
 
   void set_reads_from_bottom(EventId receive_id) {
     graph_.set_reads_from_bottom(receive_id);
     porf_cache_ = nullptr;
-    update_acyclicity_after_rf_assignment(receive_id);
+    update_acyclicity_after_rf_assignment(
+        receive_id,
+        ReadsFromSource::bottom());
   }
 
   [[nodiscard]] const Event& event(EventId id) const {
@@ -408,14 +413,30 @@ class ExplorationGraphT {
     }
   }
 
-  void update_acyclicity_after_rf_assignment(EventId receive_id) {
-    if (known_acyclic_ &&
-        pending_fresh_receive_id_.has_value() &&
-        *pending_fresh_receive_id_ == receive_id) {
+  void update_acyclicity_after_rf_assignment(
+      EventId receive_id,
+      const ReadsFromSource& source) {
+    if (!known_acyclic_ ||
+        !pending_fresh_receive_id_.has_value() ||
+        *pending_fresh_receive_id_ != receive_id ||
+        !is_valid_event_id(receive_id) ||
+        !is_receive(event(receive_id))) {
+      invalidate_known_acyclicity();
+      return;
+    }
+
+    if (source.is_bottom()) {
       pending_fresh_receive_id_.reset();
       return;
     }
-    invalidate_known_acyclicity();
+
+    const auto source_id = source.send_id();
+    if (!is_valid_event_id(source_id) || !is_send(event(source_id))) {
+      invalidate_known_acyclicity();
+      return;
+    }
+
+    pending_fresh_receive_id_.reset();
   }
 
   // ExplorationGraphT only grows through add_event(), which assigns fresh

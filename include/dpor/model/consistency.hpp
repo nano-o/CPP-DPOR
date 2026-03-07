@@ -62,7 +62,10 @@ class AsyncConsistencyCheckerT {
   [[nodiscard]] ConsistencyResult check(const ExplorationGraphT<ValueT>& graph) const {
     auto validation = validate_graph<false>(graph.execution_graph());
     if (!validation.cycle_query_safe) {
-      return validation.result;
+      // Malformed graphs are not on the DPOR hot path. Fall back to the
+      // ExecutionGraph overload to preserve exact diagnostic parity,
+      // including cycle reports induced by the remaining valid rf edges.
+      return check(graph.execution_graph());
     }
     if (graph.is_known_acyclic()) {
       return validation.result;
