@@ -383,11 +383,7 @@ template <typename ValueT>
     }
 
     std::vector<std::uint8_t> keep_mask(graph.event_count(), 1);
-    for (EvId id = 0; id < graph.event_count(); ++id) {
-      if (id == last_id) {
-        keep_mask[id] = 0;
-      }
-    }
+    keep_mask[last_id] = 0;
     auto unblocked_graph = model::detail::restrict_masked(graph, keep_mask);
 
     const auto& thread_fn = program.threads.at(tid);
