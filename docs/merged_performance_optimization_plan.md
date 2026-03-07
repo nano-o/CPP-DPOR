@@ -552,6 +552,161 @@ Each completed phase should also show at least one measurable improvement in eit
 - cycle-checking cost
 - graph-copy visibility in perf
 
+## How To Run Performance Comparisons
+
+This section describes the three measurement workflows used to evaluate each phase: end-to-end timing, `perf` profile recording, and profile analysis.
+
+### Prerequisites
+
+- Linux with `perf` installed (`linux-tools-common` / `linux-tools-$(uname -r)`)
+- Ninja build system
+- A C++20 compiler (GCC 12+ or Clang 15+)
+- `perf_event_paranoid` set to allow user-space recording (`sudo sysctl -w kernel.perf_event_paranoid=1` or lower)
+
+### 1. End-To-End Timing
+
+Build a clean release benchmark binary and run it with the standard workload. The reference workload for cross-phase comparisons is `participants=4`, `iterations=1`, `--no-crash` on the timeout-inclusive 2PC model.
+
+```bash
+# Build (release, no test harness overhead)
+cmake -S . -B build/bench-release -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DDPOR_BUILD_TESTING=OFF \
+  -DDPOR_BUILD_EXAMPLES=ON \
+  -DDPOR_BUILD_BENCHMARKS=ON
+
+cmake --build build/bench-release \
+  --target dpor_two_phase_commit_timeout_benchmark -j
+
+# Run the reference workload
+build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \
+  --mode dpor --participants 4 --iterations 1 --no-crash
+```
+
+Output looks like:
+
+```
+2PC timeout benchmark participants=4 inject_crash=false iterations=1 optimized_build=true
+DPOR
+  run 1: executions=7262928 elapsed_ms=108440.546
+  summary: min_ms=108440.546 avg_ms=108440.546 max_ms=108440.546 executions=7262928
+```
+
+Key values to record for each phase:
+- `elapsed_ms` (the `summary: min_ms` value when using `--iterations 1`)
+- `executions` (must stay constant across phases — a change means a correctness regression)
+
+For more stable numbers, use `--iterations 3` and compare `min_ms`.
+
+### 2. Perf Profile Recording
+
+Use the provided script, which builds a `RelWithDebInfo` binary with frame pointers and records a `cpu-clock` trace with DWARF unwinding:
+
+```bash
+benchmarks/profile_two_phase_commit_timeout_perf.sh --participants 4
+```
+
+This does three things:
+1. Configures and builds `build/perf/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark` with `-O2 -g -fno-omit-frame-pointer -fno-optimize-sibling-calls`
+2. Runs `perf record -e cpu-clock --all-user -F 499 --call-graph dwarf,4096` on the benchmark with `--mode dpor --participants 4 --iterations 1 --no-crash`
+3. Writes the trace to `benchmarks/perf-data/perf-two-phase-commit-timeout-p4-<commit>-<timestamp>.data`
+
+The script automatically tags the output file with the current git short-hash and a timestamp, so you can record before and after a change and compare.
+
+If you need to profile a different configuration manually:
+
+```bash
+cmake -S . -B build/perf -G Ninja \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DDPOR_BUILD_TESTING=ON \
+  -DDPOR_BUILD_EXAMPLES=ON \
+  -DDPOR_BUILD_BENCHMARKS=ON \
+  -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -fno-omit-frame-pointer -fno-optimize-sibling-calls"
+
+cmake --build build/perf \
+  --target dpor_two_phase_commit_timeout_benchmark -j
+
+perf record -e cpu-clock --all-user -F 499 \
+  --call-graph dwarf,4096 \
+  -o my-trace.data -- \
+  build/perf/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \
+  --mode dpor --participants 4 --iterations 1 --no-crash
+```
+
+If stacks look truncated, increase the kernel callchain depth:
+
+```bash
+sudo sysctl -w kernel.perf_event_max_stack=512
+```
+
+### 3. Profile Analysis
+
+#### Self-cost hotspots (flat profile)
+
+Shows which functions spend the most time in their own code (excluding callees). This is the primary view for identifying which symbols to optimize:
+
+```bash
+perf report -i <trace>.data --stdio --no-children --percent-limit 0.5
+```
+
+Key DPOR-specific symbols to watch across phases:
+
+| Symbol | What it means |
+|---|---|
+| `build_porf_graph_structure()` | PORF adjacency construction |
+| `compute_topological_order()` | Kahn's topo sort for PORF |
+| `build_full_porf_cache()` | vector-clock computation |
+| `ensure_porf_cache()` | lazy PORF cache entry point |
+| `has_causal_cycle_without_cache()` | cold-cache cycle check |
+| `validate_graph<false>()` | RF endpoint validation |
+| `thread_trace()` | per-thread value extraction |
+| `unread_send_event_ids()` | compatible-send scan |
+| `backward_revisit()` | revisit logic |
+| `porf_contains()` | PORF reachability query |
+
+Allocator symbols (`_int_malloc`, `_int_free`, `malloc`, `malloc_consolidate`, `operator new`, `operator delete`) indicate graph-copy / materialization overhead.
+
+#### Caller-oriented view (cumulative profile)
+
+Shows cumulative cost including callees, useful for understanding which high-level code paths dominate:
+
+```bash
+perf report -i <trace>.data --stdio --children -g graph,0.5,caller
+```
+
+#### Comparing two traces
+
+To compare hotspot shapes before and after a change, run the flat profile on both traces and diff the DPOR-specific symbols:
+
+```bash
+# Before
+perf report -i benchmarks/perf-data/perf-...-<before-commit>-....data \
+  --stdio --no-children --percent-limit 0.3 > /tmp/before.txt
+
+# After
+perf report -i benchmarks/perf-data/perf-...-<after-commit>-....data \
+  --stdio --no-children --percent-limit 0.3 > /tmp/after.txt
+
+diff /tmp/before.txt /tmp/after.txt
+```
+
+The important things to check in a comparison:
+1. **End-to-end `sample duration`** at the top of the report (corresponds to wall-clock time under profiling)
+2. **DPOR-specific symbol percentages** shifting in the expected direction (e.g., `has_causal_cycle_without_cache` disappearing after Phase 4 Landing 1)
+3. **Allocator symbol total share** decreasing after copy-reduction work (Phases 5–6)
+4. **Execution count** staying unchanged (printed by the benchmark itself, not by `perf`)
+
+### Checklist For Each Phase
+
+1. Record baseline timing: `--mode dpor --participants 4 --iterations 1 --no-crash`
+2. Record baseline perf trace: `benchmarks/profile_two_phase_commit_timeout_perf.sh --participants 4`
+3. Implement the change
+4. Run tests: `ctest --preset debug --output-on-failure`
+5. Record post-change timing (same workload)
+6. Record post-change perf trace
+7. Compare `elapsed_ms`, `executions`, self-hotspot shapes, and allocator share
+8. Update the implementation notes in this document with the measurement results
+
 ## Bottom Line
 
 The merged plan is:
