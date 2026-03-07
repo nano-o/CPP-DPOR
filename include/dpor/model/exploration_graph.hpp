@@ -65,6 +65,7 @@ class ExplorationGraphT {
   [[nodiscard]] EventId add_event(ThreadId thread, EventLabelT<ValueT> label) {
     const auto id = graph_.add_event(thread, std::move(label));
     insertion_order_.push_back(id);
+    assert(id == insertion_position_.size());
     insertion_position_.push_back(insertion_order_.size() - 1U);
     porf_cache_ = nullptr;
 

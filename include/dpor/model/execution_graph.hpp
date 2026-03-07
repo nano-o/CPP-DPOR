@@ -80,24 +80,31 @@ class ReadsFromRelationT {
 
   class const_iterator {
    public:
-    using iterator_category = std::forward_iterator_tag;
+    struct arrow_proxy {
+      Entry entry;
+
+      [[nodiscard]] const Entry* operator->() const noexcept {
+        return &entry;
+      }
+    };
+
+    using iterator_category = std::input_iterator_tag;
     using value_type = Entry;
     using difference_type = std::ptrdiff_t;
-    using pointer = const Entry*;
-    using reference = const Entry&;
+    using pointer = arrow_proxy;
+    using reference = value_type;
 
     const_iterator() = default;
 
     [[nodiscard]] reference operator*() const {
-      cache_ = Entry{
+      return Entry{
           index_,
           *relation_->entries_.at(static_cast<std::size_t>(index_)),
       };
-      return cache_;
     }
 
     [[nodiscard]] pointer operator->() const {
-      return &(**this);
+      return arrow_proxy{**this};
     }
 
     const_iterator& operator++() {
@@ -136,7 +143,6 @@ class ReadsFromRelationT {
 
     const ReadsFromRelationT* relation_{nullptr};
     EventIdT index_{0};
-    mutable Entry cache_{};
   };
 
   [[nodiscard]] const_iterator begin() const {

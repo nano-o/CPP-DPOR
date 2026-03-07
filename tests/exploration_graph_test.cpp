@@ -211,6 +211,28 @@ TEST_CASE("reads_from iteration preserves assigned receive ids and skips gaps",
   REQUIRE(g.reads_from().find(2) == g.reads_from().end());
 }
 
+TEST_CASE("reads_from iterator dereference stays stable across increment",
+    "[model][exploration_graph]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r1 = g.add_event(2, make_receive_label<Value>());
+  static_cast<void>(g.add_event(3, SendLabel{.destination = 4, .value = "y"}));
+  const auto r2 = g.add_event(4, make_nonblocking_receive_label<Value>());
+
+  g.set_reads_from(r1, s1);
+  g.set_reads_from_bottom(r2);
+
+  auto it = g.reads_from().begin();
+  const auto& first = *it;
+  ++it;
+  const auto& second = *it;
+
+  REQUIRE(first.first == r1);
+  REQUIRE(first.second == s1);
+  REQUIRE(second.first == r2);
+  REQUIRE(second.second.is_bottom());
+}
+
 // --- with_nd_value ---
 
 TEST_CASE("with_nd_value returns copy with changed ND value", "[model][exploration_graph]") {
