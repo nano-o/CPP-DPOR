@@ -189,6 +189,28 @@ TEST_CASE("with_bottom_rf returns copy with changed rf", "[model][exploration_gr
   REQUIRE(g2.reads_from().at(r).is_bottom());
 }
 
+TEST_CASE("reads_from iteration preserves assigned receive ids and skips gaps",
+    "[model][exploration_graph]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r1 = g.add_event(2, make_receive_label<Value>());
+  static_cast<void>(g.add_event(3, SendLabel{.destination = 4, .value = "y"}));
+  const auto r2 = g.add_event(4, make_nonblocking_receive_label<Value>());
+
+  g.set_reads_from(r1, s1);
+  g.set_reads_from_bottom(r2);
+
+  std::vector<ExplorationGraph::EventId> receive_ids;
+  for (const auto& [receive_id, source] : g.reads_from()) {
+    receive_ids.push_back(receive_id);
+    REQUIRE((source.is_send() || source.is_bottom()));
+  }
+
+  REQUIRE(receive_ids == std::vector<ExplorationGraph::EventId>{r1, r2});
+  REQUIRE(g.reads_from().find(r1) != g.reads_from().end());
+  REQUIRE(g.reads_from().find(2) == g.reads_from().end());
+}
+
 // --- with_nd_value ---
 
 TEST_CASE("with_nd_value returns copy with changed ND value", "[model][exploration_graph]") {

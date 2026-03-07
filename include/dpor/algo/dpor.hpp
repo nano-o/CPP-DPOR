@@ -620,19 +620,21 @@ inline void visit(
   if (const auto* nd = std::get_if<model::NondeterministicChoiceLabelT<ValueT>>(&label)) {
     if (nd->choices.empty()) {
       // No choices specified: just use the value as-is.
-      auto new_graph = graph;
+      auto new_graph = std::move(graph);
       static_cast<void>(new_graph.add_event(tid, label));
       visit(program, std::move(new_graph), result, config, depth + 1, thread_ids);
       return;
     }
 
-    for (const auto& choice : nd->choices) {
+    for (std::size_t choice_index = 0; choice_index < nd->choices.size(); ++choice_index) {
       if (result.kind == VerifyResultKind::ErrorFound) {
         return;
       }
+      const auto& choice = nd->choices[choice_index];
       auto nd_label = *nd;
       nd_label.value = choice;
-      auto new_graph = graph;
+      const bool is_last_choice = choice_index + 1 == nd->choices.size();
+      auto new_graph = is_last_choice ? std::move(graph) : graph;
       static_cast<void>(new_graph.add_event(tid, model::EventLabelT<ValueT>{nd_label}));
       visit(program, std::move(new_graph), result, config, depth + 1, thread_ids);
     }
@@ -652,17 +654,22 @@ inline void visit(
       }
     }
 
+    const auto total_branches =
+        compatible_sends.size() + static_cast<std::size_t>(recv->is_nonblocking());
+    std::size_t branch_index = 0;
     for (const auto send_id : compatible_sends) {
       if (result.kind == VerifyResultKind::ErrorFound) {
         return;
       }
-      auto new_graph = graph;
+      const bool is_last_branch = branch_index + 1 == total_branches;
+      auto new_graph = is_last_branch ? std::move(graph) : graph;
+      ++branch_index;
       const auto recv_id = new_graph.add_event(tid, label);
       new_graph.set_reads_from(recv_id, send_id);
       visit_if_consistent(program, std::move(new_graph), result, config, depth + 1, thread_ids);
     }
     if (recv->is_nonblocking()) {
-      auto new_graph = graph;
+      auto new_graph = std::move(graph);
       const auto recv_id = new_graph.add_event(tid, label);
       new_graph.set_reads_from_bottom(recv_id);
       visit_if_consistent(program, std::move(new_graph), result, config, depth + 1, thread_ids);
@@ -672,7 +679,7 @@ inline void visit(
 
   // Handle send: add event, then do backward revisiting + forward continuation.
   if (const auto* send = std::get_if<model::SendLabelT<ValueT>>(&label)) {
-    auto new_graph = graph;
+    auto new_graph = std::move(graph);
     const auto send_id = new_graph.add_event(tid, label);
 
     // Backward revisit: try to reassign existing receives to read from this new send.
@@ -687,7 +694,7 @@ inline void visit(
 
   // Handle block (internal receive-wait marker): add event and continue.
   if (std::holds_alternative<model::BlockLabel>(label)) {
-    auto new_graph = graph;
+    auto new_graph = std::move(graph);
     static_cast<void>(new_graph.add_event(tid, label));
     visit(program, std::move(new_graph), result, config, depth + 1, thread_ids);
     return;

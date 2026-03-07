@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
@@ -71,13 +72,128 @@ template <typename EventIdT>
   return rhs == lhs;
 }
 
+template <typename EventIdT>
+class ReadsFromRelationT {
+ public:
+  using ReadsFromSource = ReadsFromSourceT<EventIdT>;
+  using Entry = std::pair<EventIdT, ReadsFromSource>;
+
+  class const_iterator {
+   public:
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = Entry;
+    using difference_type = std::ptrdiff_t;
+    using pointer = const Entry*;
+    using reference = const Entry&;
+
+    const_iterator() = default;
+
+    [[nodiscard]] reference operator*() const {
+      cache_ = Entry{
+          index_,
+          *relation_->entries_.at(static_cast<std::size_t>(index_)),
+      };
+      return cache_;
+    }
+
+    [[nodiscard]] pointer operator->() const {
+      return &(**this);
+    }
+
+    const_iterator& operator++() {
+      ++index_;
+      advance_to_present();
+      return *this;
+    }
+
+    const_iterator operator++(int) {
+      auto copy = *this;
+      ++(*this);
+      return copy;
+    }
+
+    [[nodiscard]] bool operator==(const const_iterator& other) const noexcept {
+      return relation_ == other.relation_ && index_ == other.index_;
+    }
+
+   private:
+    friend class ReadsFromRelationT;
+
+    const_iterator(const ReadsFromRelationT* relation, EventIdT index)
+        : relation_(relation), index_(index) {
+      advance_to_present();
+    }
+
+    void advance_to_present() {
+      if (relation_ == nullptr) {
+        return;
+      }
+      while (static_cast<std::size_t>(index_) < relation_->entries_.size() &&
+             !relation_->entries_[static_cast<std::size_t>(index_)].has_value()) {
+        ++index_;
+      }
+    }
+
+    const ReadsFromRelationT* relation_{nullptr};
+    EventIdT index_{0};
+    mutable Entry cache_{};
+  };
+
+  [[nodiscard]] const_iterator begin() const {
+    return const_iterator(this, 0);
+  }
+
+  [[nodiscard]] const_iterator end() const {
+    return const_iterator(this, static_cast<EventIdT>(entries_.size()));
+  }
+
+  [[nodiscard]] const_iterator find(EventIdT receive_id) const {
+    const auto index = static_cast<std::size_t>(receive_id);
+    if (index >= entries_.size() || !entries_[index].has_value()) {
+      return end();
+    }
+    return const_iterator(this, receive_id);
+  }
+
+  [[nodiscard]] const ReadsFromSource& at(EventIdT receive_id) const {
+    const auto index = static_cast<std::size_t>(receive_id);
+    if (index >= entries_.size() || !entries_[index].has_value()) {
+      throw std::out_of_range("reads-from entry not found");
+    }
+    return *entries_[index];
+  }
+
+  [[nodiscard]] std::size_t size() const noexcept {
+    return size_;
+  }
+
+  [[nodiscard]] bool empty() const noexcept {
+    return size_ == 0;
+  }
+
+  void set(EventIdT receive_id, ReadsFromSource source) {
+    const auto index = static_cast<std::size_t>(receive_id);
+    if (index >= entries_.size()) {
+      entries_.resize(index + 1);
+    }
+    if (!entries_[index].has_value()) {
+      ++size_;
+    }
+    entries_[index] = std::move(source);
+  }
+
+ private:
+  std::vector<std::optional<ReadsFromSource>> entries_{};
+  std::size_t size_{0};
+};
+
 template <typename ValueT>
 class ExecutionGraphT {
  public:
   using EventId = std::size_t;
   using Event = EventT<ValueT>;
   using ReadsFromSource = ReadsFromSourceT<EventId>;
-  using ReadsFromRelation = std::unordered_map<EventId, ReadsFromSource>;
+  using ReadsFromRelation = ReadsFromRelationT<EventId>;
 
   // Normal insertion path: assign event index automatically per thread.
   [[nodiscard]] EventId add_event(ThreadId thread, EventLabelT<ValueT> label) {
@@ -114,7 +230,7 @@ class ExecutionGraphT {
   }
 
   void set_reads_from_source(EventId receive_event_id, ReadsFromSource source) {
-    reads_from_[receive_event_id] = source;
+    reads_from_.set(receive_event_id, std::move(source));
   }
 
   void set_reads_from(EventId receive_event_id, EventId source_id) {

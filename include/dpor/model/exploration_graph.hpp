@@ -65,7 +65,7 @@ class ExplorationGraphT {
   [[nodiscard]] EventId add_event(ThreadId thread, EventLabelT<ValueT> label) {
     const auto id = graph_.add_event(thread, std::move(label));
     insertion_order_.push_back(id);
-    insertion_position_[id] = insertion_order_.size() - 1U;
+    insertion_position_.push_back(insertion_order_.size() - 1U);
     porf_cache_ = nullptr;
 
     auto& ts = thread_state_[thread];
@@ -116,12 +116,10 @@ class ExplorationGraphT {
 
   // Returns true if event a was inserted before event b (<=_G).
   [[nodiscard]] bool inserted_before_or_equal(EventId a, EventId b) const {
-    const auto it_a = insertion_position_.find(a);
-    const auto it_b = insertion_position_.find(b);
-    if (it_a == insertion_position_.end() || it_b == insertion_position_.end()) {
+    if (a >= insertion_position_.size() || b >= insertion_position_.size()) {
       throw std::out_of_range("event id not found in insertion order");
     }
-    return it_a->second <= it_b->second;
+    return insertion_position_[a] <= insertion_position_[b];
   }
 
   [[nodiscard]] ProgramOrderRelation po_relation() const {
@@ -347,7 +345,7 @@ class ExplorationGraphT {
  private:
   ExecutionGraphT<ValueT> graph_{};
   std::vector<EventId> insertion_order_{};
-  std::unordered_map<EventId, std::size_t> insertion_position_{};
+  std::vector<std::size_t> insertion_position_{};
   std::unordered_map<ThreadId, ThreadState> thread_state_{};
   mutable std::shared_ptr<PorfCache> porf_cache_{};
 
