@@ -7,23 +7,6 @@
 
 namespace {
 using namespace dpor::model;
-
-void require_same_porf_reachability(ExplorationGraph& lhs, ExplorationGraph& rhs) {
-  REQUIRE(lhs.event_count() == rhs.event_count());
-
-  const bool lhs_has_cycle = lhs.has_causal_cycle();
-  const bool rhs_has_cycle = rhs.has_causal_cycle();
-  REQUIRE(lhs_has_cycle == rhs_has_cycle);
-  if (lhs_has_cycle) {
-    return;
-  }
-
-  for (ExplorationGraph::EventId from = 0; from < lhs.event_count(); ++from) {
-    for (ExplorationGraph::EventId to = 0; to < lhs.event_count(); ++to) {
-      REQUIRE(lhs.porf_contains(from, to) == rhs.porf_contains(from, to));
-    }
-  }
-}
 }  // namespace
 
 // --- Insertion order tracking ---
@@ -505,82 +488,6 @@ TEST_CASE("cycle detection via with_rf", "[model][exploration_graph][porf_cache]
   REQUIRE_FALSE(g.has_causal_cycle());
 }
 
-TEST_CASE("warm cached parent extends porf cache for fresh send append",
-    "[model][exploration_graph][porf_cache][incremental]") {
-  ExplorationGraph parent;
-  const auto s1 = parent.add_event(1, SendLabel{.destination = 2, .value = "a"});
-  const auto r1 = parent.add_event(2, make_receive_label<Value>());
-  parent.set_reads_from(r1, s1);
-
-  REQUIRE(parent.porf_contains(s1, r1));
-  REQUIRE(parent.has_porf_cache());
-
-  auto child = parent;
-  static_cast<void>(child.add_event(2, SendLabel{.destination = 3, .value = "b"}));
-  REQUIRE(child.is_known_acyclic());
-  REQUIRE_FALSE(child.has_porf_cache());
-
-  ExplorationGraph reference;
-  const auto ref_s1 = reference.add_event(1, SendLabel{.destination = 2, .value = "a"});
-  const auto ref_r1 = reference.add_event(2, make_receive_label<Value>());
-  reference.set_reads_from(ref_r1, ref_s1);
-  static_cast<void>(reference.add_event(2, SendLabel{.destination = 3, .value = "b"}));
-
-  require_same_porf_reachability(child, reference);
-}
-
-TEST_CASE("warm cached parent extends porf cache for fresh receive rf append",
-    "[model][exploration_graph][porf_cache][incremental]") {
-  ExplorationGraph parent;
-  const auto s1 = parent.add_event(1, SendLabel{.destination = 2, .value = "a"});
-  const auto s2 = parent.add_event(1, SendLabel{.destination = 2, .value = "b"});
-  const auto r1 = parent.add_event(2, make_receive_label_from_values<Value>({"a"}));
-  parent.set_reads_from(r1, s1);
-
-  REQUIRE(parent.porf_contains(s1, r1));
-  REQUIRE(parent.has_porf_cache());
-
-  auto child = parent;
-  const auto r2 = child.add_event(2, make_receive_label_from_values<Value>({"b"}));
-  child.set_reads_from(r2, s2);
-  REQUIRE(child.is_known_acyclic());
-  REQUIRE_FALSE(child.has_porf_cache());
-
-  ExplorationGraph reference;
-  const auto ref_s1 = reference.add_event(1, SendLabel{.destination = 2, .value = "a"});
-  const auto ref_s2 = reference.add_event(1, SendLabel{.destination = 2, .value = "b"});
-  const auto ref_r1 = reference.add_event(2, make_receive_label_from_values<Value>({"a"}));
-  reference.set_reads_from(ref_r1, ref_s1);
-  const auto ref_r2 = reference.add_event(2, make_receive_label_from_values<Value>({"b"}));
-  reference.set_reads_from(ref_r2, ref_s2);
-
-  require_same_porf_reachability(child, reference);
-}
-
-TEST_CASE("incremental porf extension widens clocks for first event on a new thread",
-    "[model][exploration_graph][porf_cache][incremental]") {
-  ExplorationGraph parent;
-  const auto s1 = parent.add_event(1, SendLabel{.destination = 2, .value = "a"});
-  const auto r1 = parent.add_event(2, make_receive_label<Value>());
-  parent.set_reads_from(r1, s1);
-
-  REQUIRE(parent.porf_contains(s1, r1));
-  REQUIRE(parent.has_porf_cache());
-
-  auto child = parent;
-  static_cast<void>(child.add_event(3, SendLabel{.destination = 1, .value = "c"}));
-  REQUIRE(child.is_known_acyclic());
-  REQUIRE_FALSE(child.has_porf_cache());
-
-  ExplorationGraph reference;
-  const auto ref_s1 = reference.add_event(1, SendLabel{.destination = 2, .value = "a"});
-  const auto ref_r1 = reference.add_event(2, make_receive_label<Value>());
-  reference.set_reads_from(ref_r1, ref_s1);
-  static_cast<void>(reference.add_event(3, SendLabel{.destination = 1, .value = "c"}));
-
-  require_same_porf_reachability(child, reference);
-}
-
 TEST_CASE("cache invalidation on set_reads_from", "[model][exploration_graph][porf_cache]") {
   ExplorationGraph g;
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
@@ -599,31 +506,6 @@ TEST_CASE("cache invalidation on set_reads_from", "[model][exploration_graph][po
   REQUIRE(g.porf_contains(s2, r));
   // s1 -po-> s2 -rf-> r, so s1 still reaches r.
   REQUIRE(g.porf_contains(s1, r));
-}
-
-TEST_CASE("unsafe rf rewrites do not reuse stale warm-parent reachability",
-    "[model][exploration_graph][porf_cache][incremental]") {
-  ExplorationGraph parent;
-  const auto s1 = parent.add_event(1, SendLabel{.destination = 2, .value = "a"});
-  const auto s2 = parent.add_event(1, SendLabel{.destination = 2, .value = "b"});
-  const auto r = parent.add_event(2, make_receive_label<Value>());
-  parent.set_reads_from(r, s1);
-
-  REQUIRE(parent.porf_contains(s1, r));
-  REQUIRE(parent.has_porf_cache());
-
-  const auto rewired = parent.with_rf(r, s2);
-  REQUIRE_FALSE(rewired.is_known_acyclic());
-  REQUIRE_FALSE(rewired.has_porf_cache());
-
-  ExplorationGraph reference;
-  const auto ref_s1 = reference.add_event(1, SendLabel{.destination = 2, .value = "a"});
-  const auto ref_s2 = reference.add_event(1, SendLabel{.destination = 2, .value = "b"});
-  const auto ref_r = reference.add_event(2, make_receive_label<Value>());
-  reference.set_reads_from(ref_r, ref_s2);
-
-  auto rewired_copy = rewired;
-  require_same_porf_reachability(rewired_copy, reference);
 }
 
 TEST_CASE("restrict preserves porf reachability on subset", "[model][exploration_graph][porf_cache]") {

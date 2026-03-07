@@ -68,20 +68,13 @@ class ExplorationGraphT {
 
   // Add an event, tracking insertion order and per-thread metadata.
   [[nodiscard]] EventId add_event(ThreadId thread, EventLabelT<ValueT> label) {
-    std::optional<EventId> po_predecessor;
-    const auto thread_index = static_cast<std::size_t>(thread);
-    if (thread_index < thread_state_.size() &&
-        thread_state_[thread_index].event_count != 0) {
-      po_predecessor = thread_state_[thread_index].last_event_id;
-    }
-    auto parent_cache = current_append_parent_cache();
-
     const auto id = graph_.add_event(thread, std::move(label));
     insertion_order_.push_back(id);
     assert(id == insertion_position_.size());
     insertion_position_.push_back(insertion_order_.size() - 1U);
     porf_cache_ = nullptr;
 
+    const auto thread_index = static_cast<std::size_t>(thread);
     if (thread_index >= thread_state_.size()) {
       thread_state_.resize(thread_index + 1);
     }
@@ -89,7 +82,7 @@ class ExplorationGraphT {
     assert(ts.last_event_id == kNoSource || event(id).index > event(ts.last_event_id).index);
     ts.event_count++;
     ts.last_event_id = id;
-    update_acyclicity_after_add_event(id, po_predecessor, std::move(parent_cache));
+    update_acyclicity_after_add_event(id);
     return id;
   }
 
@@ -394,14 +387,7 @@ class ExplorationGraphT {
   std::vector<std::size_t> insertion_position_{};
   std::vector<ThreadState> thread_state_{};
   bool known_acyclic_{true};
-  struct AppendProvenance {
-    EventId appended_event_id{};
-    std::optional<EventId> po_predecessor_id{};
-    std::optional<ReadsFromSource> rf_source{};
-    bool awaiting_rf_assignment{false};
-    std::shared_ptr<const PorfCache> parent_cache{};
-  };
-  std::optional<AppendProvenance> append_provenance_{};
+  std::optional<EventId> pending_fresh_receive_id_{};
   mutable std::shared_ptr<PorfCache> porf_cache_{};
 
   struct PorfGraphStructure {
@@ -412,222 +398,24 @@ class ExplorationGraphT {
 
   void invalidate_known_acyclicity() {
     known_acyclic_ = false;
-    append_provenance_.reset();
+    pending_fresh_receive_id_.reset();
   }
 
-  [[nodiscard]] std::shared_ptr<const PorfCache> current_append_parent_cache() const {
-    if (!known_acyclic_ || !porf_cache_ || porf_cache_->has_cycle) {
-      return nullptr;
-    }
-    return porf_cache_;
-  }
-
-  void update_acyclicity_after_add_event(
-      EventId event_id,
-      std::optional<EventId> po_predecessor_id,
-      std::shared_ptr<const PorfCache> parent_cache) {
-    if (!known_acyclic_) {
-      append_provenance_.reset();
-      return;
-    }
-
-    append_provenance_ = AppendProvenance{
-        .appended_event_id = event_id,
-        .po_predecessor_id = po_predecessor_id,
-        .parent_cache = std::move(parent_cache),
-    };
-    if (is_receive(event(event_id))) {
-      append_provenance_->awaiting_rf_assignment = true;
+  void update_acyclicity_after_add_event(EventId event_id) {
+    pending_fresh_receive_id_.reset();
+    if (known_acyclic_ && is_receive(event(event_id))) {
+      pending_fresh_receive_id_ = event_id;
     }
   }
 
   void update_acyclicity_after_rf_assignment(EventId receive_id) {
     if (known_acyclic_ &&
-        append_provenance_.has_value() &&
-        append_provenance_->appended_event_id == receive_id &&
-        append_provenance_->awaiting_rf_assignment &&
-        is_receive(event(receive_id))) {
-      append_provenance_->awaiting_rf_assignment = false;
-      append_provenance_->rf_source = reads_from().at(receive_id);
+        pending_fresh_receive_id_.has_value() &&
+        *pending_fresh_receive_id_ == receive_id) {
+      pending_fresh_receive_id_.reset();
       return;
     }
     invalidate_known_acyclicity();
-  }
-
-  [[nodiscard]] std::shared_ptr<PorfCache> try_extend_porf_cache_from_parent() const {
-    if (!known_acyclic_ || !append_provenance_.has_value()) {
-      return nullptr;
-    }
-
-    const auto& provenance = *append_provenance_;
-    if (!provenance.parent_cache || provenance.parent_cache->has_cycle) {
-      return nullptr;
-    }
-
-    const auto parent_event_count = provenance.parent_cache->position_in_thread.size();
-    if (event_count() != parent_event_count + 1 ||
-        provenance.appended_event_id != parent_event_count) {
-      return nullptr;
-    }
-
-    if (provenance.awaiting_rf_assignment) {
-      return nullptr;
-    }
-
-    if (!is_valid_event_id(provenance.appended_event_id)) {
-      return nullptr;
-    }
-
-    const auto& fresh_event = event(provenance.appended_event_id);
-    if (is_receive(fresh_event) && !provenance.rf_source.has_value()) {
-      return nullptr;
-    }
-
-    auto cache = std::make_shared<PorfCache>(*provenance.parent_cache);
-    if (cache->clocks.size() != parent_event_count ||
-        cache->position_in_thread.size() != parent_event_count) {
-      return nullptr;
-    }
-
-    const auto thread_index = static_cast<std::size_t>(fresh_event.thread);
-    if (thread_index >= cache->thread_clock_index.size()) {
-      cache->thread_clock_index.resize(thread_index + 1, kNoSource);
-    }
-
-    const bool first_event_in_thread = cache->thread_clock_index[thread_index] == kNoSource;
-    if (first_event_in_thread) {
-      cache->thread_clock_index[thread_index] = cache->num_threads++;
-      for (auto& clock : cache->clocks) {
-        clock.push_back(0);
-      }
-    }
-
-    std::size_t position = 0;
-    if (provenance.po_predecessor_id.has_value()) {
-      const auto pred_id = *provenance.po_predecessor_id;
-      if (pred_id >= parent_event_count ||
-          event(pred_id).thread != fresh_event.thread) {
-        return nullptr;
-      }
-      position = cache->position_in_thread[pred_id] + 1;
-    } else if (fresh_event.index != 0) {
-      return nullptr;
-    }
-
-    const auto width = cache->num_threads;
-    cache->position_in_thread.push_back(position);
-    cache->clocks.push_back(std::vector<std::size_t>(width, 0));
-
-    auto& clock = cache->clocks.back();
-    if (provenance.po_predecessor_id.has_value()) {
-      clock = cache->clocks[*provenance.po_predecessor_id];
-    }
-
-    if (provenance.rf_source.has_value() && provenance.rf_source->is_send()) {
-      const auto source_id = provenance.rf_source->send_id();
-      if (source_id >= parent_event_count) {
-        throw std::invalid_argument(
-            "reads-from relation source refers to an unknown send event id");
-      }
-      if (!is_send(event(source_id))) {
-        throw std::invalid_argument("reads-from relation source event is not a send");
-      }
-      const auto& source_clock = cache->clocks[source_id];
-      for (std::size_t i = 0; i < width; ++i) {
-        clock[i] = std::max(clock[i], source_clock[i]);
-      }
-    }
-
-    const auto ci = cache->thread_clock_index[thread_index];
-    clock[ci] = position + 1;
-    cache->has_cycle = false;
-    return cache;
-  }
-
-  [[nodiscard]] std::shared_ptr<PorfCache> build_full_porf_cache() const {
-    const auto n = event_count();
-    auto cache = std::make_shared<PorfCache>();
-
-    if (n == 0) {
-      return cache;
-    }
-
-    auto porf_graph = build_porf_graph_structure();
-
-    // Assign dense clock indices per thread.
-    cache->thread_clock_index.assign(porf_graph.thread_events.size(), kNoSource);
-    for (std::size_t tid = 0; tid < porf_graph.thread_events.size(); ++tid) {
-      const auto& evts = porf_graph.thread_events[tid];
-      if (evts.empty()) {
-        continue;
-      }
-      cache->thread_clock_index[tid] = cache->num_threads++;
-    }
-
-    // Compute position_in_thread for each event.
-    cache->position_in_thread.resize(n, 0);
-    for (const auto& evts : porf_graph.thread_events) {
-      for (std::size_t pos = 0; pos < evts.size(); ++pos) {
-        cache->position_in_thread[evts[pos]] = pos;
-      }
-    }
-
-    const auto topo_order =
-        compute_topological_order(porf_graph.successors, porf_graph.in_degree);
-
-    if (topo_order.size() < n) {
-      cache->has_cycle = true;
-      return cache;
-    }
-
-    // Compute vector clocks in topological order.
-    const auto width = cache->num_threads;
-    cache->clocks.resize(n, std::vector<std::size_t>(width, 0));
-
-    // Pre-compute rf target mapping: recv_id -> source_id.
-    // All edges are already validated by the adjacency-building loop above.
-    std::unordered_map<EventId, EventId> rf_source;
-    rf_source.reserve(reads_from().size());
-    for (const auto& [recv_id, source] : reads_from()) {
-      if (source.is_send()) {
-        rf_source[recv_id] = source.send_id();
-      }
-    }
-
-    // Pre-compute po predecessor: for each event that has a po predecessor.
-    std::unordered_map<EventId, EventId> po_pred;
-    po_pred.reserve(n);
-    for (const auto& evts : porf_graph.thread_events) {
-      for (std::size_t i = 1; i < evts.size(); ++i) {
-        po_pred[evts[i]] = evts[i - 1];
-      }
-    }
-
-    for (const auto id : topo_order) {
-      auto& clock = cache->clocks[id];
-
-      // Start with po-predecessor's clock.
-      auto po_it = po_pred.find(id);
-      if (po_it != po_pred.end()) {
-        clock = cache->clocks[po_it->second];
-      }
-
-      // Join with rf source's clock (pointwise max).
-      auto rf_it = rf_source.find(id);
-      if (rf_it != rf_source.end()) {
-        const auto& src_clock = cache->clocks[rf_it->second];
-        for (std::size_t i = 0; i < width; ++i) {
-          clock[i] = std::max(clock[i], src_clock[i]);
-        }
-      }
-
-      // Set own position.
-      const auto& evt = event(id);
-      const auto ci = cache->thread_clock_index[evt.thread];
-      clock[ci] = cache->position_in_thread[id] + 1;
-    }
-
-    return cache;
   }
 
   // ExplorationGraphT only grows through add_event(), which assigns fresh
@@ -723,11 +511,92 @@ class ExplorationGraphT {
     if (porf_cache_) {
       return;
     }
-    if (const auto extended_cache = try_extend_porf_cache_from_parent()) {
-      porf_cache_ = std::move(extended_cache);
+
+    const auto n = event_count();
+    auto cache = std::make_shared<PorfCache>();
+
+    if (n == 0) {
+      porf_cache_ = std::move(cache);
       return;
     }
-    porf_cache_ = build_full_porf_cache();
+
+    auto porf_graph = build_porf_graph_structure();
+
+    // Assign dense clock indices per thread.
+    cache->thread_clock_index.assign(porf_graph.thread_events.size(), kNoSource);
+    for (std::size_t tid = 0; tid < porf_graph.thread_events.size(); ++tid) {
+      const auto& evts = porf_graph.thread_events[tid];
+      if (evts.empty()) {
+        continue;
+      }
+      cache->thread_clock_index[tid] = cache->num_threads++;
+    }
+
+    // Compute position_in_thread for each event.
+    cache->position_in_thread.resize(n, 0);
+    for (const auto& evts : porf_graph.thread_events) {
+      for (std::size_t pos = 0; pos < evts.size(); ++pos) {
+        cache->position_in_thread[evts[pos]] = pos;
+      }
+    }
+
+    const auto topo_order =
+        compute_topological_order(porf_graph.successors, porf_graph.in_degree);
+
+    if (topo_order.size() < n) {
+      cache->has_cycle = true;
+      porf_cache_ = std::move(cache);
+      return;
+    }
+
+    // Compute vector clocks in topological order.
+    const auto width = cache->num_threads;
+    cache->clocks.resize(n, std::vector<std::size_t>(width, 0));
+
+    // Pre-compute rf target mapping: recv_id -> source_id.
+    // All edges are already validated by the adjacency-building loop above.
+    std::unordered_map<EventId, EventId> rf_source;
+    rf_source.reserve(reads_from().size());
+    for (const auto& [recv_id, source] : reads_from()) {
+      if (source.is_send()) {
+        rf_source[recv_id] = source.send_id();
+      }
+    }
+
+    // Pre-compute po predecessor: for each event that has a po predecessor.
+    std::unordered_map<EventId, EventId> po_pred;
+    po_pred.reserve(n);
+    for (const auto& evts : porf_graph.thread_events) {
+      for (std::size_t i = 1; i < evts.size(); ++i) {
+        po_pred[evts[i]] = evts[i - 1];
+      }
+    }
+
+    for (const auto id : topo_order) {
+      auto& clock = cache->clocks[id];
+
+      // Start with po-predecessor's clock.
+      auto po_it = po_pred.find(id);
+      if (po_it != po_pred.end()) {
+        clock = cache->clocks[po_it->second];
+      }
+
+      // Join with rf source's clock (pointwise max).
+      auto rf_it = rf_source.find(id);
+      if (rf_it != rf_source.end()) {
+        const auto& src_clock = cache->clocks[rf_it->second];
+        for (std::size_t i = 0; i < width; ++i) {
+          clock[i] = std::max(clock[i], src_clock[i]);
+        }
+      }
+
+      // Set own position.
+      const auto& evt = event(id);
+      const auto ci = cache->thread_clock_index[evt.thread];
+      clock[ci] = cache->position_in_thread[id] + 1;
+    }
+
+    porf_cache_ = std::move(cache);
   }
 };
 

@@ -311,7 +311,7 @@ Landing 2 expected perf effect:
 
 Landing 2 measurement result:
 
-- Landing 2 was implemented in commit `dd60e24`.
+- Landing 2 was implemented in commit `dd60e24` and then reverted after measurement.
 - On the same `participants=4`, `iterations=1`, `--no-crash` timeout benchmark used for the earlier measurements, runtime improved only slightly relative to Landing 1:
   - `705def0` (Phase 4 Landing 1): `109047.868 ms`
   - `dd60e24` (Phase 4 Landing 2): `108529.249 ms`
@@ -330,7 +330,7 @@ Landing 2 measurement result:
 - The incremental helper itself was effectively invisible as a self hotspot, which suggests either:
   - the warm-parent append-only fast path is not hit often enough in this benchmark
   - or the deep copy of the parent cache largely cancels out the rebuild it replaces
-- Conclusion: Phase 4 is now complete and structurally successful, but it did not produce a meaningful end-to-end speedup on this workload beyond the Phase 3 follow-up. The next priority should move to graph-materialization / allocator reduction on the forward path, with revisit-heavy materialization still visible as a secondary concern.
+- Conclusion: the Landing 2 idea was valid enough to prototype, but not valuable enough to keep. The current tree keeps Landing 1 only. The next priority should move to graph-materialization / allocator reduction on the forward path, with revisit-heavy materialization still visible as a secondary concern.
 
 Measurement plan:
 
@@ -342,7 +342,7 @@ Measurement plan:
 
 ### Phase 5: Eliminate Common-Case Branch Copies In One Worker
 
-After the Phase 4 measurements, this is now the most plausible next major step. The profile is increasingly allocator/materialization-heavy, and the clone-and-extend PORF path did not buy enough runtime to justify further PORF-local refinement before addressing branch-state copying more directly.
+After the Phase 4 measurements, this is now the most plausible next major step. The profile is increasingly allocator/materialization-heavy, and the clone-and-extend PORF path did not buy enough runtime to justify keeping the extra machinery, let alone doing more PORF-local refinement before addressing branch-state copying more directly.
 
 If phases 1 through 4 still leave graph-copying dominant after re-measurement, move to the larger structural change:
 
@@ -380,8 +380,8 @@ This phase is intentionally later because it is more complex and easier to get w
 4. unify cycle work without changing diagnostics
 5. re-measure and confirm whether the dominant remaining costs are cycle/PORF, unread-send scanning, or graph materialization
 6. Phase 4 Landing 1: internal known-acyclic propagation for the append-only forward path, so the checker can skip cold cycle queries there
-7. re-measure, then Phase 4 Landing 2: warm-cache PORF clone-and-extend for the same append-only forward path
-8. worker-local rollback plus explicit task snapshots if graph-copy/materialization costs are still dominant after the completed Phase 4 measurements
+7. re-measure, then optionally prototype Phase 4 Landing 2: warm-cache PORF clone-and-extend for the same append-only forward path, but keep it only if it clears a clear perf/complexity bar
+8. worker-local rollback plus explicit task snapshots if graph-copy/materialization costs are still dominant after the completed Phase 4 measurements; this is now the recommended next step
 9. revisit-specific restricted views or other deeper structural work only if revisit-heavy materialization still dominates after the forward path is cheaper
 10. reserve hot vectors and other minor adjacency-building cleanups where perf justifies them
 
@@ -396,7 +396,7 @@ This order balances:
 
 It also avoids paying the complexity cost of a rollback-based redesign before the cheaper and more local wins have been measured.
 
-After the Phase 2 results, this ordering was already more strongly justified: the event-ID cleanup removed a large chunk of graph-copy overhead, so Phases 5 and 6 needed to stay perf-gated. After the completed Phase 4 measurements, that gating now points toward Phase 5: Phase 4 fixed the forward-path cycle/PORF structure cleanly, but the remaining profile is still too allocator-heavy and materialization-heavy for more PORF-local work to be the best next bet.
+After the Phase 2 results, this ordering was already more strongly justified: the event-ID cleanup removed a large chunk of graph-copy overhead, so Phases 5 and 6 needed to stay perf-gated. After the completed Phase 4 measurements, that gating now points toward Phase 5: Phase 4 fixed the forward-path cycle/PORF structure cleanly, but the remaining profile is still too allocator-heavy and materialization-heavy for more PORF-local work to be the best next bet. The reverted Landing 2 prototype reinforces that conclusion.
 
 ## Acceptance Criteria
 
