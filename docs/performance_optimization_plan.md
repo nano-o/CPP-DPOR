@@ -1,11 +1,6 @@
-# Merged Performance Optimization Plan
+# Performance Optimization Plan
 
-This document merges:
-
-- `docs/performance_optimization_plan.md`
-- `docs/exploration_graph_incremental_branching_plan.md`
-
-The merged plan keeps the low-risk wins from the former, keeps the larger structural direction from the latter, and treats future parallel search as a hard constraint.
+This is the single source of truth for DPOR performance optimization work. It covers diagnosis, phased implementation, measurement results, and future plans.
 
 ## Constraint
 
@@ -18,9 +13,7 @@ That implies two distinct execution contexts:
 
 Today, the by-value `visit()` / `visit_if_consistent()` style is already the natural task-spawn boundary interface: a caller can hand an owned graph to a worker without sharing mutable state. If local rollback is introduced later, that should remain an internal optimization inside one worker rather than a change to the spawn-boundary ownership model.
 
-## Agreed Diagnosis
-
-Both plans agree on the main performance story:
+## Diagnosis
 
 1. graph copying and allocator churn are the largest costs
 2. consistency checking and cycle detection rebuild too much state
@@ -34,26 +27,21 @@ Both plans agree on the main performance story:
 3. Land low-risk wins before invasive refactors.
 4. Do not optimize by assuming stronger invariants than the current API actually guarantees.
 
-## Changes To Accept
+## Design Decisions
 
-The merged plan accepts these ideas from `performance_optimization_plan.md`:
+Accepted:
 
 - use a structured integer or enum `ValueT` in the 2PC timeout benchmark
 - replace clearly dense event-ID-indexed maps with flat vectors where semantics allow it
 - remove duplicate cycle work carefully
 - reserve obvious hot vectors
 - clean up move/copy usage in `visit()` where ownership already allows it
-
-The merged plan accepts these ideas from `exploration_graph_incremental_branching_plan.md`:
-
 - distinguish worker-local branching from parallel task boundaries
 - add explicit task-snapshot semantics if local mutation is introduced
 - treat `restrict()` and `with_rf()` as special revisit-heavy cases
 - stage the refactor so rollback machinery is validated before recursion changes
 
-## Changes To Reject
-
-The merged plan rejects these simplifications:
+Rejected:
 
 - replacing `used_event_indices_by_thread_` with dense bitsets or `vector<bool>`
 - using `graph.has_causal_cycle()` as a drop-in replacement for checker cycle validation if it changes malformed-graph behavior from issue reporting to exceptions
@@ -107,7 +95,7 @@ Implementation note:
 
 ### Phase 3: Remove Duplicate Cycle Work Without Losing Diagnostics
 
-(see Bottleneck #3 in `./performance_optimization_plan.md`)
+(duplicate cycle work between the consistency checker and PORF cache)
 
 The current checker and PORF cache both detect cycles. The merged plan keeps the optimization target but preserves existing issue-reporting behavior.
 
@@ -691,7 +679,7 @@ This order balances:
 
 It also avoids paying the complexity cost of a rollback-based redesign before the cheaper and more local wins have been measured.
 
-After the Phase 2 results, this ordering was already more strongly justified: the event-ID cleanup removed a large chunk of graph-copy overhead, so Phases 5 and 6 needed to stay perf-gated. After the completed Phase 4 measurements, that gating now points toward Phase 5: Phase 4 fixed the forward-path cycle/PORF structure cleanly, but the remaining profile is still too allocator-heavy and materialization-heavy for more PORF-local work to be the best next bet. The reverted Landing 2 prototype reinforces that conclusion.
+After Phase 2, the event-ID cleanup removed a large chunk of graph-copy overhead, so Phases 5 and 6 needed to stay perf-gated. After Phase 4, that gating pointed toward Phase 5: Phase 4 fixed the forward-path cycle/PORF structure cleanly, but the remaining profile was still too allocator-heavy for more PORF-local work. Phase 5 delivered the forward-path copy elimination. Phase 5.5 cleaned up the newly exposed hash-map and reallocation hotspots. The remaining profile now concentrates on revisit-specific materialization, making Phase 6 the natural next step.
 
 ## Acceptance Criteria
 
@@ -866,10 +854,10 @@ The important things to check in a comparison:
 
 ## Bottom Line
 
-The merged plan is:
+The plan is:
 
 - conservative first
 - structural second
 - explicit about the worker-local versus parallel-task boundary
 
-It keeps the good benchmark-specific and representation-local wins from the updated `performance_optimization_plan.md`, but it also preserves the stronger long-term path of worker-local mutation plus explicit task snapshots if graph copying remains the dominant cost after the cheap wins land.
+Phases 1–5.5 are complete. The remaining work (Phase 6: revisit-specific materialization) is the natural next target based on the current profile shape.
