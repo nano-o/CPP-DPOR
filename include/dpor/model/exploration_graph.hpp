@@ -7,6 +7,7 @@
 // - restrict(keep_set): returns a new graph with only specified events
 // - with_rf(recv, send): returns a copy with rf assignment changed
 // - with_nd_value(nd_event, value): returns a copy with ND choice value set
+// - checkpoint()/rollback(): worker-local temporary mutation support
 // - thread_trace(tid): extracts value sequence for a thread
 // - porf_contains(from, to): checks (po ∪ rf)+ reachability
 // - has_porf_cache(): reports whether PORF reachability has been materialized
@@ -65,20 +66,133 @@ class ExplorationGraphT {
   static constexpr EventId kNoSource = std::numeric_limits<EventId>::max();
 
   ExplorationGraphT() = default;
+  ExplorationGraphT(const ExplorationGraphT& other)
+      : graph_(other.graph_),
+        insertion_order_(other.insertion_order_),
+        insertion_position_(other.insertion_position_),
+        thread_state_(other.thread_state_),
+        known_acyclic_(other.known_acyclic_),
+        pending_fresh_receive_id_(other.pending_fresh_receive_id_),
+        porf_cache_(other.porf_cache_) {}
+  ExplorationGraphT(ExplorationGraphT&&) noexcept = default;
+
+  ExplorationGraphT& operator=(const ExplorationGraphT& other) {
+    if (this == &other) {
+      return *this;
+    }
+
+    graph_ = other.graph_;
+    insertion_order_ = other.insertion_order_;
+    insertion_position_ = other.insertion_position_;
+    thread_state_ = other.thread_state_;
+    known_acyclic_ = other.known_acyclic_;
+    pending_fresh_receive_id_ = other.pending_fresh_receive_id_;
+    porf_cache_ = other.porf_cache_;
+    clear_worker_local_history();
+    return *this;
+  }
+
+  ExplorationGraphT& operator=(ExplorationGraphT&&) noexcept = default;
+
+  struct Checkpoint {
+    std::size_t event_undo_size{0};
+    std::size_t rf_undo_size{0};
+    bool known_acyclic{true};
+    std::optional<EventId> pending_fresh_receive_id{};
+  };
+
+  class ScopedRollback {
+   public:
+    explicit ScopedRollback(ExplorationGraphT& graph)
+        : graph_(&graph), checkpoint_(graph.checkpoint()) {}
+
+    ScopedRollback(const ScopedRollback&) = delete;
+    ScopedRollback& operator=(const ScopedRollback&) = delete;
+
+    ScopedRollback(ScopedRollback&& other) noexcept
+        : graph_(std::exchange(other.graph_, nullptr)),
+          checkpoint_(other.checkpoint_) {}
+
+    ScopedRollback& operator=(ScopedRollback&& other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+      if (graph_ != nullptr) {
+        graph_->rollback(checkpoint_);
+      }
+      graph_ = std::exchange(other.graph_, nullptr);
+      checkpoint_ = other.checkpoint_;
+      return *this;
+    }
+
+    ~ScopedRollback() {
+      if (graph_ != nullptr) {
+        graph_->rollback(checkpoint_);
+      }
+    }
+
+    void release() noexcept {
+      graph_ = nullptr;
+    }
+
+   private:
+    ExplorationGraphT* graph_{nullptr};
+    Checkpoint checkpoint_{};
+  };
+
+  [[nodiscard]] Checkpoint checkpoint() const noexcept {
+    return Checkpoint{
+        .event_undo_size = event_undo_log_.size(),
+        .rf_undo_size = rf_undo_log_.size(),
+        .known_acyclic = known_acyclic_,
+        .pending_fresh_receive_id = pending_fresh_receive_id_,
+    };
+  }
+
+  void rollback(Checkpoint checkpoint) {
+    if (checkpoint.event_undo_size > event_undo_log_.size() ||
+        checkpoint.rf_undo_size > rf_undo_log_.size()) {
+      throw std::logic_error("checkpoint does not belong to the current graph state");
+    }
+
+    while (rf_undo_log_.size() > checkpoint.rf_undo_size) {
+      undo_last_rf_assignment();
+    }
+    while (event_undo_log_.size() > checkpoint.event_undo_size) {
+      undo_last_event_append();
+    }
+
+    known_acyclic_ = checkpoint.known_acyclic;
+    pending_fresh_receive_id_ = std::move(checkpoint.pending_fresh_receive_id);
+    porf_cache_ = nullptr;
+  }
 
   // Add an event, tracking insertion order and per-thread metadata.
   [[nodiscard]] EventId add_event(ThreadId thread, EventLabelT<ValueT> label) {
+    const auto thread_index = static_cast<std::size_t>(thread);
+    const auto previous_thread_state =
+        thread_index < thread_state_.size() ? thread_state_[thread_index] : ThreadState{};
+    const auto previous_next_event_index =
+        thread_index < graph_.next_event_index_by_thread_.size()
+        ? graph_.next_event_index_by_thread_[thread_index]
+        : 0;
     const auto id = graph_.add_event(thread, std::move(label));
+    event_undo_log_.push_back(EventUndo{
+        .event_id = id,
+        .thread = thread,
+        .event_index = event(id).index,
+        .previous_thread_state = previous_thread_state,
+        .previous_next_event_index = previous_next_event_index,
+    });
     insertion_order_.push_back(id);
     assert(id == insertion_position_.size());
     insertion_position_.push_back(insertion_order_.size() - 1U);
     porf_cache_ = nullptr;
 
-    const auto thread_index = static_cast<std::size_t>(thread);
     if (thread_index >= thread_state_.size()) {
       thread_state_.resize(thread_index + 1);
     }
-    auto& ts = thread_state_[thread];
+    auto& ts = thread_state_[thread_index];
     assert(ts.last_event_id == kNoSource || event(id).index > event(ts.last_event_id).index);
     ts.event_count++;
     ts.last_event_id = id;
@@ -87,26 +201,23 @@ class ExplorationGraphT {
   }
 
   void set_reads_from(EventId receive_id, EventId source_id) {
-    graph_.set_reads_from(receive_id, source_id);
-    porf_cache_ = nullptr;
-    update_acyclicity_after_rf_assignment(
-        receive_id,
-        ReadsFromSource::from_send(source_id));
+    set_reads_from_source(receive_id, ReadsFromSource::from_send(source_id));
   }
 
   void set_reads_from_source(EventId receive_id, ReadsFromSource source) {
+    const auto previous_source = current_reads_from_source(receive_id);
     const auto source_copy = source;
     graph_.set_reads_from_source(receive_id, std::move(source));
+    rf_undo_log_.push_back(ReadsFromUndo{
+        .receive_id = receive_id,
+        .previous_source = previous_source,
+    });
     porf_cache_ = nullptr;
     update_acyclicity_after_rf_assignment(receive_id, source_copy);
   }
 
   void set_reads_from_bottom(EventId receive_id) {
-    graph_.set_reads_from_bottom(receive_id);
-    porf_cache_ = nullptr;
-    update_acyclicity_after_rf_assignment(
-        receive_id,
-        ReadsFromSource::bottom());
+    set_reads_from_source(receive_id, ReadsFromSource::bottom());
   }
 
   [[nodiscard]] const Event& event(EventId id) const {
@@ -249,8 +360,6 @@ class ExplorationGraphT {
     ExplorationGraphT result;
 
     // Re-insert events in insertion order with remapped IDs.
-    // We need to track per-thread index counters to assign fresh indices.
-    std::unordered_map<ThreadId, EventIndex> thread_index_counter;
     for (const auto old_id : kept_ids) {
       const auto& evt = event(old_id);
       auto label = evt.label;
@@ -279,6 +388,7 @@ class ExplorationGraphT {
     }
 
     result.invalidate_known_acyclicity();
+    result.clear_worker_local_history();
     return result;
   }
 
@@ -287,6 +397,7 @@ class ExplorationGraphT {
     auto copy = *this;
     copy.invalidate_known_acyclicity();
     copy.set_reads_from(recv, send);
+    copy.clear_worker_local_history();
     return copy;
   }
 
@@ -294,6 +405,7 @@ class ExplorationGraphT {
     auto copy = *this;
     copy.invalidate_known_acyclicity();
     copy.set_reads_from_source(recv, std::move(source));
+    copy.clear_worker_local_history();
     return copy;
   }
 
@@ -301,6 +413,7 @@ class ExplorationGraphT {
     auto copy = *this;
     copy.invalidate_known_acyclicity();
     copy.set_reads_from_bottom(recv);
+    copy.clear_worker_local_history();
     return copy;
   }
 
@@ -395,6 +508,22 @@ class ExplorationGraphT {
   std::optional<EventId> pending_fresh_receive_id_{};
   mutable std::shared_ptr<PorfCache> porf_cache_{};
 
+  struct EventUndo {
+    EventId event_id{kNoSource};
+    ThreadId thread{};
+    EventIndex event_index{};
+    ThreadState previous_thread_state{};
+    EventIndex previous_next_event_index{};
+  };
+
+  struct ReadsFromUndo {
+    EventId receive_id{kNoSource};
+    std::optional<ReadsFromSource> previous_source{};
+  };
+
+  std::vector<EventUndo> event_undo_log_{};
+  std::vector<ReadsFromUndo> rf_undo_log_{};
+
   struct PorfGraphStructure {
     std::vector<std::vector<EventId>> thread_events{};
     std::vector<std::vector<EventId>> successors{};
@@ -404,6 +533,61 @@ class ExplorationGraphT {
   void invalidate_known_acyclicity() {
     known_acyclic_ = false;
     pending_fresh_receive_id_.reset();
+  }
+
+  void clear_worker_local_history() {
+    event_undo_log_.clear();
+    rf_undo_log_.clear();
+  }
+
+  [[nodiscard]] std::optional<ReadsFromSource> current_reads_from_source(EventId receive_id) const {
+    const auto it = reads_from().find(receive_id);
+    if (it == reads_from().end()) {
+      return std::nullopt;
+    }
+    return it->second;
+  }
+
+  void undo_last_rf_assignment() {
+    if (rf_undo_log_.empty()) {
+      throw std::logic_error("rf undo log is empty");
+    }
+
+    const auto undo = rf_undo_log_.back();
+    rf_undo_log_.pop_back();
+    graph_.rollback_reads_from(undo.receive_id, undo.previous_source);
+    porf_cache_ = nullptr;
+  }
+
+  void undo_last_event_append() {
+    if (event_undo_log_.empty()) {
+      throw std::logic_error("event undo log is empty");
+    }
+
+    const auto undo = event_undo_log_.back();
+    event_undo_log_.pop_back();
+
+    if (insertion_order_.empty() || insertion_order_.back() != undo.event_id) {
+      throw std::logic_error("event undo log does not match insertion order tail");
+    }
+    if (insertion_position_.size() != graph_.events().size()) {
+      throw std::logic_error("event undo log does not match insertion-position state");
+    }
+
+    graph_.rollback_last_event(
+        undo.event_id,
+        undo.thread,
+        undo.event_index,
+        undo.previous_next_event_index);
+    insertion_order_.pop_back();
+    insertion_position_.pop_back();
+
+    const auto thread_index = static_cast<std::size_t>(undo.thread);
+    if (thread_index >= thread_state_.size()) {
+      throw std::logic_error("event undo log thread state missing");
+    }
+    thread_state_[thread_index] = undo.previous_thread_state;
+    porf_cache_ = nullptr;
   }
 
   void update_acyclicity_after_add_event(EventId event_id) {

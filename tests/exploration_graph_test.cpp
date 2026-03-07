@@ -4,6 +4,7 @@
 
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace {
 using namespace dpor::model;
@@ -251,6 +252,172 @@ TEST_CASE("with_nd_value returns copy with changed ND value", "[model][explorati
   const auto* new_nd = as_nondeterministic_choice(g2.event(nd));
   REQUIRE(new_nd != nullptr);
   REQUIRE(new_nd->value == "new");
+}
+
+// --- rollback ---
+
+TEST_CASE("rollback removes an appended event", "[model][exploration_graph][rollback]") {
+  ExplorationGraph g;
+  const auto checkpoint = g.checkpoint();
+
+  static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "x"}));
+  REQUIRE(g.event_count() == 1);
+  REQUIRE(g.thread_event_count(1) == 1);
+
+  g.rollback(checkpoint);
+
+  REQUIRE(g.event_count() == 0);
+  REQUIRE(g.insertion_order().empty());
+  REQUIRE(g.thread_event_count(1) == 0);
+  REQUIRE(g.last_event_id(1) == ExplorationGraph::kNoSource);
+}
+
+TEST_CASE("rollback removes appended receive and rf assignment",
+    "[model][exploration_graph][rollback]") {
+  ExplorationGraph g;
+  const auto send = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto checkpoint = g.checkpoint();
+
+  const auto receive = g.add_event(2, make_receive_label<Value>());
+  g.set_reads_from(receive, send);
+  REQUIRE(g.reads_from().find(receive) != g.reads_from().end());
+
+  g.rollback(checkpoint);
+
+  REQUIRE(g.event_count() == 1);
+  REQUIRE(g.thread_event_count(2) == 0);
+  REQUIRE(g.last_event_id(2) == ExplorationGraph::kNoSource);
+  REQUIRE(g.reads_from().find(receive) == g.reads_from().end());
+  REQUIRE(g.thread_trace(2).empty());
+}
+
+TEST_CASE("rollback restores overwritten rf assignment and thread-local metadata",
+    "[model][exploration_graph][rollback]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
+  const auto r1 = g.add_event(2, make_receive_label<Value>());
+  g.set_reads_from(r1, s1);
+
+  const auto expected_order = g.insertion_order();
+  const auto checkpoint = g.checkpoint();
+
+  const auto s3 = g.add_event(1, SendLabel{.destination = 2, .value = "z"});
+  const auto r2 = g.add_event(2, make_receive_label<Value>());
+  g.set_reads_from(r1, s2);
+  g.set_reads_from(r2, s3);
+
+  REQUIRE(g.thread_event_count(1) == 3);
+  REQUIRE(g.thread_event_count(2) == 2);
+  REQUIRE(g.reads_from().at(r1) == s2);
+
+  g.rollback(checkpoint);
+
+  REQUIRE(g.event_count() == 3);
+  REQUIRE(g.insertion_order() == expected_order);
+  REQUIRE(g.thread_event_count(1) == 2);
+  REQUIRE(g.thread_event_count(2) == 1);
+  REQUIRE(g.last_event_id(1) == s2);
+  REQUIRE(g.last_event_id(2) == r1);
+  REQUIRE(g.reads_from().at(r1) == s1);
+
+  const auto trace = g.thread_trace(2);
+  REQUIRE(trace.size() == 1);
+  REQUIRE(trace[0] == "x");
+  REQUIRE(g.inserted_before_or_equal(s1, r1));
+  REQUIRE_FALSE(g.inserted_before_or_equal(r1, s1));
+}
+
+TEST_CASE("nested checkpoints roll back to their own frontier",
+    "[model][exploration_graph][rollback]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
+
+  const auto outer = g.checkpoint();
+  const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "b"});
+
+  const auto inner = g.checkpoint();
+  const auto r = g.add_event(2, make_receive_label<Value>());
+  g.set_reads_from(r, s2);
+
+  g.rollback(inner);
+  REQUIRE(g.event_count() == 2);
+  REQUIRE(g.last_event_id(1) == s2);
+  REQUIRE(g.last_event_id(2) == ExplorationGraph::kNoSource);
+
+  g.rollback(outer);
+  REQUIRE(g.event_count() == 1);
+  REQUIRE(g.last_event_id(1) == s1);
+  REQUIRE(g.last_event_id(2) == ExplorationGraph::kNoSource);
+}
+
+TEST_CASE("rollback restores known acyclicity for the next mutation",
+    "[model][exploration_graph][rollback][known_acyclic]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
+  const auto checkpoint = g.checkpoint();
+
+  const auto r1 = g.add_event(2, make_receive_label<Value>());
+  g.set_reads_from(r1, s1);
+  REQUIRE(g.is_known_acyclic());
+
+  g.rollback(checkpoint);
+  REQUIRE(g.is_known_acyclic());
+
+  const auto r2 = g.add_event(2, make_receive_label<Value>());
+  REQUIRE(g.is_known_acyclic());
+  g.set_reads_from(r2, s2);
+  REQUIRE(g.is_known_acyclic());
+}
+
+TEST_CASE("rollback drops a warm porf cache but preserves logical behavior",
+    "[model][exploration_graph][rollback][porf_cache]") {
+  ExplorationGraph g;
+  const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r = g.add_event(2, make_receive_label<Value>());
+  g.set_reads_from(r, s);
+
+  REQUIRE_FALSE(g.has_porf_cache());
+  REQUIRE(g.porf_contains(s, r));
+  REQUIRE(g.has_porf_cache());
+
+  const auto checkpoint = g.checkpoint();
+  static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "y"}));
+  REQUIRE_FALSE(g.has_porf_cache());
+
+  g.rollback(checkpoint);
+  REQUIRE_FALSE(g.has_porf_cache());
+  REQUIRE(g.porf_contains(s, r));
+  REQUIRE(g.has_porf_cache());
+}
+
+TEST_CASE("copies and materialized graphs start with empty rollback history",
+    "[model][exploration_graph][rollback]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r = g.add_event(2, make_nonblocking_receive_label<Value>());
+  g.set_reads_from_bottom(r);
+
+  const auto checkpoint = g.checkpoint();
+  const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
+  REQUIRE(g.checkpoint().event_undo_size > checkpoint.event_undo_size);
+
+  const auto direct_copy = g;
+  REQUIRE(direct_copy.checkpoint().event_undo_size == 0);
+  REQUIRE(direct_copy.checkpoint().rf_undo_size == 0);
+
+  const auto restricted = g.restrict({s1, r, s2});
+  REQUIRE(restricted.checkpoint().event_undo_size == 0);
+  REQUIRE(restricted.checkpoint().rf_undo_size == 0);
+
+  const auto rewired = g.with_rf(r, s2);
+  REQUIRE(rewired.checkpoint().event_undo_size == 0);
+  REQUIRE(rewired.checkpoint().rf_undo_size == 0);
+
+  const auto bottomed = g.with_bottom_rf(r);
+  REQUIRE(bottomed.checkpoint().event_undo_size == 0);
+  REQUIRE(bottomed.checkpoint().rf_undo_size == 0);
 }
 
 // --- known acyclic metadata ---

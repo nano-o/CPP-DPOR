@@ -542,6 +542,95 @@ TEST_CASE("backward revisit rewires non-blocking receive from bottom in direct g
   REQUIRE(rf_send->value == "x");
 }
 
+TEST_CASE("revisited graphs materialized under backward revisit start with clean rollback history",
+    "[algo][dpor][rollback]") {
+  ExplorationGraph graph;
+  const auto recv = graph.add_event(
+      1,
+      make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking));
+  graph.set_reads_from_bottom(recv);
+  const auto send = graph.add_event(2, SendLabel{.destination = 1, .value = "x"});
+
+  std::vector<ExplorationGraph::Checkpoint> seen_checkpoints;
+  VerifyResult result;
+  DporConfig config;
+  config.on_execution = [&seen_checkpoints](const ExplorationGraph& g) {
+    seen_checkpoints.push_back(g.checkpoint());
+  };
+
+  dpor::algo::detail::backward_revisit(
+      config.program,
+      graph,
+      send,
+      result,
+      config,
+      0,
+      dpor::algo::detail::sorted_thread_ids(config.program));
+
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(seen_checkpoints.size() == 1);
+  REQUIRE(seen_checkpoints.front().event_undo_size == 0);
+  REQUIRE(seen_checkpoints.front().rf_undo_size == 0);
+}
+
+TEST_CASE("send-branch revisit sees the temporary send and leaves the caller graph rolled back",
+    "[algo][dpor][rollback][nonblocking]") {
+  Program program;
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking);
+    }
+    return std::nullopt;
+  };
+  program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "x"};
+    }
+    return std::nullopt;
+  };
+
+  DporConfig config;
+  config.program = program;
+
+  bool saw_bottom = false;
+  bool saw_matched = false;
+  config.on_execution = [&](const ExplorationGraph& g) {
+    const auto recv_id = find_event_id_by_thread_index(g, 1, 0);
+    REQUIRE(recv_id != ExplorationGraph::kNoSource);
+
+    const auto rf_it = g.reads_from().find(recv_id);
+    REQUIRE(rf_it != g.reads_from().end());
+    if (rf_it->second.is_bottom()) {
+      saw_bottom = true;
+      return;
+    }
+
+    const auto* matched_send = as_send(g.event(rf_it->second.send_id()));
+    REQUIRE(matched_send != nullptr);
+    REQUIRE(matched_send->destination == 1);
+    REQUIRE(matched_send->value == "x");
+    saw_matched = true;
+  };
+
+  VerifyResult result;
+  ExplorationGraph graph;
+  dpor::algo::detail::visit(
+      program,
+      graph,
+      result,
+      config,
+      0,
+      dpor::algo::detail::sorted_thread_ids(program));
+
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 2);
+  REQUIRE(saw_bottom);
+  REQUIRE(saw_matched);
+  REQUIRE(graph.event_count() == 0);
+  REQUIRE(graph.insertion_order().empty());
+}
+
 TEST_CASE("non-blocking receive exposes bottom in trace for later control flow",
     "[algo][dpor][nonblocking]") {
   DporConfig config;
@@ -682,6 +771,80 @@ TEST_CASE("execution observer is called for each complete execution", "[algo][dp
   const auto result = verify(config);
   REQUIRE(result.executions_explored == 2);
   REQUIRE(observed_count == 2);
+}
+
+TEST_CASE("detail visit shows a complete execution to the observer before rollback",
+    "[algo][dpor][rollback]") {
+  Program program;
+  program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 2, .value = "x"};
+    }
+    return std::nullopt;
+  };
+
+  DporConfig config;
+  config.program = program;
+
+  std::size_t observed_count = 0;
+  config.on_execution = [&observed_count](const ExplorationGraph& graph) {
+    ++observed_count;
+    REQUIRE(graph.event_count() == 1);
+    REQUIRE(is_send(graph.event(0)));
+  };
+
+  VerifyResult result;
+  ExplorationGraph graph;
+  dpor::algo::detail::visit(
+      program,
+      graph,
+      result,
+      config,
+      0,
+      dpor::algo::detail::sorted_thread_ids(program));
+
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(observed_count == 1);
+  REQUIRE(graph.event_count() == 0);
+  REQUIRE(graph.insertion_order().empty());
+}
+
+TEST_CASE("detail visit shows the terminal error event to the observer before rollback",
+    "[algo][dpor][rollback]") {
+  Program program;
+  program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return ErrorLabel{};
+    }
+    return std::nullopt;
+  };
+
+  DporConfig config;
+  config.program = program;
+
+  std::size_t observed_count = 0;
+  config.on_execution = [&observed_count](const ExplorationGraph& graph) {
+    ++observed_count;
+    REQUIRE(graph.event_count() == 1);
+    REQUIRE(is_error(graph.event(0)));
+  };
+
+  VerifyResult result;
+  ExplorationGraph graph;
+  dpor::algo::detail::visit(
+      program,
+      graph,
+      result,
+      config,
+      0,
+      dpor::algo::detail::sorted_thread_ids(program));
+
+  REQUIRE(result.kind == VerifyResultKind::ErrorFound);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(observed_count == 1);
+  REQUIRE(graph.event_count() == 0);
+  REQUIRE(graph.insertion_order().empty());
 }
 
 // --- Cycle-inducing rf pruned ---

@@ -347,7 +347,7 @@ template <typename ValueT>
 template <typename ValueT>
 inline void visit(
     const ProgramT<ValueT>& program,
-    model::ExplorationGraphT<ValueT> graph,
+    model::ExplorationGraphT<ValueT>& graph,
     VerifyResult& result,
     const DporConfigT<ValueT>& config,
     std::size_t depth,
@@ -356,7 +356,7 @@ inline void visit(
 template <typename ValueT>
 inline void visit_if_consistent(
     const ProgramT<ValueT>& program,
-    model::ExplorationGraphT<ValueT> graph,
+    model::ExplorationGraphT<ValueT>& graph,
     VerifyResult& result,
     const DporConfigT<ValueT>& config,
     std::size_t depth,
@@ -418,7 +418,7 @@ template <typename ValueT>
       continue;
     }
 
-    visit(program, std::move(unblocked_graph), result, config, depth, thread_ids);
+    visit(program, unblocked_graph, result, config, depth, thread_ids);
     return true;
   }
 
@@ -540,7 +540,7 @@ inline void backward_revisit(
     }
 
     auto revisited = restricted.with_rf(new_recv_id, new_send_id);
-    visit_if_consistent(program, std::move(revisited), result, config, depth, thread_ids);
+    visit_if_consistent(program, revisited, result, config, depth, thread_ids);
   }
 }
 
@@ -548,7 +548,7 @@ inline void backward_revisit(
 template <typename ValueT>
 inline void visit_if_consistent(
     const ProgramT<ValueT>& program,
-    model::ExplorationGraphT<ValueT> graph,
+    model::ExplorationGraphT<ValueT>& graph,
     VerifyResult& result,
     const DporConfigT<ValueT>& config,
     std::size_t depth,
@@ -563,18 +563,20 @@ inline void visit_if_consistent(
     return;  // Inconsistent — prune.
   }
 
-  visit(program, std::move(graph), result, config, depth, thread_ids);
+  visit(program, graph, result, config, depth, thread_ids);
 }
 
 // VISIT_P(G): main recursive procedure of Algorithm 1.
 template <typename ValueT>
 inline void visit(
     const ProgramT<ValueT>& program,
-    model::ExplorationGraphT<ValueT> graph,
+    model::ExplorationGraphT<ValueT>& graph,
     VerifyResult& result,
     const DporConfigT<ValueT>& config,
     std::size_t depth,
     const std::vector<model::ThreadId>& thread_ids) {
+  using ScopedRollback = typename model::ExplorationGraphT<ValueT>::ScopedRollback;
+
   if (result.kind == VerifyResultKind::ErrorFound) {
     return;
   }
@@ -605,8 +607,8 @@ inline void visit(
 
   // Check for error events.
   if (std::holds_alternative<model::ErrorLabel>(label)) {
-    const auto event_id = graph.add_event(tid, label);
-    static_cast<void>(event_id);
+    ScopedRollback rollback(graph);
+    static_cast<void>(graph.add_event(tid, label));
     ++result.executions_explored;
     result.kind = VerifyResultKind::ErrorFound;
     result.message = "error event reached in thread " + std::to_string(tid);
@@ -620,23 +622,23 @@ inline void visit(
   if (const auto* nd = std::get_if<model::NondeterministicChoiceLabelT<ValueT>>(&label)) {
     if (nd->choices.empty()) {
       // No choices specified: just use the value as-is.
-      auto new_graph = std::move(graph);
-      static_cast<void>(new_graph.add_event(tid, label));
-      visit(program, std::move(new_graph), result, config, depth + 1, thread_ids);
+      ScopedRollback rollback(graph);
+      static_cast<void>(graph.add_event(tid, label));
+      visit(program, graph, result, config, depth + 1, thread_ids);
       return;
     }
 
-    for (std::size_t choice_index = 0; choice_index < nd->choices.size(); ++choice_index) {
+    for (const auto& choice : nd->choices) {
       if (result.kind == VerifyResultKind::ErrorFound) {
         return;
       }
-      const auto& choice = nd->choices[choice_index];
       auto nd_label = *nd;
       nd_label.value = choice;
-      const bool is_last_choice = choice_index + 1 == nd->choices.size();
-      auto new_graph = is_last_choice ? std::move(graph) : graph;
-      static_cast<void>(new_graph.add_event(tid, model::EventLabelT<ValueT>{nd_label}));
-      visit(program, std::move(new_graph), result, config, depth + 1, thread_ids);
+      {
+        ScopedRollback rollback(graph);
+        static_cast<void>(graph.add_event(tid, model::EventLabelT<ValueT>{nd_label}));
+        visit(program, graph, result, config, depth + 1, thread_ids);
+      }
     }
     return;
   }
@@ -654,49 +656,46 @@ inline void visit(
       }
     }
 
-    const auto total_branches =
-        compatible_sends.size() + static_cast<std::size_t>(recv->is_nonblocking());
-    std::size_t branch_index = 0;
     for (const auto send_id : compatible_sends) {
       if (result.kind == VerifyResultKind::ErrorFound) {
         return;
       }
-      const bool is_last_branch = branch_index + 1 == total_branches;
-      auto new_graph = is_last_branch ? std::move(graph) : graph;
-      ++branch_index;
-      const auto recv_id = new_graph.add_event(tid, label);
-      new_graph.set_reads_from(recv_id, send_id);
-      visit_if_consistent(program, std::move(new_graph), result, config, depth + 1, thread_ids);
+      {
+        ScopedRollback rollback(graph);
+        const auto recv_id = graph.add_event(tid, label);
+        graph.set_reads_from(recv_id, send_id);
+        visit_if_consistent(program, graph, result, config, depth + 1, thread_ids);
+      }
     }
-    if (recv->is_nonblocking()) {
-      auto new_graph = std::move(graph);
-      const auto recv_id = new_graph.add_event(tid, label);
-      new_graph.set_reads_from_bottom(recv_id);
-      visit_if_consistent(program, std::move(new_graph), result, config, depth + 1, thread_ids);
+    if (recv->is_nonblocking() && result.kind != VerifyResultKind::ErrorFound) {
+      ScopedRollback rollback(graph);
+      const auto recv_id = graph.add_event(tid, label);
+      graph.set_reads_from_bottom(recv_id);
+      visit_if_consistent(program, graph, result, config, depth + 1, thread_ids);
     }
     return;
   }
 
   // Handle send: add event, then do backward revisiting + forward continuation.
   if (const auto* send = std::get_if<model::SendLabelT<ValueT>>(&label)) {
-    auto new_graph = std::move(graph);
-    const auto send_id = new_graph.add_event(tid, label);
+    ScopedRollback rollback(graph);
+    const auto send_id = graph.add_event(tid, label);
 
     // Backward revisit: try to reassign existing receives to read from this new send.
-    backward_revisit(program, new_graph, send_id, result, config, depth + 1, thread_ids);
+    backward_revisit(program, graph, send_id, result, config, depth + 1, thread_ids);
 
     // Forward continuation: continue exploration with the send added.
     if (result.kind != VerifyResultKind::ErrorFound) {
-      visit(program, std::move(new_graph), result, config, depth + 1, thread_ids);
+      visit(program, graph, result, config, depth + 1, thread_ids);
     }
     return;
   }
 
   // Handle block (internal receive-wait marker): add event and continue.
   if (std::holds_alternative<model::BlockLabel>(label)) {
-    auto new_graph = std::move(graph);
-    static_cast<void>(new_graph.add_event(tid, label));
-    visit(program, std::move(new_graph), result, config, depth + 1, thread_ids);
+    ScopedRollback rollback(graph);
+    static_cast<void>(graph.add_event(tid, label));
+    visit(program, graph, result, config, depth + 1, thread_ids);
     return;
   }
 }
@@ -709,7 +708,7 @@ template <typename ValueT>
   VerifyResult result;
   model::ExplorationGraphT<ValueT> empty_graph;
   const auto thread_ids = detail::sorted_thread_ids(config.program);
-  detail::visit(config.program, std::move(empty_graph), result, config, 0, thread_ids);
+  detail::visit(config.program, empty_graph, result, config, 0, thread_ids);
   return result;
 }
 

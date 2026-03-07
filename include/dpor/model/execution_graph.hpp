@@ -186,6 +186,15 @@ class ReadsFromRelationT {
     entries_[index] = std::move(source);
   }
 
+  void clear(EventIdT receive_id) {
+    const auto index = static_cast<std::size_t>(receive_id);
+    if (index >= entries_.size() || !entries_[index].has_value()) {
+      return;
+    }
+    entries_[index].reset();
+    --size_;
+  }
+
  private:
   std::vector<std::optional<ReadsFromSource>> entries_{};
   std::size_t size_{0};
@@ -352,6 +361,46 @@ class ExecutionGraphT {
   // Mutable access to events for in-place label modifications (e.g., ND value updates).
   [[nodiscard]] std::vector<Event>& events_mutable() noexcept {
     return events_;
+  }
+
+  void rollback_last_event(
+      EventId expected_event_id,
+      ThreadId expected_thread,
+      EventIndex expected_index,
+      EventIndex previous_next_index) {
+    if (events_.empty() || expected_event_id != events_.size() - 1U) {
+      throw std::logic_error("rollback_last_event requires undoing the current tail event");
+    }
+
+    const auto& event = events_.back();
+    if (event.thread != expected_thread || event.index != expected_index) {
+      throw std::logic_error("rollback_last_event metadata does not match the current tail event");
+    }
+
+    events_.pop_back();
+
+    const auto thread_index = static_cast<std::size_t>(expected_thread);
+    if (thread_index >= next_event_index_by_thread_.size() ||
+        thread_index >= used_event_indices_by_thread_.size()) {
+      throw std::logic_error("rollback_last_event thread storage missing");
+    }
+
+    auto& used_indices = used_event_indices_by_thread_[thread_index];
+    if (used_indices.erase(expected_index) != 1U) {
+      throw std::logic_error("rollback_last_event missing used event index");
+    }
+
+    next_event_index_by_thread_[thread_index] = previous_next_index;
+  }
+
+  void rollback_reads_from(
+      EventId receive_id,
+      const std::optional<ReadsFromSource>& previous_source) {
+    if (previous_source.has_value()) {
+      reads_from_.set(receive_id, *previous_source);
+      return;
+    }
+    reads_from_.clear(receive_id);
   }
 
   [[nodiscard]] EventIndex next_event_index(ThreadId thread) {
