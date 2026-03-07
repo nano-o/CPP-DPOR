@@ -60,6 +60,8 @@ Before making core changes:
 
 ### Phase 1: Cheap, Example-Local Wins
 
+Commits: `f51e312`, `38909e3`
+
 Land the least risky benchmark-specific changes first:
 
 1. Replace the timeout example's `std::string` message `ValueT` with a structured enum or integer encoding.
@@ -72,6 +74,8 @@ Expected result:
 - lower replay overhead in `run_and_capture()` and `sim_receive()`
 
 ### Phase 2: Safe Representation Cleanups In Core Types
+
+Commits: `b4c3be8`, `607127a`, `d50b6c7`
 
 Apply dense storage only where the current semantics support it:
 
@@ -94,6 +98,8 @@ Implementation note:
 - Phase 2 is now complete. All event-ID-indexed and thread-ID-indexed maps in the core types have been replaced with dense vectors.
 
 ### Phase 3: Remove Duplicate Cycle Work Without Losing Diagnostics
+
+Commits: `0269722`, `9f3d012`
 
 (duplicate cycle work between the consistency checker and PORF cache)
 
@@ -123,6 +129,8 @@ Implementation note:
 - Phase 3 is now complete. The hybrid follow-up commit (`9f3d012`) brought the same benchmark down to `108.44s`, which is materially better than both the regressed first Phase 3 landing and the Phase 2 baseline.
 
 ### Phase 4: Incremental PORF Only In The Safe Narrow Case
+
+Commits: `705def0`, `46ea46a` (Landing 1); `dd60e24` implemented then reverted in `e889693` (Landing 2, skipped)
 
 Incremental PORF maintenance is worth doing, but only for the common forward path:
 
@@ -327,6 +335,8 @@ Phase 4 closeout:
 3. use the Landing 1 and reverted-Landing-2 measurements as the handoff rationale for Phase 5
 
 ### Phase 5: Eliminate Common-Case Branch Copies In One Worker
+
+Commits: `59eb233`
 
 After the Phase 4 measurements, this is now the most plausible next major step. The current profile is still allocator/materialization-heavy, and the remaining whole-graph copies in `visit()` are now a cleaner target than more PORF-local work.
 
@@ -536,6 +546,8 @@ The forward-path copy elimination uncovered costs that were previously hidden be
 These newly visible costs are the natural targets for Phase 5.5 (low-risk representation cleanups) and Phase 6 (revisit-specific materialization).
 
 ### Phase 5.5: Internal Dense Remap/Mask Helpers + PORF Successor Pre-Sizing
+
+Commits: `ca5c2b9`, `c978d9e`
 
 The Phase 5 profile exposed `unordered_map<EventId, EventId>`, `unordered_set<EventId>`, and PORF successor-list reallocation as newly prominent hotspots. These are the same kind of hash-based containers that Phase 2 successfully replaced with dense vectors for event-indexed and thread-indexed state. The same treatment applies here, plus pre-sizing for the adjacency vectors that are now the single largest non-allocator self hotspot.
 
