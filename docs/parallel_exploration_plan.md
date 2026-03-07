@@ -119,6 +119,24 @@ Why this is the right first implementation:
 
 Start with a single global queue protected by `std::mutex` + `std::condition_variable`. If profiling later shows scheduler contention, move to per-worker deques plus work stealing as a follow-up.
 
+## Duplicate Exploration
+
+No global deduplication layer is planned for the first landing.
+
+The design assumption is that Must's revisiting construction already gives unique revisit sources, so parallel execution order does not create new duplicate exploration as long as the implementation stays faithful to that structure. In other words:
+
+- each worker owns one parent task
+- each child graph is emitted exactly once by that parent
+- parallelism changes when children run, not which children exist
+
+Under that assumption, if two different workers ever materialize the same revisit child, that indicates a bug or a deviation from the Must algorithm rather than something that should be handled by an extra dedup layer.
+
+This assumption should still be checked empirically:
+
+- `max_workers == 1` through the parallel path must match sequential execution counts and execution sets exactly
+- small parallel-vs-sequential agreement tests should compare execution signatures as sets
+- oracle-backed tests should continue to agree
+
 ## Spawn Boundaries In The Current `visit()` Shape
 
 Parallelism should be added by enumerating owned child graphs at the branch points that already exist today.
@@ -137,8 +155,9 @@ Parallelism should be added by enumerating owned child graphs at the branch poin
 ### Send branch
 
 - keep the forward continuation on the current worker after appending the send
-- let `backward_revisit()` materialize revisited child graphs and emit them to the scheduler
+- let `backward_revisit()` materialize revisited child graphs and emit them to the scheduler one by one
 - do not try to share the worker's mutated post-send graph across threads
+- do not batch all revisited graphs before dispatch; streaming them reduces memory pressure and lets idle workers start earlier
 
 ### Block branch
 
@@ -153,6 +172,9 @@ This implies one refactor before real parallelism:
 
 - split branch construction from branch execution
 - let `backward_revisit()` emit owned revisited graphs to a callback or sink instead of recursing directly in all cases
+- each emitted revisit graph must already be a fully independent snapshot produced by `restrict()` plus `with_rf()`
+- the sink should be non-blocking from `backward_revisit()`'s perspective: it should either take ownership immediately or tell the caller to run the child locally rather than waiting for queue space
+- the parent graph remains mutated with the fresh send visible until revisit enumeration is done; the parent rollback happens only after all revisit children have been emitted or retained for local execution
 
 ## Result And Cancellation Semantics
 
@@ -164,6 +186,7 @@ Recommended first implementation:
 - the `AllExecutionsExplored` case must preserve the exact execution count
 - on `ErrorFound`, a worker sets a shared stop flag once it publishes an error
 - workers check the stop flag before expensive expansion and before publishing terminal results
+- workers should also check the stop flag inside branch loops and inside `backward_revisit()` before materializing more children, so cancellation remains responsive
 - plain sequential `verify()` semantics must remain unchanged
 
 There are two viable policies:
@@ -171,7 +194,7 @@ There are two viable policies:
 ### Policy 1: simpler first landing
 
 - in parallel mode, the winning error execution/message is whichever worker publishes first
-- `on_execution` is either disabled or serialized with unspecified order
+- `on_execution` may run concurrently on worker threads with unspecified order
 - `executions_explored` after an error is not promised to match sequential DFS
 
 ### Policy 2: stricter later landing
@@ -184,13 +207,15 @@ Recommendation: choose Policy 1 first, but only behind a separate `verify_parall
 
 ## Observer Handling
 
-Do not call `config.on_execution` concurrently from worker threads in the first landing unless the API is changed to require thread-safe observers.
+In `verify_parallel()`, `config.on_execution` may be called concurrently from multiple worker threads, with unspecified order.
 
-Recommended staging:
+That implies a stronger API contract for parallel mode:
 
-1. Initial parallel mode rejects `on_execution` with `std::invalid_argument`.
-2. Follow-up option A: serialize observer calls behind a mutex and document unspecified order.
-3. Follow-up option B: build a deterministic publication coordinator if ordered callbacks matter.
+- observers must be thread-safe and reentrant
+- observers must tolerate concurrent invocation
+- observers must not assume DFS order
+- if ordered publication is ever needed, it should be a later coordinator-based feature rather than part of the first landing
+
 
 ## Thread Safety Requirements
 
@@ -199,7 +224,10 @@ Parallel exploration raises the bar for user-provided callbacks:
 - `ThreadFunctionT` must remain deterministic and side-effect free
 - `ThreadFunctionT` must also be safe to invoke concurrently from multiple worker threads
 - receive compatibility predicates must also be thread-safe
+- `on_execution` must be thread-safe and reentrant in parallel mode
 - captured mutable state shared across thread functions becomes a correctness bug in parallel mode
+
+Worker threads should share one read-only `ProgramT` and therefore one shared set of `ThreadFunctionT` objects by const reference. There is no plan to clone thread functions per worker. That means mutable lambda captures are shared mutable state unless the user arranges their own synchronization or makes the callbacks effectively immutable.
 
 This needs to be documented next to the new API/config surface.
 
@@ -211,8 +239,8 @@ This needs to be documented next to the new API/config surface.
 2. Keep sequential `verify()` unchanged.
 3. Document the first-landing semantics:
    - experimental mode
-   - `on_execution` rejected
    - winning error in parallel mode is unspecified if multiple branches race
+   - `on_execution` may run concurrently and must be thread-safe
 
 ### Phase 2: Internal Scheduler Skeleton
 
@@ -244,13 +272,13 @@ This needs to be documented next to the new API/config surface.
 
 1. Count completed executions atomically.
 2. Publish the first observed error once and set `stop_requested`.
-3. Ensure workers drop queued work promptly after stop.
+3. Ensure workers drop queued work promptly after stop, with stop checks at task entry, inside branch loops, and inside `backward_revisit()`.
 4. Make sure no worker publishes terminal results after the stop decision if that would violate the chosen experimental semantics.
 
 ### Phase 6: Observer And Determinism Follow-Up
 
-1. Decide whether unordered serialized callbacks are acceptable.
-2. If not, design a coordinator for ordered publication.
+1. Decide whether ordered callbacks or deterministic first-error publication are ever needed.
+2. If they are, design a coordinator for ordered publication.
 3. Only after that consider making parallelism part of the ordinary `verify()` surface.
 
 ## Testing Plan
@@ -273,11 +301,12 @@ This needs to be documented next to the new API/config surface.
 - a test where multiple workers race to report an error and exploration still terminates cleanly
 - a test that saturated branching obeys queue and task-budget limits
 - a test that no shared graph mutation occurs across tasks, backed first by ownership discipline and later by TSAN if a TSAN build is added
+- if a TSAN build/preset is added, the work-first branch-splitting landing should be TSAN-clean before it is considered done
 
 ### API And Semantics
 
 - `verify()` remains deterministic and unchanged
-- phase-1 parallel mode rejects `on_execution`
+- parallel `on_execution` may execute concurrently with unspecified order
 - `max_workers == 1` through the parallel path matches sequential results exactly
 
 ## Performance Expectations
@@ -286,7 +315,8 @@ Parallel exploration can speed up branch-heavy workloads, but it will not be fre
 
 - each spawned task reintroduces graph snapshot copying at the split boundary
 - revisit-heavy workloads may scale poorly until revisit materialization is revisited later
-- scheduler overhead will dominate if tasks are too fine-grained
+- scheduler overhead should be acceptable if tasks are coarse, but some spawned subtrees will still prune quickly, so this must be measured rather than assumed
+- queue limits only bound queued snapshots; total memory also includes each worker's local DFS/rollback state, so memory budgeting must consider both components
 
 Success criteria for the first landing:
 
