@@ -12,9 +12,12 @@
 
 #include "protocol.hpp"
 
-#include "dpor/algo/dpor.hpp"
+#include "dpor/algo/program.hpp"
+#include "dpor/model/event.hpp"
+#include "dpor/model/exploration_graph.hpp"
 
 #include <compare>
+#include <cstddef>
 #include <cstdint>
 #include <condition_variable>
 #include <exception>
@@ -48,7 +51,7 @@ struct SimValue {
   [[nodiscard]] constexpr auto operator<=>(const SimValue&) const = default;
 };
 
-namespace detail {
+namespace sim_value_encoding {
 
 constexpr std::uint64_t kTagMask = 0xff;
 constexpr std::uint64_t kPayloadShift = 8;
@@ -70,30 +73,30 @@ constexpr std::uint64_t kPayloadShift = 8;
   return static_cast<tpc::ParticipantId>(value.encoded >> kPayloadShift);
 }
 
-}  // namespace detail
+}  // namespace sim_value_encoding
 
 [[nodiscard]] constexpr SimValue prepare_message() {
-  return detail::make_value(SimValue::Tag::PrepareMessage);
+  return sim_value_encoding::make_value(SimValue::Tag::PrepareMessage);
 }
 
 [[nodiscard]] constexpr SimValue vote_message(
     tpc::ParticipantId from,
     tpc::Vote vote) {
-  return detail::make_value(
+  return sim_value_encoding::make_value(
       vote == tpc::Vote::Yes ? SimValue::Tag::VoteYesMessage
                              : SimValue::Tag::VoteNoMessage,
       static_cast<std::uint64_t>(from));
 }
 
 [[nodiscard]] constexpr SimValue decision_message(tpc::Decision decision) {
-  return detail::make_value(
+  return sim_value_encoding::make_value(
       decision == tpc::Decision::Commit
           ? SimValue::Tag::DecisionCommitMessage
           : SimValue::Tag::DecisionAbortMessage);
 }
 
 [[nodiscard]] constexpr SimValue ack_message(tpc::ParticipantId from) {
-  return detail::make_value(
+  return sim_value_encoding::make_value(
       SimValue::Tag::AckMessage, static_cast<std::uint64_t>(from));
 }
 
@@ -115,32 +118,32 @@ constexpr std::uint64_t kPayloadShift = 8;
 }
 
 [[nodiscard]] inline tpc::Message decode_message(SimValue value) {
-  switch (detail::tag_of(value)) {
+  switch (sim_value_encoding::tag_of(value)) {
     case SimValue::Tag::PrepareMessage:
       return tpc::Prepare{};
     case SimValue::Tag::VoteYesMessage:
-      return tpc::VoteMsg{detail::payload_of(value), tpc::Vote::Yes};
+      return tpc::VoteMsg{sim_value_encoding::payload_of(value), tpc::Vote::Yes};
     case SimValue::Tag::VoteNoMessage:
-      return tpc::VoteMsg{detail::payload_of(value), tpc::Vote::No};
+      return tpc::VoteMsg{sim_value_encoding::payload_of(value), tpc::Vote::No};
     case SimValue::Tag::DecisionCommitMessage:
       return tpc::DecisionMsg{tpc::Decision::Commit};
     case SimValue::Tag::DecisionAbortMessage:
       return tpc::DecisionMsg{tpc::Decision::Abort};
     case SimValue::Tag::AckMessage:
-      return tpc::Ack{detail::payload_of(value)};
+      return tpc::Ack{sim_value_encoding::payload_of(value)};
     default:
       throw std::logic_error("observed value is not a message");
   }
 }
 
 [[nodiscard]] constexpr SimValue vote_choice(tpc::Vote vote) {
-  return detail::make_value(
+  return sim_value_encoding::make_value(
       vote == tpc::Vote::Yes ? SimValue::Tag::VoteChoiceYes
                              : SimValue::Tag::VoteChoiceNo);
 }
 
 [[nodiscard]] inline tpc::Vote decode_vote_choice(SimValue value) {
-  switch (detail::tag_of(value)) {
+  switch (sim_value_encoding::tag_of(value)) {
     case SimValue::Tag::VoteChoiceYes:
       return tpc::Vote::Yes;
     case SimValue::Tag::VoteChoiceNo:
@@ -151,13 +154,13 @@ constexpr std::uint64_t kPayloadShift = 8;
 }
 
 [[nodiscard]] constexpr SimValue crash_choice(bool crash) {
-  return detail::make_value(
+  return sim_value_encoding::make_value(
       crash ? SimValue::Tag::CrashChoiceCrash
             : SimValue::Tag::CrashChoiceNoCrash);
 }
 
 [[nodiscard]] inline bool decode_crash_choice(SimValue value) {
-  switch (detail::tag_of(value)) {
+  switch (sim_value_encoding::tag_of(value)) {
     case SimValue::Tag::CrashChoiceNoCrash:
       return false;
     case SimValue::Tag::CrashChoiceCrash:
@@ -169,7 +172,7 @@ constexpr std::uint64_t kPayloadShift = 8;
 
 [[nodiscard]] inline std::optional<tpc::Decision> decode_decision_message(
     SimValue value) {
-  switch (detail::tag_of(value)) {
+  switch (sim_value_encoding::tag_of(value)) {
     case SimValue::Tag::DecisionCommitMessage:
       return tpc::Decision::Commit;
     case SimValue::Tag::DecisionAbortMessage:
@@ -180,21 +183,21 @@ constexpr std::uint64_t kPayloadShift = 8;
 }
 
 inline std::ostream& operator<<(std::ostream& os, SimValue value) {
-  switch (detail::tag_of(value)) {
+  switch (sim_value_encoding::tag_of(value)) {
     case SimValue::Tag::Invalid:
       return os << "<invalid>";
     case SimValue::Tag::PrepareMessage:
       return os << "PREPARE";
     case SimValue::Tag::VoteYesMessage:
-      return os << "VOTE " << detail::payload_of(value) << " YES";
+      return os << "VOTE " << sim_value_encoding::payload_of(value) << " YES";
     case SimValue::Tag::VoteNoMessage:
-      return os << "VOTE " << detail::payload_of(value) << " NO";
+      return os << "VOTE " << sim_value_encoding::payload_of(value) << " NO";
     case SimValue::Tag::DecisionCommitMessage:
       return os << "DECISION COMMIT";
     case SimValue::Tag::DecisionAbortMessage:
       return os << "DECISION ABORT";
     case SimValue::Tag::AckMessage:
-      return os << "ACK " << detail::payload_of(value);
+      return os << "ACK " << sim_value_encoding::payload_of(value);
     case SimValue::Tag::VoteChoiceYes:
       return os << "YES";
     case SimValue::Tag::VoteChoiceNo:
@@ -217,7 +220,6 @@ using ExplorationGraph = dpor::model::ExplorationGraphT<SimValue>;
 using ThreadTrace = dpor::algo::ThreadTraceT<SimValue>;
 using ThreadFunction = dpor::algo::ThreadFunctionT<SimValue>;
 using Program = dpor::algo::ProgramT<SimValue>;
-using DporConfig = dpor::algo::DporConfigT<SimValue>;
 
 // ---------------------------------------------------------------------------
 // SimEnvironment: intercepting Environment implementation
@@ -520,3 +522,14 @@ inline Program make_two_phase_commit_program(
 }
 
 }  // namespace tpc_sim
+
+namespace std {
+
+template <>
+struct hash<tpc_sim::SimValue> {
+  [[nodiscard]] std::size_t operator()(tpc_sim::SimValue value) const noexcept {
+    return hash<std::uint64_t>{}(value.encoded);
+  }
+};
+
+}  // namespace std
