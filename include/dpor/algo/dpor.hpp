@@ -54,12 +54,12 @@ using EventId = typename model::ExplorationGraphT<model::Value>::EventId;
 template <typename ValueT>
 [[nodiscard]] inline std::vector<model::ThreadId> sorted_thread_ids(
     const ProgramT<ValueT>& program) {
+  program.threads.validate_compact_thread_ids();
   std::vector<model::ThreadId> thread_ids;
   thread_ids.reserve(program.threads.size());
-  for (const auto& [tid, _] : program.threads) {
+  program.threads.for_each_assigned([&](const model::ThreadId tid, const auto&) {
     thread_ids.push_back(tid);
-  }
-  std::sort(thread_ids.begin(), thread_ids.end());
+  });
   return thread_ids;
 }
 

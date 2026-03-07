@@ -24,6 +24,9 @@
 
 namespace dpor::model {
 
+// Active thread IDs are used as direct indices into several internal vectors.
+// Programs are runtime-validated to use a compact contiguous 0-based or 1-based
+// range before exploration begins.
 using ThreadId = std::uint32_t;
 using EventIndex = std::uint32_t;
 using Value = std::string;

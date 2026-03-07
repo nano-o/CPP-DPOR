@@ -92,6 +92,35 @@ TEST_CASE("empty program explores 1 execution", "[algo][dpor]") {
       "empty program");
 }
 
+TEST_CASE("verify rejects sparse program thread ids", "[algo][dpor]") {
+  DporConfig config;
+  config.program.threads[1] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+    return std::nullopt;
+  };
+  config.program.threads[3] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+    return std::nullopt;
+  };
+
+  REQUIRE_THROWS_AS(verify(config), std::invalid_argument);
+}
+
+TEST_CASE("verify accepts compact zero-based thread ids", "[algo][dpor]") {
+  DporConfig config;
+  config.program.threads[0] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "hello"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[1] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+    return std::nullopt;
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+}
+
 TEST_CASE("single thread with one send explores 1 execution", "[algo][dpor]") {
   DporConfig config;
   config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {

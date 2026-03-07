@@ -45,7 +45,7 @@ struct ThreadState {
 struct PorfCache {
   std::vector<std::vector<std::size_t>> clocks;
   std::vector<std::size_t> position_in_thread;
-  std::unordered_map<ThreadId, std::size_t> thread_clock_index;
+  std::vector<std::size_t> thread_clock_index;
   std::size_t num_threads{0};
   bool has_cycle{false};
 };
@@ -69,6 +69,10 @@ class ExplorationGraphT {
     insertion_position_.push_back(insertion_order_.size() - 1U);
     porf_cache_ = nullptr;
 
+    const auto thread_index = static_cast<std::size_t>(thread);
+    if (thread_index >= thread_state_.size()) {
+      thread_state_.resize(thread_index + 1);
+    }
     auto& ts = thread_state_[thread];
     assert(ts.last_event_id == kNoSource || event(id).index > event(ts.last_event_id).index);
     ts.event_count++;
@@ -147,30 +151,32 @@ class ExplorationGraphT {
   // DPOR's next-event selection skips such threads. Blocked receive threads
   // may later be rescheduled by the algorithm.
   [[nodiscard]] bool thread_is_terminated(ThreadId tid) const {
-    const auto it = thread_state_.find(tid);
-    if (it == thread_state_.end()) {
+    const auto thread_index = static_cast<std::size_t>(tid);
+    if (thread_index >= thread_state_.size() ||
+        thread_state_[thread_index].event_count == 0) {
       return false;  // No events for this thread yet.
     }
-    const auto& last_evt = event(it->second.last_event_id);
+    const auto& last_evt = event(thread_state_[thread_index].last_event_id);
     return is_block(last_evt) || is_error(last_evt);
   }
 
   // Count events belonging to the given thread.
   [[nodiscard]] std::size_t thread_event_count(ThreadId tid) const {
-    const auto it = thread_state_.find(tid);
-    if (it == thread_state_.end()) {
+    const auto thread_index = static_cast<std::size_t>(tid);
+    if (thread_index >= thread_state_.size()) {
       return 0;
     }
-    return it->second.event_count;
+    return thread_state_[thread_index].event_count;
   }
 
   // Returns the last event ID for the given thread, or kNoSource if no events.
   [[nodiscard]] EventId last_event_id(ThreadId tid) const {
-    const auto it = thread_state_.find(tid);
-    if (it == thread_state_.end()) {
+    const auto thread_index = static_cast<std::size_t>(tid);
+    if (thread_index >= thread_state_.size() ||
+        thread_state_[thread_index].event_count == 0) {
       return kNoSource;
     }
-    return it->second.last_event_id;
+    return thread_state_[thread_index].last_event_id;
   }
 
   // Extract the value sequence visible to a thread: values from receives (via rf)
@@ -306,11 +312,12 @@ class ExplorationGraphT {
       return false;  // Acyclic graph: no self-loops in strict transitive closure.
     }
     const auto& cache = *porf_cache_;
-    const auto ci_it = cache.thread_clock_index.find(event(from).thread);
-    if (ci_it == cache.thread_clock_index.end()) {
+    const auto thread_index = static_cast<std::size_t>(event(from).thread);
+    if (thread_index >= cache.thread_clock_index.size() ||
+        cache.thread_clock_index[thread_index] == kNoSource) {
       return false;
     }
-    const auto ci = ci_it->second;
+    const auto ci = cache.thread_clock_index[thread_index];
     return cache.clocks[to][ci] >= cache.position_in_thread[from] + 1;
   }
 
@@ -347,7 +354,7 @@ class ExplorationGraphT {
   ExecutionGraphT<ValueT> graph_{};
   std::vector<EventId> insertion_order_{};
   std::vector<std::size_t> insertion_position_{};
-  std::unordered_map<ThreadId, ThreadState> thread_state_{};
+  std::vector<ThreadState> thread_state_{};
   mutable std::shared_ptr<PorfCache> porf_cache_{};
 
   void ensure_porf_cache() const {
@@ -364,21 +371,30 @@ class ExplorationGraphT {
     }
 
     // Build per-thread event lists (sorted by event index for po order).
-    std::unordered_map<ThreadId, std::vector<std::pair<EventIndex, EventId>>> thread_events;
+    std::vector<std::vector<std::pair<EventIndex, EventId>>> thread_events;
     for (EventId id = 0; id < n; ++id) {
       const auto& evt = event(id);
-      thread_events[evt.thread].emplace_back(evt.index, id);
+      const auto thread_index = static_cast<std::size_t>(evt.thread);
+      if (thread_index >= thread_events.size()) {
+        thread_events.resize(thread_index + 1);
+      }
+      thread_events[thread_index].emplace_back(evt.index, id);
     }
 
     // Assign dense clock indices per thread.
-    for (auto& [tid, evts] : thread_events) {
+    cache->thread_clock_index.assign(thread_events.size(), kNoSource);
+    for (std::size_t tid = 0; tid < thread_events.size(); ++tid) {
+      auto& evts = thread_events[tid];
+      if (evts.empty()) {
+        continue;
+      }
       std::sort(evts.begin(), evts.end());
       cache->thread_clock_index[tid] = cache->num_threads++;
     }
 
     // Compute position_in_thread for each event.
     cache->position_in_thread.resize(n, 0);
-    for (const auto& [tid, evts] : thread_events) {
+    for (const auto& evts : thread_events) {
       for (std::size_t pos = 0; pos < evts.size(); ++pos) {
         cache->position_in_thread[evts[pos].second] = pos;
       }
@@ -389,7 +405,7 @@ class ExplorationGraphT {
     std::vector<std::size_t> in_degree(n, 0);
 
     // po edges: consecutive events within each thread.
-    for (const auto& [tid, evts] : thread_events) {
+    for (const auto& evts : thread_events) {
       for (std::size_t i = 1; i < evts.size(); ++i) {
         const auto pred = evts[i - 1].second;
         const auto succ = evts[i].second;
@@ -462,7 +478,7 @@ class ExplorationGraphT {
 
     // Pre-compute po predecessor: for each event that has a po predecessor.
     std::unordered_map<EventId, EventId> po_pred;
-    for (const auto& [tid, evts] : thread_events) {
+    for (const auto& evts : thread_events) {
       for (std::size_t i = 1; i < evts.size(); ++i) {
         po_pred[evts[i].second] = evts[i - 1].second;
       }
@@ -488,7 +504,7 @@ class ExplorationGraphT {
 
       // Set own position.
       const auto& evt = event(id);
-      auto ci = cache->thread_clock_index[evt.thread];
+      const auto ci = cache->thread_clock_index[evt.thread];
       clock[ci] = cache->position_in_thread[id] + 1;
     }
 

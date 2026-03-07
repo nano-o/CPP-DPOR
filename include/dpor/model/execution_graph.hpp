@@ -18,10 +18,8 @@
 #include <cstddef>
 #include <iterator>
 #include <limits>
-#include <map>
 #include <optional>
 #include <stdexcept>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -212,6 +210,7 @@ class ExecutionGraphT {
       ThreadId thread,
       EventIndex index,
       EventLabelT<ValueT> label) {
+    ensure_thread_storage(thread);
     auto& used_indices = used_event_indices_by_thread_[thread];
     if (used_indices.find(index) != used_indices.end()) {
       throw std::invalid_argument("event index already used in this thread");
@@ -342,6 +341,14 @@ class ExecutionGraphT {
   friend class ExplorationGraphT;
 
  private:
+  void ensure_thread_storage(ThreadId thread) {
+    const auto index = static_cast<std::size_t>(thread);
+    if (index >= next_event_index_by_thread_.size()) {
+      next_event_index_by_thread_.resize(index + 1, 0);
+      used_event_indices_by_thread_.resize(index + 1);
+    }
+  }
+
   // Mutable access to events for in-place label modifications (e.g., ND value updates).
   [[nodiscard]] std::vector<Event>& events_mutable() noexcept {
     return events_;
@@ -349,6 +356,7 @@ class ExecutionGraphT {
 
   [[nodiscard]] EventIndex next_event_index(ThreadId thread) {
     constexpr auto kMaxIndex = std::numeric_limits<EventIndex>::max();
+    ensure_thread_storage(thread);
     auto& next_index = next_event_index_by_thread_[thread];
     auto& used_indices = used_event_indices_by_thread_[thread];
 
@@ -365,15 +373,22 @@ class ExecutionGraphT {
   // Produces per-thread event sequences sorted by declared per-thread index.
   // These sequences are the canonical input for ProgramOrderRelation.
   [[nodiscard]] std::vector<std::vector<NodeId>> derive_thread_event_sequences() const {
-    std::map<ThreadId, std::vector<EventId>> event_ids_by_thread;
+    std::vector<std::vector<EventId>> event_ids_by_thread;
     for (EventId id = 0; id < events_.size(); ++id) {
-      event_ids_by_thread[events_[id].thread].push_back(id);
+      const auto thread_index = static_cast<std::size_t>(events_[id].thread);
+      if (thread_index >= event_ids_by_thread.size()) {
+        event_ids_by_thread.resize(thread_index + 1);
+      }
+      event_ids_by_thread[thread_index].push_back(id);
     }
 
     std::vector<std::vector<NodeId>> thread_sequences;
     thread_sequences.reserve(event_ids_by_thread.size());
 
-    for (auto& [_, event_ids] : event_ids_by_thread) {
+    for (auto& event_ids : event_ids_by_thread) {
+      if (event_ids.empty()) {
+        continue;
+      }
       std::sort(event_ids.begin(), event_ids.end(), [&](const EventId lhs, const EventId rhs) {
         const auto lhs_index = events_[lhs].index;
         const auto rhs_index = events_[rhs].index;
@@ -400,8 +415,8 @@ class ExecutionGraphT {
 
   std::vector<Event> events_{};
   ReadsFromRelation reads_from_{};
-  std::unordered_map<ThreadId, EventIndex> next_event_index_by_thread_{};
-  std::unordered_map<ThreadId, std::unordered_set<EventIndex>> used_event_indices_by_thread_{};
+  std::vector<EventIndex> next_event_index_by_thread_{};
+  std::vector<std::unordered_set<EventIndex>> used_event_indices_by_thread_{};
 };
 
 using ExecutionGraph = ExecutionGraphT<Value>;
