@@ -280,28 +280,9 @@ class ExecutionGraphT {
   [[nodiscard]] ExplicitRelation rf_relation() const {
     ExplicitRelation relation(events_.size());
 
-    for (const auto& [receive_id, source] : reads_from_) {
-      if (!is_valid_event_id(receive_id)) {
-        throw std::invalid_argument("reads-from relation refers to an unknown receive event id");
-      }
-      if (!is_receive(events_[receive_id])) {
-        throw std::invalid_argument("reads-from relation target event is not a receive");
-      }
-
-      if (source.is_bottom()) {
-        continue;
-      }
-
-      const auto source_id = source.send_id();
-      if (!is_valid_event_id(source_id)) {
-        throw std::invalid_argument("reads-from relation source refers to an unknown send event id");
-      }
-      if (!is_send(events_[source_id])) {
-        throw std::invalid_argument("reads-from relation source event is not a send");
-      }
-
+    for_each_validated_rf_edge([&](const EventId source_id, const EventId receive_id) {
       relation.add_edge(source_id, receive_id);
-    }
+    });
 
     return relation;
   }
@@ -350,6 +331,32 @@ class ExecutionGraphT {
   friend class ExplorationGraphT;
 
  private:
+  template <typename Callback>
+  void for_each_validated_rf_edge(Callback&& callback) const {
+    for (const auto& [receive_id, source] : reads_from_) {
+      if (!is_valid_event_id(receive_id)) {
+        throw std::invalid_argument("reads-from relation refers to an unknown receive event id");
+      }
+      if (!is_receive(events_[receive_id])) {
+        throw std::invalid_argument("reads-from relation target event is not a receive");
+      }
+
+      if (source.is_bottom()) {
+        continue;
+      }
+
+      const auto source_id = source.send_id();
+      if (!is_valid_event_id(source_id)) {
+        throw std::invalid_argument("reads-from relation source refers to an unknown send event id");
+      }
+      if (!is_send(events_[source_id])) {
+        throw std::invalid_argument("reads-from relation source event is not a send");
+      }
+
+      callback(source_id, receive_id);
+    }
+  }
+
   void ensure_thread_storage(ThreadId thread) {
     const auto index = static_cast<std::size_t>(thread);
     if (index >= next_event_index_by_thread_.size()) {
