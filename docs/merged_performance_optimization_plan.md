@@ -499,9 +499,140 @@ Expected result:
 - lower allocator pressure on the forward path
 - remaining graph materialization should become more concentrated in revisit-specific helpers, making Phase 6 a cleaner follow-up target
 
+Phase 5 measurement result:
+
+- Phase 5 was implemented in commit `59eb233`.
+- On the same `participants=4`, `iterations=1`, `--no-crash` timeout benchmark used throughout this plan, the release benchmark showed a clear improvement relative to the pre-Phase-5 parent commit:
+  - `fdfc4bb` (pre-Phase-5 baseline): `105347.809 ms`
+  - `59eb233` (Phase 5): `91023.412 ms`
+  - sample wall time moved from `105.34 s` to `91.02 s`
+  - execution count stayed unchanged at `7262928`
+  - net improvement: `14324.397 ms` (`13.6%`, about `1.16x` faster)
+- A fresh post-Phase-5 `perf` capture was then recorded with `benchmarks/profile_two_phase_commit_timeout_perf.sh --participants 4` on commit `59eb233`. Under that `RelWithDebInfo` profiling build, the benchmark run was `92887.396 ms` and `perf` captured `46309` samples.
+- Allocator work still dominates the profile overall:
+  - `_int_free`: `10.62%`
+  - `_int_malloc`: `8.88%`
+  - `malloc`: `8.02%`
+  - `malloc_consolidate`: `3.28%`
+- The remaining DPOR-specific self hotspots after Phase 5 were:
+  - `compute_topological_order()`: `3.48%`
+  - `thread_trace()`: `3.09%`
+  - `build_porf_graph_structure()`: `2.73%`
+  - `validate_graph<false>()`: `2.56%`
+  - `backward_revisit()`: `2.26%`
+  - `unread_send_event_ids()`: `2.09%`
+  - `add_event()`: `1.96%`
+  - `ensure_porf_cache()`: `1.67%`
+  - `restrict()`: `0.88%`
+  - `porf_contains()`: `0.72%`
+- The profile shape is the important follow-up signal:
+  - the old common forward-path whole-graph copy construction / destruction is no longer visible as a dominant standalone self hotspot
+  - the remaining allocation-heavy stacks now point mostly through revisit-local materialization such as `backward_revisit()`, `restrict()`, and `with_rf()`
+  - PORF/cycle work is still visible, but it is now increasingly tied to revisit-heavy paths rather than the forward branch-copy shape that Phase 5 targeted
+- Conclusion: Phase 5 delivered the expected end-to-end win and made the remaining graph-materialization cost more revisit-local. That means Phase 6 is still worth doing, and the post-Phase-5 trace strengthens that case rather than weakening it.
+
+Phase 5 newly exposed hotspots:
+
+The forward-path copy elimination uncovered costs that were previously hidden behind the larger copy overhead:
+
+- `vector<unsigned long>::_M_realloc_insert`: `4.30%` self — `push_back` on the `successors` adjacency list (`vector<vector<EventId>>`) inside `build_porf_graph_structure()` triggering repeated reallocation. This is rebuilt from scratch on every `has_causal_cycle_without_cache()` and `ensure_porf_cache()` call.
+- `unordered_map<EventId, pair<EventId const, EventId>>::operator[]`: `3.87%` self — hash-map lookups on `EventId → EventId` maps. There are four such maps in the codebase:
+  - `exploration_graph.hpp`: `rf_source` and `po_pred` inside `ensure_porf_cache()` (vector-clock computation)
+  - `exploration_graph.hpp`: `id_map` inside `restrict()` (old→new event ID remapping)
+  - `dpor.hpp`: `id_map` inside `revisit_condition()` (same remapping pattern)
+- `unordered_set<EventId>` insert/rehash: `1.37%` + `1.06%` + `0.77%` combined — the `keep_set`, `deleted`, and `previous` sets in `backward_revisit()` and `revisit_condition()`.
+- `add_event()`: `1.96%` self — undo-log bookkeeping on every forward-path append. This is new Phase 5 overhead, acceptable relative to the copy cost it replaced.
+- `vector<unordered_set<EventIndex>>::vector(copy)`: `0.54%` self — `used_event_indices_by_thread_` deep-copied during `restrict()` / `with_rf()` graph materialization.
+- `variant` move/copy construct: ~`1.4%` combined — `EventLabelT` variant construction during event appends and graph copies.
+
+These newly visible costs are the natural targets for Phase 5.5 (low-risk representation cleanups) and Phase 6 (revisit-specific materialization).
+
+### Phase 5.5: Internal Dense Remap/Mask Helpers + PORF Successor Pre-Sizing
+
+The Phase 5 profile exposed `unordered_map<EventId, EventId>`, `unordered_set<EventId>`, and PORF successor-list reallocation as newly prominent hotspots. These are the same kind of hash-based containers that Phase 2 successfully replaced with dense vectors for event-indexed and thread-indexed state. The same treatment applies here, plus pre-sizing for the adjacency vectors that are now the single largest non-allocator self hotspot.
+
+Phase 5.5 scope:
+
+- replace the remaining `EventId`-keyed hash maps and hash sets with dense vectors in internal helpers
+- pre-size PORF successor adjacency lists to eliminate repeated reallocation
+- keep all changes internal: do not change public API signatures on `restrict()`, `with_rf()`, or any other `ExplorationGraphT` surface
+- do not change algorithm semantics
+
+Phase 5.5 non-goals:
+
+- do not redesign `restrict()`, `backward_revisit()`, or `revisit_condition()` logic or ownership model
+- do not change the graph materialization ownership model
+- do not touch forward-path rollback infrastructure
+- do not couple internal remap helpers to the public `restrict()` contract
+
+Implementation note on dense masks: prefer `std::vector<std::uint8_t>` over `std::vector<bool>` for event-indexed masks. `vector<bool>`'s proxy specialization introduces indirection and bit-packing that hurts performance in hot loops. A plain byte vector indexed by `EventId` is simpler and faster.
+
+#### Landing 1: PORF Successor Pre-Sizing And Dense Helpers In Cache Construction
+
+Targets:
+- `add_po_edges()` at `exploration_graph.hpp` — pushes into `successors[pred]` without pre-sizing
+- `add_rf_edges()` at `exploration_graph.hpp` — pushes into `successors[source_id]` without pre-sizing
+- `ensure_porf_cache()` at `exploration_graph.hpp` — `rf_source` and `po_pred` unordered_maps
+
+The `vector<unsigned long>::_M_realloc_insert` hotspot at `4.30%` self comes from `successors[x].push_back(y)` in `add_po_edges()` and `add_rf_edges()`. Each per-event successor vector starts empty and grows by reallocation. Pre-compute the out-degree of each event (one pass over PO structure + one pass over RF relation), then `reserve()` each successor vector before inserting edges. This avoids repeated reallocation without changing the adjacency-building logic.
+
+Also replace the two unordered_maps in `ensure_porf_cache()` (the vector-clock computation path):
+- `rf_source`: replace with `std::vector<EventId>` of size `event_count()`, sentinel `kNoSource` for events without an RF source
+- `po_pred`: replace with `std::vector<EventId>` of size `event_count()`, sentinel `kNoSource` for events without a PO predecessor
+
+Landing 1 tests:
+- existing PORF cache tests and cycle detection tests remain unchanged
+- `porf_contains()` results match before and after
+
+#### Landing 2: Internal Dense ID Remap In `restrict()` And `revisit_condition()`
+
+Targets:
+- `restrict()` at `exploration_graph.hpp` — internal `id_map` unordered_map
+- `revisit_condition()` at `dpor.hpp` — internal `id_map` unordered_map (same pattern)
+
+Both build an `unordered_map<EventId, EventId>` to map old event IDs to new IDs in a restricted graph. Both are bounded by `event_count()`.
+
+Replace each with a local `std::vector<EventId>` of size `event_count()`, initialized to `kNoSource`, indexed by old event ID. This is a purely internal change: `restrict()` keeps its current `const unordered_set<EventId>&` parameter signature. `revisit_condition()` keeps its current signature.
+
+The `revisit_condition()` remap duplicates work that `restrict()` already does internally. A private shared helper that builds the dense old→new remap from a keep set could serve both call sites, but only introduce that factoring if it falls out naturally. Do not change `restrict()`'s return type or add output parameters to expose the remap externally.
+
+Landing 2 tests:
+- existing `restrict()`, revisit condition, and DPOR end-to-end tests remain unchanged
+
+#### Landing 3: Dense Masks In `backward_revisit()` And `compute_previous_set()`
+
+Targets:
+- `backward_revisit()` at `dpor.hpp` — `deleted` and `keep_set` unordered_sets
+- `compute_previous_set()` at `dpor.hpp` — returns `unordered_set<EventId>`
+
+Replace:
+- `deleted`: `std::vector<std::uint8_t>` of size `event_count()`, where `1` means deleted
+- `keep_set`: derive from the complement of `deleted` without building a second container; pass the dense mask to a private `restrict()` overload or convert to the public `unordered_set` at the call boundary if needed
+- `compute_previous_set()`: return `std::vector<std::uint8_t>` instead of `unordered_set<EventId>`, since its only caller (`revisit_condition()`) can use the dense mask directly
+
+If converting the dense mask to `unordered_set` at the `restrict()` call boundary is too wasteful, add a private `restrict_impl(const std::vector<std::uint8_t>&)` overload that `restrict(const unordered_set<...>&)` delegates to. This keeps the public API stable while letting internal callers avoid the hash-set round trip.
+
+Landing 3 tests:
+- existing backward revisit, revisit condition, and DPOR end-to-end tests remain unchanged
+- existing oracle agreement tests remain unchanged
+
+Phase 5.5 expected result:
+
+- the `4.30%` `vector::_M_realloc_insert` hotspot should largely disappear from PORF adjacency construction
+- the `3.87%` `unordered_map::operator[]` hotspot should largely disappear
+- the `1.37%` + `1.06%` + `0.77%` hash-set insert/rehash costs should drop
+- `restrict()` and `backward_revisit()` should become cheaper per call
+- total allocator share should decrease further
+
+Phase 5.5 measurement plan:
+
+1. land each change and run `ctest --preset debug --output-on-failure`
+2. after all landings, rerun the timeout benchmark and `perf`
+3. confirm execution count unchanged, then compare `elapsed_ms` and hotspot shapes
+
 ### Phase 6: Tackle Revisit-Specific Materialization
 
-Only after the forward path is cheaper should revisit-heavy structure be attacked:
+Only after the forward path is cheaper and the representation cleanups are done should revisit-heavy structure be attacked:
 
 1. reduce temporary `with_rf()` copies
 2. introduce a restricted view for revisit checks if needed
@@ -520,8 +651,9 @@ This phase is intentionally later because it is more complex and easier to get w
 7. skip Phase 4 Landing 2 in the mainline plan; keep the reverted prototype only as a data point unless later profiling changes the tradeoff
 8. Phase 5 Landing 1: worker-local checkpoint/rollback infrastructure, including rollback-focused tests and empty-history copy semantics for materialized graphs
 9. Phase 5 Landing 2: reference-based forward recursion in `visit()`, while leaving revisit materialization intentionally unchanged
-10. Phase 6: revisit-specific restricted views or other deeper structural work only if revisit-heavy materialization still dominates after the forward path is cheaper
-11. reserve hot vectors and other minor adjacency-building cleanups where perf justifies them
+10. Phase 5.5: densify remaining hash maps and hash sets in PORF cache construction, `restrict()`, `revisit_condition()`, and `backward_revisit()`
+11. Phase 6: revisit-specific restricted views or other deeper structural work only if revisit-heavy materialization still dominates after the representation cleanups
+12. reserve hot vectors and other minor adjacency-building cleanups where perf justifies them
 
 ## Why This Order
 
