@@ -1,6 +1,6 @@
 #pragma once
 
-#include "dpor/model/execution_graph.hpp"
+#include "dpor/model/exploration_graph.hpp"
 
 #include <cstdint>
 #include <string>
@@ -49,33 +49,76 @@ template <typename ValueT>
 class AsyncConsistencyCheckerT {
  public:
   [[nodiscard]] ConsistencyResult check(const ExecutionGraphT<ValueT>& graph) const {
-    ConsistencyResult result;
+    auto validation = validate_graph<true>(graph);
+    if (has_causal_cycle(
+            graph.po_relation(),
+            validation.valid_rf_edges,
+            graph.events().size())) {
+      add_causal_cycle_issue(validation.result);
+    }
+    return validation.result;
+  }
+
+  [[nodiscard]] ConsistencyResult check(const ExplorationGraphT<ValueT>& graph) const {
+    auto validation = validate_graph<false>(graph.execution_graph());
+    if (validation.cycle_query_safe && graph.has_causal_cycle()) {
+      add_causal_cycle_issue(validation.result);
+    }
+    return validation.result;
+  }
+
+ private:
+  using EventId = typename ExecutionGraphT<ValueT>::EventId;
+
+  struct ValidationPassResult {
+    ConsistencyResult result{};
+    std::vector<std::pair<EventId, EventId>> valid_rf_edges{};
+    bool cycle_query_safe{true};
+  };
+
+  static void add_issue(ConsistencyResult& result, ConsistencyIssueCode code, std::string message) {
+    result.issues.push_back(ConsistencyIssue{code, std::move(message)});
+  }
+
+  static void add_causal_cycle_issue(ConsistencyResult& result) {
+    add_issue(
+        result,
+        ConsistencyIssueCode::CausalCycle,
+        "program order and reads-from relations form a causal cycle");
+  }
+
+  template <bool CollectValidRfEdges>
+  [[nodiscard]] static ValidationPassResult validate_graph(
+      const ExecutionGraphT<ValueT>& graph) {
+    ValidationPassResult validation;
 
     const auto event_count = graph.events().size();
     std::vector<bool> receive_has_source(event_count, false);
-    std::unordered_map<typename ExecutionGraphT<ValueT>::EventId, std::size_t> send_read_count;
+    std::unordered_map<EventId, std::size_t> send_read_count;
     send_read_count.reserve(graph.reads_from().size());
-    std::vector<std::pair<typename ExecutionGraphT<ValueT>::EventId, typename ExecutionGraphT<ValueT>::EventId>>
-        valid_rf_edges;
-    valid_rf_edges.reserve(graph.reads_from().size());
+    if constexpr (CollectValidRfEdges) {
+      validation.valid_rf_edges.reserve(graph.reads_from().size());
+    }
 
     for (const auto& [receive_id, source] : graph.reads_from()) {
       bool has_valid_ids = true;
 
       if (!graph.is_valid_event_id(receive_id)) {
         add_issue(
-            result,
+            validation.result,
             ConsistencyIssueCode::InvalidEventReference,
             "reads-from target references unknown event id " + std::to_string(receive_id));
+        validation.cycle_query_safe = false;
         has_valid_ids = false;
       }
       if (source.is_send()) {
         const auto source_id = source.send_id();
         if (!graph.is_valid_event_id(source_id)) {
           add_issue(
-              result,
+              validation.result,
               ConsistencyIssueCode::InvalidEventReference,
               "reads-from source references unknown event id " + std::to_string(source_id));
+          validation.cycle_query_safe = false;
           has_valid_ids = false;
         }
       }
@@ -90,9 +133,10 @@ class AsyncConsistencyCheckerT {
       bool has_valid_endpoint_kinds = true;
       if (!is_receive(receive_event)) {
         add_issue(
-            result,
+            validation.result,
             ConsistencyIssueCode::ReadsFromTargetNotReceive,
             "reads-from target event " + std::to_string(receive_id) + " is not a receive");
+        validation.cycle_query_safe = false;
         has_valid_endpoint_kinds = false;
       }
       if (source.is_send()) {
@@ -100,9 +144,10 @@ class AsyncConsistencyCheckerT {
         const auto& source_event = graph.event(source_id);
         if (!is_send(source_event)) {
           add_issue(
-              result,
+              validation.result,
               ConsistencyIssueCode::ReadsFromSourceNotSend,
               "reads-from source event " + std::to_string(source_id) + " is not a send");
+          validation.cycle_query_safe = false;
           has_valid_endpoint_kinds = false;
         }
       }
@@ -119,7 +164,7 @@ class AsyncConsistencyCheckerT {
       if (source.is_bottom()) {
         if (receive_label->is_blocking()) {
           add_issue(
-              result,
+              validation.result,
               ConsistencyIssueCode::BlockingReceiveReadsBottom,
               "blocking receive event " + std::to_string(receive_id) +
                   " reads from bottom");
@@ -138,14 +183,14 @@ class AsyncConsistencyCheckerT {
       ++read_count;
       if (read_count > 1U) {
         add_issue(
-            result,
+            validation.result,
             ConsistencyIssueCode::SendConsumedMultipleTimes,
             "send event " + std::to_string(source_id) + " is consumed by more than one receive");
       }
 
       if (send_label->destination != receive_event.thread) {
         add_issue(
-            result,
+            validation.result,
             ConsistencyIssueCode::ReceiveDestinationMismatch,
             "receive event " + std::to_string(receive_id) + " in thread " +
                 std::to_string(receive_event.thread) + " reads from send event " +
@@ -155,40 +200,28 @@ class AsyncConsistencyCheckerT {
 
       if (!receive_label->accepts(send_label->value)) {
         add_issue(
-            result,
+            validation.result,
             ConsistencyIssueCode::ReceiveValueMismatch,
             "receive event " + std::to_string(receive_id) +
                 " does not accept the value sent by event " + std::to_string(source_id));
       }
 
-      valid_rf_edges.emplace_back(source_id, receive_id);
+      if constexpr (CollectValidRfEdges) {
+        validation.valid_rf_edges.emplace_back(source_id, receive_id);
+      }
     }
 
-    for (typename ExecutionGraphT<ValueT>::EventId event_id = 0; event_id < event_count; ++event_id) {
+    for (EventId event_id = 0; event_id < event_count; ++event_id) {
       if (is_receive(graph.event(event_id)) && !receive_has_source[event_id]) {
         add_issue(
-            result,
+            validation.result,
             ConsistencyIssueCode::MissingReadsFromForReceive,
             "receive event " + std::to_string(event_id) +
                 " has no reads-from assignment");
       }
     }
 
-    if (has_causal_cycle(graph.po_relation(), valid_rf_edges, event_count)) {
-      add_issue(
-          result,
-          ConsistencyIssueCode::CausalCycle,
-          "program order and reads-from relations form a causal cycle");
-    }
-
-    return result;
-  }
-
- private:
-  using EventId = typename ExecutionGraphT<ValueT>::EventId;
-
-  static void add_issue(ConsistencyResult& result, ConsistencyIssueCode code, std::string message) {
-    result.issues.push_back(ConsistencyIssue{code, std::move(message)});
+    return validation;
   }
 
   [[nodiscard]] static bool has_causal_cycle(

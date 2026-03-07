@@ -558,7 +558,7 @@ inline void visit_if_consistent(
   }
 
   model::AsyncConsistencyCheckerT<ValueT> checker;
-  const auto consistency = checker.check(graph.execution_graph());
+  const auto consistency = checker.check(graph);
   if (!consistency.is_consistent()) {
     return;  // Inconsistent — prune.
   }

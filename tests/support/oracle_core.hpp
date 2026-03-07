@@ -295,7 +295,7 @@ inline void enumerate_consistent_executions(
         }
       }
 
-      const auto consistency = checker.check(next_graph.execution_graph());
+      const auto consistency = checker.check(next_graph);
       if (!consistency.is_consistent()) {
         continue;
       }
@@ -353,7 +353,7 @@ template <typename ValueT>
   algo::DporConfigT<ValueT> config;
   config.program = program;
   config.on_execution = [&](const model::ExplorationGraphT<ValueT>& graph) {
-    const auto consistency = checker.check(graph.execution_graph());
+    const auto consistency = checker.check(graph);
     if (!consistency.is_consistent()) {
       comparison.found_inconsistent_graph = true;
     }
