@@ -12,28 +12,212 @@
 
 #include "protocol.hpp"
 
-#include "dpor/algo/program.hpp"
-#include "dpor/model/event.hpp"
+#include "dpor/algo/dpor.hpp"
 
+#include <compare>
+#include <cstdint>
 #include <condition_variable>
 #include <exception>
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <ostream>
 #include <stdexcept>
-#include <string>
 #include <thread>
 #include <vector>
 
 namespace tpc_sim {
 
-using EventLabel = dpor::model::EventLabel;
-using SendLabel = dpor::model::SendLabel;
-using ReceiveLabel = dpor::model::ReceiveLabel;
-using NondeterministicChoiceLabel = dpor::model::NondeterministicChoiceLabel;
-using ThreadTrace = dpor::algo::ThreadTrace;
-using ThreadFunction = dpor::algo::ThreadFunction;
-using Program = dpor::algo::Program;
+struct SimValue {
+  enum class Tag : std::uint8_t {
+    Invalid = 0,
+    PrepareMessage,
+    VoteYesMessage,
+    VoteNoMessage,
+    DecisionCommitMessage,
+    DecisionAbortMessage,
+    AckMessage,
+    VoteChoiceYes,
+    VoteChoiceNo,
+    CrashChoiceNoCrash,
+    CrashChoiceCrash,
+  };
+
+  std::uint64_t encoded{0};
+
+  [[nodiscard]] constexpr auto operator<=>(const SimValue&) const = default;
+};
+
+namespace detail {
+
+constexpr std::uint64_t kTagMask = 0xff;
+constexpr std::uint64_t kPayloadShift = 8;
+
+[[nodiscard]] constexpr SimValue make_value(
+    SimValue::Tag tag,
+    std::uint64_t payload = 0) {
+  return SimValue{
+      .encoded = (payload << kPayloadShift) |
+                 static_cast<std::uint64_t>(tag),
+  };
+}
+
+[[nodiscard]] constexpr SimValue::Tag tag_of(SimValue value) {
+  return static_cast<SimValue::Tag>(value.encoded & kTagMask);
+}
+
+[[nodiscard]] constexpr tpc::ParticipantId payload_of(SimValue value) {
+  return static_cast<tpc::ParticipantId>(value.encoded >> kPayloadShift);
+}
+
+}  // namespace detail
+
+[[nodiscard]] constexpr SimValue prepare_message() {
+  return detail::make_value(SimValue::Tag::PrepareMessage);
+}
+
+[[nodiscard]] constexpr SimValue vote_message(
+    tpc::ParticipantId from,
+    tpc::Vote vote) {
+  return detail::make_value(
+      vote == tpc::Vote::Yes ? SimValue::Tag::VoteYesMessage
+                             : SimValue::Tag::VoteNoMessage,
+      static_cast<std::uint64_t>(from));
+}
+
+[[nodiscard]] constexpr SimValue decision_message(tpc::Decision decision) {
+  return detail::make_value(
+      decision == tpc::Decision::Commit
+          ? SimValue::Tag::DecisionCommitMessage
+          : SimValue::Tag::DecisionAbortMessage);
+}
+
+[[nodiscard]] constexpr SimValue ack_message(tpc::ParticipantId from) {
+  return detail::make_value(
+      SimValue::Tag::AckMessage, static_cast<std::uint64_t>(from));
+}
+
+[[nodiscard]] inline SimValue encode_message(const tpc::Message& msg) {
+  if (std::holds_alternative<tpc::Prepare>(msg)) {
+    return prepare_message();
+  }
+  if (const auto* vote = std::get_if<tpc::VoteMsg>(&msg)) {
+    return vote_message(vote->from, vote->vote);
+  }
+  if (const auto* decision = std::get_if<tpc::DecisionMsg>(&msg)) {
+    return decision_message(decision->decision);
+  }
+  const auto* ack = std::get_if<tpc::Ack>(&msg);
+  if (ack == nullptr) {
+    throw std::logic_error("unsupported 2PC message kind");
+  }
+  return ack_message(ack->from);
+}
+
+[[nodiscard]] inline tpc::Message decode_message(SimValue value) {
+  switch (detail::tag_of(value)) {
+    case SimValue::Tag::PrepareMessage:
+      return tpc::Prepare{};
+    case SimValue::Tag::VoteYesMessage:
+      return tpc::VoteMsg{detail::payload_of(value), tpc::Vote::Yes};
+    case SimValue::Tag::VoteNoMessage:
+      return tpc::VoteMsg{detail::payload_of(value), tpc::Vote::No};
+    case SimValue::Tag::DecisionCommitMessage:
+      return tpc::DecisionMsg{tpc::Decision::Commit};
+    case SimValue::Tag::DecisionAbortMessage:
+      return tpc::DecisionMsg{tpc::Decision::Abort};
+    case SimValue::Tag::AckMessage:
+      return tpc::Ack{detail::payload_of(value)};
+    default:
+      throw std::logic_error("observed value is not a message");
+  }
+}
+
+[[nodiscard]] constexpr SimValue vote_choice(tpc::Vote vote) {
+  return detail::make_value(
+      vote == tpc::Vote::Yes ? SimValue::Tag::VoteChoiceYes
+                             : SimValue::Tag::VoteChoiceNo);
+}
+
+[[nodiscard]] inline tpc::Vote decode_vote_choice(SimValue value) {
+  switch (detail::tag_of(value)) {
+    case SimValue::Tag::VoteChoiceYes:
+      return tpc::Vote::Yes;
+    case SimValue::Tag::VoteChoiceNo:
+      return tpc::Vote::No;
+    default:
+      throw std::logic_error("observed value is not a vote choice");
+  }
+}
+
+[[nodiscard]] constexpr SimValue crash_choice(bool crash) {
+  return detail::make_value(
+      crash ? SimValue::Tag::CrashChoiceCrash
+            : SimValue::Tag::CrashChoiceNoCrash);
+}
+
+[[nodiscard]] inline bool decode_crash_choice(SimValue value) {
+  switch (detail::tag_of(value)) {
+    case SimValue::Tag::CrashChoiceNoCrash:
+      return false;
+    case SimValue::Tag::CrashChoiceCrash:
+      return true;
+    default:
+      throw std::logic_error("observed value is not a crash choice");
+  }
+}
+
+[[nodiscard]] inline std::optional<tpc::Decision> decode_decision_message(
+    SimValue value) {
+  switch (detail::tag_of(value)) {
+    case SimValue::Tag::DecisionCommitMessage:
+      return tpc::Decision::Commit;
+    case SimValue::Tag::DecisionAbortMessage:
+      return tpc::Decision::Abort;
+    default:
+      return std::nullopt;
+  }
+}
+
+inline std::ostream& operator<<(std::ostream& os, SimValue value) {
+  switch (detail::tag_of(value)) {
+    case SimValue::Tag::Invalid:
+      return os << "<invalid>";
+    case SimValue::Tag::PrepareMessage:
+      return os << "PREPARE";
+    case SimValue::Tag::VoteYesMessage:
+      return os << "VOTE " << detail::payload_of(value) << " YES";
+    case SimValue::Tag::VoteNoMessage:
+      return os << "VOTE " << detail::payload_of(value) << " NO";
+    case SimValue::Tag::DecisionCommitMessage:
+      return os << "DECISION COMMIT";
+    case SimValue::Tag::DecisionAbortMessage:
+      return os << "DECISION ABORT";
+    case SimValue::Tag::AckMessage:
+      return os << "ACK " << detail::payload_of(value);
+    case SimValue::Tag::VoteChoiceYes:
+      return os << "YES";
+    case SimValue::Tag::VoteChoiceNo:
+      return os << "NO";
+    case SimValue::Tag::CrashChoiceNoCrash:
+      return os << "no_crash";
+    case SimValue::Tag::CrashChoiceCrash:
+      return os << "crash";
+  }
+  return os << "<unknown>";
+}
+
+using EventLabel = dpor::model::EventLabelT<SimValue>;
+using SendLabel = dpor::model::SendLabelT<SimValue>;
+using ReceiveLabel = dpor::model::ReceiveLabelT<SimValue>;
+using NondeterministicChoiceLabel =
+    dpor::model::NondeterministicChoiceLabelT<SimValue>;
+using ObservedValue = dpor::model::ObservedValueT<SimValue>;
+using ExplorationGraph = dpor::model::ExplorationGraphT<SimValue>;
+using ThreadTrace = dpor::algo::ThreadTraceT<SimValue>;
+using ThreadFunction = dpor::algo::ThreadFunctionT<SimValue>;
+using Program = dpor::algo::ProgramT<SimValue>;
+using DporConfig = dpor::algo::DporConfigT<SimValue>;
 
 // ---------------------------------------------------------------------------
 // SimEnvironment: intercepting Environment implementation
@@ -104,15 +288,15 @@ class SimEnvironment : public tpc::Environment {
       if (current < target_io_) {
         // Fast-forward: read crash choice from trace.
         auto idx = trace_offset_ + trace_consume_count_++;
-        if (trace_.at(idx) == "crash") {
+        if (decode_crash_choice(trace_.at(idx).value())) {
           throw CrashInjected{};
         }
-        // "no_crash": fall through to process the actual send below.
+        // no_crash: fall through to process the actual send below.
       } else {
         // This is the target I/O: produce ND choice label.
         result_ = NondeterministicChoiceLabel{
             .value = {},
-            .choices = {"no_crash", "crash"},
+            .choices = {crash_choice(false), crash_choice(true)},
         };
         throw StepBoundaryReached{};
       }
@@ -128,7 +312,7 @@ class SimEnvironment : public tpc::Environment {
     // This is the target I/O operation.
     result_ = SendLabel{
         .destination = id_map_(dest),
-        .value = tpc::serialize(msg),
+        .value = encode_message(msg),
     };
     throw StepBoundaryReached{};
   }
@@ -139,13 +323,13 @@ class SimEnvironment : public tpc::Environment {
     if (current < target_io_) {
       // Fast-forward: past vote choice, replay from trace.
       auto idx = trace_offset_ + trace_consume_count_++;
-      return trace_.at(idx) == "YES" ? tpc::Vote::Yes : tpc::Vote::No;
+      return decode_vote_choice(trace_.at(idx).value());
     }
 
     // This is the target I/O operation: produce ND choice label.
     result_ = NondeterministicChoiceLabel{
         .value = {},
-        .choices = {"YES", "NO"},
+        .choices = {vote_choice(tpc::Vote::Yes), vote_choice(tpc::Vote::No)},
     };
     throw StepBoundaryReached{};
   }
@@ -167,16 +351,14 @@ class SimEnvironment : public tpc::Environment {
         // target event (current == target_io_).
         return SimReceiveResult::replayed_timer_fire(fire_active_timer());
       }
-      return SimReceiveResult::replayed_message(
-          tpc::deserialize(observed.value()));
+      return SimReceiveResult::replayed_message(decode_message(observed.value()));
     }
 
     // This is the target I/O operation.
     if (has_active_timer()) {
-      result_ =
-          dpor::model::make_nonblocking_receive_label<dpor::model::Value>();
+      result_ = dpor::model::make_nonblocking_receive_label<SimValue>();
     } else {
-      result_ = dpor::model::make_receive_label<dpor::model::Value>();
+      result_ = dpor::model::make_receive_label<SimValue>();
     }
     return SimReceiveResult::captured_receive();
   }

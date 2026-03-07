@@ -14,6 +14,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace dpor::benchmarks {
@@ -38,6 +40,14 @@ struct Measurement {
 struct OracleRunResult {
   std::size_t executions{0};
   std::size_t paths_explored{0};
+};
+
+template <typename ProgramT>
+struct ProgramValueType;
+
+template <typename ValueT>
+struct ProgramValueType<algo::ProgramT<ValueT>> {
+  using type = ValueT;
 };
 
 [[noreturn]] inline void print_usage_and_exit(
@@ -176,8 +186,11 @@ template <typename ProgramFactory>
     std::size_t participants,
     bool inject_crash,
     const ProgramFactory& make_program) {
-  algo::DporConfig config;
-  config.program = make_program(participants, inject_crash);
+  auto program = make_program(participants, inject_crash);
+  using ValueT =
+      typename ProgramValueType<std::decay_t<decltype(program)>>::type;
+  algo::DporConfigT<ValueT> config;
+  config.program = std::move(program);
   const auto result = algo::verify(config);
   if (result.kind != algo::VerifyResultKind::AllExecutionsExplored) {
     throw std::runtime_error("DPOR did not explore all executions");

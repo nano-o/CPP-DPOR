@@ -29,12 +29,12 @@ using namespace tpc_sim;
 // Trace helpers
 // ---------------------------------------------------------------------------
 
-static std::vector<model::ExplorationGraph::EventId>
-thread_event_ids_in_program_order(const model::ExplorationGraph& graph,
+static std::vector<ExplorationGraph::EventId>
+thread_event_ids_in_program_order(const ExplorationGraph& graph,
                                   model::ThreadId tid) {
-  std::vector<std::pair<model::EventIndex, model::ExplorationGraph::EventId>>
+  std::vector<std::pair<model::EventIndex, ExplorationGraph::EventId>>
       indexed_events;
-  for (model::ExplorationGraph::EventId id = 0; id < graph.event_count(); ++id) {
+  for (ExplorationGraph::EventId id = 0; id < graph.event_count(); ++id) {
     const auto& evt = graph.event(id);
     if (evt.thread == tid) {
       indexed_events.emplace_back(evt.index, id);
@@ -42,7 +42,7 @@ thread_event_ids_in_program_order(const model::ExplorationGraph& graph,
   }
   std::sort(indexed_events.begin(), indexed_events.end());
 
-  std::vector<model::ExplorationGraph::EventId> result;
+  std::vector<ExplorationGraph::EventId> result;
   result.reserve(indexed_events.size());
   for (const auto& [_, id] : indexed_events) {
     result.push_back(id);
@@ -50,21 +50,21 @@ thread_event_ids_in_program_order(const model::ExplorationGraph& graph,
   return result;
 }
 
-static std::string get_participant_vote(
-    const model::ExplorationGraph& graph,
+static std::optional<tpc::Vote> get_participant_vote(
+    const ExplorationGraph& graph,
     tpc::ParticipantId pid) {
   for (const auto id :
        thread_event_ids_in_program_order(graph, participant_to_thread(pid))) {
     const auto* nd = model::as_nondeterministic_choice(graph.event(id));
     if (nd != nullptr) {
-      return nd->value;
+      return decode_vote_choice(nd->value);
     }
   }
-  return {};
+  return std::nullopt;
 }
 
-static std::optional<std::string> get_participant_decision(
-    const model::ExplorationGraph& graph,
+static std::optional<tpc::Decision> get_participant_decision(
+    const ExplorationGraph& graph,
     tpc::ParticipantId pid) {
   for (const auto id :
        thread_event_ids_in_program_order(graph, participant_to_thread(pid))) {
@@ -80,15 +80,16 @@ static std::optional<std::string> get_participant_decision(
     if (send == nullptr) {
       continue;
     }
-    if (std::holds_alternative<tpc::DecisionMsg>(tpc::deserialize(send->value))) {
-      return send->value;
+    const auto decision = decode_decision_message(send->value);
+    if (decision.has_value()) {
+      return decision;
     }
   }
   return std::nullopt;
 }
 
 static bool participant_timed_out_locally(
-    const model::ExplorationGraph& graph,
+    const ExplorationGraph& graph,
     tpc::ParticipantId pid) {
   for (const auto id :
        thread_event_ids_in_program_order(graph, participant_to_thread(pid))) {
@@ -103,7 +104,7 @@ static bool participant_timed_out_locally(
   return false;
 }
 
-static bool coordinator_crashed(const model::ExplorationGraph& graph,
+static bool coordinator_crashed(const ExplorationGraph& graph,
                                 std::size_t /*num_participants*/) {
   for (const auto id : thread_event_ids_in_program_order(
            graph, participant_to_thread(tpc::kCoordinator))) {
@@ -111,15 +112,16 @@ static bool coordinator_crashed(const model::ExplorationGraph& graph,
     if (nd == nullptr) {
       continue;
     }
-    if (nd->choices == std::vector<std::string>{"no_crash", "crash"}) {
-      return nd->value == "crash";
+    if (nd->choices ==
+        std::vector<SimValue>{crash_choice(false), crash_choice(true)}) {
+      return nd->value == crash_choice(true);
     }
   }
   return false;
 }
 
 // Dump the global interleaving of an execution to stderr.
-static void dump_global_trace(const model::ExplorationGraph& graph) {
+static void dump_global_trace(const ExplorationGraph& graph) {
   for (auto id : graph.insertion_order()) {
     const auto& evt = graph.event(id);
     std::cerr << "  event " << id
@@ -504,7 +506,7 @@ TEST_CASE("SimEnvironment replays bottom as timer firing",
   };
 
   TimerThenSend protocol;
-  ThreadTrace trace{model::ObservedValue::bottom()};
+  ThreadTrace trace{ObservedValue::bottom()};
   SimEnvironment env(participant_to_thread, /*target_io=*/1, trace,
                      /*trace_offset=*/0);
 
@@ -514,7 +516,7 @@ TEST_CASE("SimEnvironment replays bottom as timer firing",
   const auto* send = std::get_if<SendLabel>(&*label);
   REQUIRE(send != nullptr);
   REQUIRE(send->destination == participant_to_thread(1));
-  REQUIRE(send->value == tpc::serialize(tpc::Prepare{}));
+  REQUIRE(send->value == prepare_message());
 }
 
 TEST_CASE("SimEnvironment replays timer-callback sends before later target steps",
@@ -537,7 +539,7 @@ TEST_CASE("SimEnvironment replays timer-callback sends before later target steps
   };
 
   TimerSendThenWait protocol;
-  ThreadTrace trace{model::ObservedValue::bottom()};
+  ThreadTrace trace{ObservedValue::bottom()};
   SimEnvironment env(participant_to_thread, /*target_io=*/2, trace,
                      /*trace_offset=*/0);
 
@@ -575,7 +577,7 @@ TEST_CASE("SimEnvironment refreshes the active timer when the id is reused",
   };
 
   ReplaceTimer protocol;
-  ThreadTrace trace{model::ObservedValue::bottom()};
+  ThreadTrace trace{ObservedValue::bottom()};
   SimEnvironment env(participant_to_thread, /*target_io=*/1, trace,
                      /*trace_offset=*/0);
 
@@ -586,7 +588,7 @@ TEST_CASE("SimEnvironment refreshes the active timer when the id is reused",
   const auto* send = std::get_if<SendLabel>(&*label);
   REQUIRE(send != nullptr);
   REQUIRE(send->destination == participant_to_thread(1));
-  REQUIRE(send->value == tpc::serialize(tpc::Ack{1}));
+  REQUIRE(send->value == ack_message(1));
 }
 
 TEST_CASE("SimEnvironment rejects multiple simultaneous active timers",
@@ -623,7 +625,7 @@ TEST_CASE("2PC basic exploration with 2 participants",
           "[two_phase_commit]") {
   auto prog = make_two_phase_commit_program(2);
 
-  algo::DporConfig config;
+  DporConfig config;
   config.program = std::move(prog);
 
   const auto result = algo::verify(config);
@@ -643,9 +645,9 @@ TEST_CASE("2PC DPOR explores participant local timeout executions",
 
   bool saw_local_timeout = false;
 
-  algo::DporConfig config;
+  DporConfig config;
   config.program = std::move(prog);
-  config.on_execution = [&](const model::ExplorationGraph& graph) {
+  config.on_execution = [&](const ExplorationGraph& graph) {
     for (std::size_t pid = 1; pid <= kNumParticipants; ++pid) {
       if (participant_timed_out_locally(graph, pid)) {
         saw_local_timeout = true;
@@ -665,15 +667,15 @@ TEST_CASE("2PC agreement invariant: all decided participants agree",
 
   bool invariant_violated = false;
 
-  algo::DporConfig config;
+  DporConfig config;
   config.program = std::move(prog);
-  config.on_execution = [&](const model::ExplorationGraph& graph) {
+  config.on_execution = [&](const ExplorationGraph& graph) {
     if (coordinator_crashed(graph, kNumParticipants)) {
       return;
     }
 
     // Collect decisions from all participants that received one.
-    std::set<std::string> decisions;
+    std::set<tpc::Decision> decisions;
     for (std::size_t pid = 1; pid <= kNumParticipants; ++pid) {
       auto dec = get_participant_decision(graph, pid);
       if (dec.has_value()) {
@@ -699,9 +701,9 @@ TEST_CASE("2PC validity invariant: Commit implies all voted Yes",
 
   bool invariant_violated = false;
 
-  algo::DporConfig config;
+  DporConfig config;
   config.program = std::move(prog);
-  config.on_execution = [&](const model::ExplorationGraph& graph) {
+  config.on_execution = [&](const ExplorationGraph& graph) {
     if (coordinator_crashed(graph, kNumParticipants)) {
       return;
     }
@@ -710,7 +712,7 @@ TEST_CASE("2PC validity invariant: Commit implies all voted Yes",
     bool has_commit = false;
     for (std::size_t pid = 1; pid <= kNumParticipants; ++pid) {
       auto dec = get_participant_decision(graph, pid);
-      if (dec.has_value() && *dec == "DECISION COMMIT") {
+      if (dec == tpc::Decision::Commit) {
         has_commit = true;
       }
     }
@@ -721,7 +723,7 @@ TEST_CASE("2PC validity invariant: Commit implies all voted Yes",
 
     // If Commit was decided, all participants must have voted Yes.
     for (std::size_t pid = 1; pid <= kNumParticipants; ++pid) {
-      if (get_participant_vote(graph, pid) != "YES") {
+      if (get_participant_vote(graph, pid) != tpc::Vote::Yes) {
         invariant_violated = true;
       }
     }
@@ -740,9 +742,9 @@ TEST_CASE("2PC crash behavior: no participant decides after coordinator crash",
   bool invariant_violated = false;
   std::size_t crash_executions = 0;
 
-  algo::DporConfig config;
+  DporConfig config;
   config.program = std::move(prog);
-  config.on_execution = [&](const model::ExplorationGraph& graph) {
+  config.on_execution = [&](const ExplorationGraph& graph) {
     if (!coordinator_crashed(graph, kNumParticipants)) {
       return;
     }
@@ -769,7 +771,7 @@ TEST_CASE("2PC without crashes explores timeout-inclusive executions for 2 parti
           "[two_phase_commit]") {
   auto prog = make_two_phase_commit_program(2, /*inject_crash=*/false);
 
-  algo::DporConfig config;
+  DporConfig config;
   config.program = std::move(prog);
 
   const auto result = algo::verify(config);
@@ -781,7 +783,7 @@ TEST_CASE("2PC without crashes explores timeout-inclusive executions for 2 parti
 TEST_CASE("2PC scales to 3 participants", "[two_phase_commit]") {
   auto prog = make_two_phase_commit_program(3);
 
-  algo::DporConfig config;
+  DporConfig config;
   config.program = std::move(prog);
 
   const auto result = algo::verify(config);
@@ -794,7 +796,7 @@ TEST_CASE("2PC protocol bug surfaces as exception, not silent success",
   auto prog = make_two_phase_commit_program(2, /*inject_crash=*/false,
                                             /*bug_on_p1_no=*/true);
 
-  algo::DporConfig config;
+  DporConfig config;
   config.program = std::move(prog);
 
   // The buggy coordinator throws when participant 1 votes No.
@@ -810,16 +812,16 @@ TEST_CASE("2PC false invariant is detected: Abort implies some voted No",
 
   bool invariant_violated = false;
 
-  algo::DporConfig config;
+  DporConfig config;
   config.program = std::move(prog);
-  config.on_execution = [&](const model::ExplorationGraph& graph) {
+  config.on_execution = [&](const ExplorationGraph& graph) {
     // False invariant: "if the decision is Abort, then at least one
     // participant voted No."  This is actually true for 2PC, so let's
     // check the *opposite*: "Abort never happens."  Since participants
     // can vote No, this must be violated in at least one execution.
     for (std::size_t pid = 1; pid <= kNumParticipants; ++pid) {
       auto dec = get_participant_decision(graph, pid);
-      if (dec.has_value() && *dec == "DECISION ABORT") {
+      if (dec == tpc::Decision::Abort) {
         if (!invariant_violated) {
           std::cerr << "Invariant violated! Global trace:\n";
           dump_global_trace(graph);
