@@ -680,9 +680,8 @@ class ExplorationGraphT {
     }
   }
 
-  void add_rf_edges(
-      std::vector<std::vector<EventId>>& successors,
-      std::vector<std::size_t>& in_degree) const {
+  template <typename Callback>
+  void for_each_validated_rf_edge(Callback&& callback) const {
     for (const auto& [recv_id, source] : reads_from()) {
       if (!is_valid_event_id(recv_id)) {
         throw std::invalid_argument("reads-from relation refers to an unknown receive event id");
@@ -700,9 +699,17 @@ class ExplorationGraphT {
       if (!is_send(event(source_id))) {
         throw std::invalid_argument("reads-from relation source event is not a send");
       }
+      callback(source_id, recv_id);
+    }
+  }
+
+  void add_rf_edges(
+      std::vector<std::vector<EventId>>& successors,
+      std::vector<std::size_t>& in_degree) const {
+    for_each_validated_rf_edge([&](const EventId source_id, const EventId recv_id) {
       successors[source_id].push_back(recv_id);
       ++in_degree[recv_id];
-    }
+    });
   }
 
   [[nodiscard]] std::vector<std::size_t> compute_successor_out_degree(
@@ -713,25 +720,9 @@ class ExplorationGraphT {
         ++out_degree[events[i - 1]];
       }
     }
-    for (const auto& [recv_id, source] : reads_from()) {
-      if (!is_valid_event_id(recv_id)) {
-        throw std::invalid_argument("reads-from relation refers to an unknown receive event id");
-      }
-      if (!is_receive(event(recv_id))) {
-        throw std::invalid_argument("reads-from relation target event is not a receive");
-      }
-      if (source.is_bottom()) {
-        continue;
-      }
-      const auto source_id = source.send_id();
-      if (!is_valid_event_id(source_id)) {
-        throw std::invalid_argument("reads-from relation source refers to an unknown send event id");
-      }
-      if (!is_send(event(source_id))) {
-        throw std::invalid_argument("reads-from relation source event is not a send");
-      }
+    for_each_validated_rf_edge([&](const EventId source_id, const EventId /*recv_id*/) {
       ++out_degree[source_id];
-    }
+    });
     return out_degree;
   }
 
