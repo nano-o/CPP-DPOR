@@ -630,6 +630,31 @@ Phase 5.5 measurement plan:
 2. after all landings, rerun the timeout benchmark and `perf`
 3. confirm execution count unchanged, then compare `elapsed_ms` and hotspot shapes
 
+Phase 5.5 measurement result:
+
+- On the same `participants=4`, `iterations=1`, `--no-crash` timeout benchmark used throughout this plan, the Phase 5.5 implementation improved further relative to the Phase 5 baseline:
+  - `59eb233` (Phase 5 baseline): `91023.412 ms`
+  - Phase 5.5 implementation: `79002.909 ms`
+  - execution count stayed unchanged at `7262928`
+  - net improvement versus Phase 5: `12020.503 ms` (`13.2%`, about `1.15x` faster)
+- A fresh post-Phase-5.5 `perf` capture was recorded with `benchmarks/profile_two_phase_commit_timeout_perf.sh --participants 4`. Under that `RelWithDebInfo` profiling build, the benchmark run was `79992.154 ms` and `perf` captured `39889` samples.
+- The targeted easy hotspots moved the way this phase intended:
+  - the old `vector::_M_realloc_insert` hotspot from PORF successor growth is no longer a leading self hotspot
+  - the old `unordered_map<EventId, EventId>::operator[]` hotspot is no longer a leading self hotspot
+  - `restrict()` / revisit scratch state no longer spends visible top-self time in `unordered_set<EventId>` construction
+- The remaining DPOR-specific self hotspots after Phase 5.5 were more concentrated in the next layer down:
+  - `ExecutionGraphT::add_event_with_index(...)`: `1.48%`
+  - `ExplorationGraphT::add_rf_edges(...)`: `1.41%`
+  - `ExplorationGraphT::porf_contains(...)`: `0.98%`
+  - `ExplorationGraphT::restrict_from_keep_mask(...)`: `0.85%`
+  - `compute_next_event(...)`: `0.84%`
+  - `ExplorationGraphT::set_reads_from_source(...)`: `0.82%`
+- The remaining profile shape is the important follow-up signal:
+  - revisit-local materialization is now clearer as the next target
+  - `with_rf()` / `ExecutionGraphT` copy costs, including `used_event_indices_by_thread_` copying, are still visible
+  - allocator-heavy destructor/copy stacks now dominate more than the earlier obvious hash-map / reallocation artifacts
+- Conclusion: Phase 5.5 delivered the intended low-risk cleanup win and removed the newly exposed obvious hotspots. That strengthens the case for Phase 6 rather than weakening it: the next meaningful work should target revisit-specific graph materialization and copy costs.
+
 ### Phase 6: Tackle Revisit-Specific Materialization
 
 Only after the forward path is cheaper and the representation cleanups are done should revisit-heavy structure be attacked:

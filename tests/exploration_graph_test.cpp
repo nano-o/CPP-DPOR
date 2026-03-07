@@ -727,6 +727,36 @@ TEST_CASE("restrict preserves porf reachability on subset", "[model][exploration
   REQUIRE_FALSE(restricted.porf_contains(1, 0));
 }
 
+TEST_CASE("internal masked restrict matches public restrict", "[model][exploration_graph][restrict]") {
+  ExplorationGraph g;
+  const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r = g.add_event(2, make_receive_label<Value>());
+  const auto s2 = g.add_event(2, SendLabel{.destination = 3, .value = "y"});
+  g.set_reads_from(r, s);
+
+  std::unordered_set<ExplorationGraph::EventId> keep{s, r};
+  const auto via_public = g.restrict(keep);
+
+  std::vector<std::uint8_t> keep_mask(g.event_count(), 0);
+  keep_mask[s] = 1;
+  keep_mask[r] = 1;
+  const auto via_mask = dpor::model::detail::restrict_masked(g, keep_mask);
+
+  REQUIRE(via_mask.event_count() == via_public.event_count());
+  REQUIRE(via_mask.insertion_order() == via_public.insertion_order());
+  REQUIRE(via_mask.event(0).thread == via_public.event(0).thread);
+  REQUIRE(via_mask.event(1).thread == via_public.event(1).thread);
+  REQUIRE(dpor::model::as_send(via_mask.event(0)) != nullptr);
+  REQUIRE(dpor::model::as_receive(via_mask.event(1)) != nullptr);
+  const auto via_mask_rf = via_mask.reads_from().find(1);
+  const auto via_public_rf = via_public.reads_from().find(1);
+  REQUIRE(via_mask_rf != via_mask.reads_from().end());
+  REQUIRE(via_public_rf != via_public.reads_from().end());
+  REQUIRE(via_mask_rf->second == via_public_rf->second);
+  REQUIRE_FALSE(via_mask.has_porf_cache());
+  REQUIRE(via_mask.porf_contains(0, 1));
+}
+
 TEST_CASE("with_rf invalidation produces distinct reachability", "[model][exploration_graph][porf_cache]") {
   ExplorationGraph g;
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "a"});

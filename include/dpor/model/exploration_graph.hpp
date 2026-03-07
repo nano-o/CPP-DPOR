@@ -34,12 +34,23 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace dpor::model {
+
+template <typename ValueT>
+class ExplorationGraphT;
+
+namespace detail {
+
+template <typename ValueT>
+[[nodiscard]] ExplorationGraphT<ValueT> restrict_masked(
+    const ExplorationGraphT<ValueT>& graph,
+    const std::vector<std::uint8_t>& keep_mask);
+
+}  // namespace detail
 
 // Per-thread structural metadata maintained incrementally by add_event().
 // Enables O(1) thread_event_count(), thread_is_terminated(), and last_event_id().
@@ -341,55 +352,13 @@ class ExplorationGraphT {
   // Returns a new graph containing only the events in keep_set.
   // IDs are remapped to [0, keep_set.size()), preserving relative insertion order.
   [[nodiscard]] ExplorationGraphT restrict(const std::unordered_set<EventId>& keep_set) const {
-    // Build a list of kept events in insertion order.
-    std::vector<EventId> kept_ids;
-    kept_ids.reserve(keep_set.size());
-    for (const auto old_id : insertion_order_) {
-      if (keep_set.count(old_id) != 0U) {
-        kept_ids.push_back(old_id);
+    std::vector<std::uint8_t> keep_mask(event_count(), 0);
+    for (const auto kept_id : keep_set) {
+      if (kept_id < keep_mask.size()) {
+        keep_mask[kept_id] = 1;
       }
     }
-
-    // Build old->new ID mapping.
-    std::unordered_map<EventId, EventId> id_map;
-    id_map.reserve(kept_ids.size());
-    for (EventId new_id = 0; new_id < kept_ids.size(); ++new_id) {
-      id_map[kept_ids[new_id]] = new_id;
-    }
-
-    ExplorationGraphT result;
-
-    // Re-insert events in insertion order with remapped IDs.
-    for (const auto old_id : kept_ids) {
-      const auto& evt = event(old_id);
-      auto label = evt.label;
-
-      // Remap send destination: destinations are thread IDs, not event IDs,
-      // so they stay unchanged.
-      const auto new_id = result.add_event(evt.thread, std::move(label));
-      static_cast<void>(new_id);
-    }
-
-    // Remap reads-from edges.
-    const auto& rf = reads_from();
-    for (const auto& [recv_id, source] : rf) {
-      auto recv_it = id_map.find(recv_id);
-      if (recv_it == id_map.end()) {
-        continue;
-      }
-      if (source.is_bottom()) {
-        result.set_reads_from_bottom(recv_it->second);
-        continue;
-      }
-      auto source_it = id_map.find(source.send_id());
-      if (source_it != id_map.end()) {
-        result.set_reads_from(recv_it->second, source_it->second);
-      }
-    }
-
-    result.invalidate_known_acyclicity();
-    result.clear_worker_local_history();
-    return result;
+    return restrict_from_keep_mask(keep_mask);
   }
 
   // Returns a copy with the rf assignment for recv changed to send.
@@ -500,6 +469,11 @@ class ExplorationGraphT {
   }
 
  private:
+  template <typename U>
+  friend ExplorationGraphT<U> detail::restrict_masked(
+      const ExplorationGraphT<U>& graph,
+      const std::vector<std::uint8_t>& keep_mask);
+
   ExecutionGraphT<ValueT> graph_{};
   std::vector<EventId> insertion_order_{};
   std::vector<std::size_t> insertion_position_{};
@@ -538,6 +512,60 @@ class ExplorationGraphT {
   void clear_worker_local_history() {
     event_undo_log_.clear();
     rf_undo_log_.clear();
+  }
+
+  [[nodiscard]] ExplorationGraphT restrict_from_keep_mask(
+      const std::vector<std::uint8_t>& keep_mask) const {
+    if (keep_mask.size() != event_count()) {
+      throw std::invalid_argument("keep mask size must match event count");
+    }
+
+    std::vector<EventId> kept_ids;
+    kept_ids.reserve(std::count(keep_mask.begin(), keep_mask.end(), std::uint8_t{1}));
+    std::vector<EventId> id_map(event_count(), kNoSource);
+
+    EventId new_id = 0;
+    for (const auto old_id : insertion_order_) {
+      if (keep_mask[old_id] == 0U) {
+        continue;
+      }
+      kept_ids.push_back(old_id);
+      id_map[old_id] = new_id++;
+    }
+
+    ExplorationGraphT result;
+
+    // Re-insert events in insertion order with remapped IDs.
+    for (const auto old_id : kept_ids) {
+      const auto& evt = event(old_id);
+      auto label = evt.label;
+
+      // Remap send destination: destinations are thread IDs, not event IDs,
+      // so they stay unchanged.
+      const auto remapped_id = result.add_event(evt.thread, std::move(label));
+      static_cast<void>(remapped_id);
+    }
+
+    // Remap reads-from edges.
+    const auto& rf = reads_from();
+    for (const auto& [recv_id, source] : rf) {
+      const auto remapped_recv = id_map[recv_id];
+      if (remapped_recv == kNoSource) {
+        continue;
+      }
+      if (source.is_bottom()) {
+        result.set_reads_from_bottom(remapped_recv);
+        continue;
+      }
+      const auto remapped_source = id_map[source.send_id()];
+      if (remapped_source != kNoSource) {
+        result.set_reads_from(remapped_recv, remapped_source);
+      }
+    }
+
+    result.invalidate_known_acyclicity();
+    result.clear_worker_local_history();
+    return result;
   }
 
   [[nodiscard]] std::optional<ReadsFromSource> current_reads_from_source(EventId receive_id) const {
@@ -677,11 +705,45 @@ class ExplorationGraphT {
     }
   }
 
+  [[nodiscard]] std::vector<std::size_t> compute_successor_out_degree(
+      const std::vector<std::vector<EventId>>& thread_events) const {
+    std::vector<std::size_t> out_degree(event_count(), 0);
+    for (const auto& events : thread_events) {
+      for (std::size_t i = 1; i < events.size(); ++i) {
+        ++out_degree[events[i - 1]];
+      }
+    }
+    for (const auto& [recv_id, source] : reads_from()) {
+      if (!is_valid_event_id(recv_id)) {
+        throw std::invalid_argument("reads-from relation refers to an unknown receive event id");
+      }
+      if (!is_receive(event(recv_id))) {
+        throw std::invalid_argument("reads-from relation target event is not a receive");
+      }
+      if (source.is_bottom()) {
+        continue;
+      }
+      const auto source_id = source.send_id();
+      if (!is_valid_event_id(source_id)) {
+        throw std::invalid_argument("reads-from relation source refers to an unknown send event id");
+      }
+      if (!is_send(event(source_id))) {
+        throw std::invalid_argument("reads-from relation source event is not a send");
+      }
+      ++out_degree[source_id];
+    }
+    return out_degree;
+  }
+
   [[nodiscard]] PorfGraphStructure build_porf_graph_structure() const {
     PorfGraphStructure porf_graph;
     porf_graph.thread_events = build_thread_events();
     porf_graph.successors.assign(event_count(), {});
     porf_graph.in_degree.assign(event_count(), 0);
+    const auto out_degree = compute_successor_out_degree(porf_graph.thread_events);
+    for (EventId id = 0; id < event_count(); ++id) {
+      porf_graph.successors[id].reserve(out_degree[id]);
+    }
     add_po_edges(porf_graph.thread_events, porf_graph.successors, porf_graph.in_degree);
     add_rf_edges(porf_graph.successors, porf_graph.in_degree);
     return porf_graph;
@@ -760,8 +822,7 @@ class ExplorationGraphT {
 
     // Pre-compute rf target mapping: recv_id -> source_id.
     // All edges are already validated by the adjacency-building loop above.
-    std::unordered_map<EventId, EventId> rf_source;
-    rf_source.reserve(reads_from().size());
+    std::vector<EventId> rf_source(n, kNoSource);
     for (const auto& [recv_id, source] : reads_from()) {
       if (source.is_send()) {
         rf_source[recv_id] = source.send_id();
@@ -769,8 +830,7 @@ class ExplorationGraphT {
     }
 
     // Pre-compute po predecessor: for each event that has a po predecessor.
-    std::unordered_map<EventId, EventId> po_pred;
-    po_pred.reserve(n);
+    std::vector<EventId> po_pred(n, kNoSource);
     for (const auto& evts : porf_graph.thread_events) {
       for (std::size_t i = 1; i < evts.size(); ++i) {
         po_pred[evts[i]] = evts[i - 1];
@@ -781,15 +841,13 @@ class ExplorationGraphT {
       auto& clock = cache->clocks[id];
 
       // Start with po-predecessor's clock.
-      auto po_it = po_pred.find(id);
-      if (po_it != po_pred.end()) {
-        clock = cache->clocks[po_it->second];
+      if (po_pred[id] != kNoSource) {
+        clock = cache->clocks[po_pred[id]];
       }
 
       // Join with rf source's clock (pointwise max).
-      auto rf_it = rf_source.find(id);
-      if (rf_it != rf_source.end()) {
-        const auto& src_clock = cache->clocks[rf_it->second];
+      if (rf_source[id] != kNoSource) {
+        const auto& src_clock = cache->clocks[rf_source[id]];
         for (std::size_t i = 0; i < width; ++i) {
           clock[i] = std::max(clock[i], src_clock[i]);
         }
@@ -804,6 +862,17 @@ class ExplorationGraphT {
     porf_cache_ = std::move(cache);
   }
 };
+
+namespace detail {
+
+template <typename ValueT>
+[[nodiscard]] ExplorationGraphT<ValueT> restrict_masked(
+    const ExplorationGraphT<ValueT>& graph,
+    const std::vector<std::uint8_t>& keep_mask) {
+  return graph.restrict_from_keep_mask(keep_mask);
+}
+
+}  // namespace detail
 
 using ExplorationGraph = ExplorationGraphT<Value>;
 

@@ -1444,9 +1444,9 @@ TEST_CASE("receive revisit condition should use tiebreaker from G|Previous", "[a
   const auto revisiting_send = graph.add_event(3, SendLabel{.destination = 9, .value = "y"});
 
   const auto previous = dpor::algo::detail::compute_previous_set(graph, receive, revisiting_send);
-  REQUIRE(previous.count(send_outside_previous) == 0U);
+  REQUIRE(previous[send_outside_previous] == 0U);
 
-  const auto restricted = graph.restrict(previous);
+  const auto restricted = dpor::model::detail::restrict_masked(graph, previous);
   const auto recv_in_previous = find_event_id_by_thread_index(restricted, 1, 0);
   REQUIRE(recv_in_previous != ExplorationGraph::kNoSource);
 
@@ -1479,7 +1479,7 @@ TEST_CASE("receive revisit condition rejects rf source outside G|Previous", "[al
   // For this pair (receive, revisiting_send), Previous does not include the
   // current rf source.
   const auto previous = dpor::algo::detail::compute_previous_set(graph, receive, revisiting_send);
-  REQUIRE(previous.count(source_outside_previous) == 0U);
+  REQUIRE(previous[source_outside_previous] == 0U);
 
   // Under Algorithm 1, rf(e) cannot equal a tiebreaker computed on G|Previous
   // if rf(e) is outside Previous.

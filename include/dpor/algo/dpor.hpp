@@ -15,12 +15,12 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -132,25 +132,24 @@ compute_next_event(
 
 // Compute the "Previous" set: {e' ∈ G.E | e' ≤_G e ∨ ⟨e', s⟩ ∈ G.porf}.
 template <typename ValueT>
-[[nodiscard]] inline std::unordered_set<typename model::ExplorationGraphT<ValueT>::EventId>
+[[nodiscard]] inline std::vector<std::uint8_t>
 compute_previous_set(
     const model::ExplorationGraphT<ValueT>& graph,
     typename model::ExplorationGraphT<ValueT>::EventId e,
     typename model::ExplorationGraphT<ValueT>::EventId s) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
 
-  std::unordered_set<EvId> result;
-
   const auto n = graph.event_count();
+  std::vector<std::uint8_t> result(n, 0);
   for (EvId ep = 0; ep < n; ++ep) {
     // e' ≤_G e: ep was inserted before or at e.
     if (graph.inserted_before_or_equal(ep, e)) {
-      result.insert(ep);
+      result[ep] = 1;
       continue;
     }
     // ⟨e', s⟩ ∈ G.porf: ep reaches s through (po ∪ rf)+.
     if (graph.porf_contains(ep, s)) {
-      result.insert(ep);
+      result[ep] = 1;
     }
   }
 
@@ -280,7 +279,10 @@ template <typename ValueT>
   // reads from e.
   if (!model::is_receive(evt)) {
     const auto previous = compute_previous_set(graph, e, s);
-    for (const auto ep : previous) {
+    for (EvId ep = 0; ep < previous.size(); ++ep) {
+      if (previous[ep] == 0U) {
+        continue;
+      }
       if (model::is_receive(graph.event(ep))) {
         auto it = graph.reads_from().find(ep);
         if (it != graph.reads_from().end() &&
@@ -297,25 +299,24 @@ template <typename ValueT>
   // Must Algorithm 1 requires the tiebreaker to be computed on G restricted
   // to the Previous set, not the full graph.
   const auto previous = compute_previous_set(graph, e, s);
-  auto restricted = graph.restrict(previous);
+  auto restricted = model::detail::restrict_masked(graph, previous);
 
   // Build old-to-new ID mapping for events kept in the restricted graph.
-  std::unordered_map<EvId, EvId> id_map;
+  std::vector<EvId> id_map(graph.event_count(), kNoSource);
   {
     EvId new_id = 0;
     for (const auto old_id : graph.insertion_order()) {
-      if (previous.count(old_id) != 0U) {
+      if (previous[old_id] != 0U) {
         id_map[old_id] = new_id++;
       }
     }
   }
 
   // Remap e to its ID in the restricted graph.
-  auto e_it = id_map.find(e);
-  if (e_it == id_map.end()) {
+  const auto remapped_e = id_map[e];
+  if (remapped_e == kNoSource) {
     throw std::logic_error("revisit_condition invariant violated: event missing from Previous");
   }
-  const auto remapped_e = e_it->second;
 
   // Remap current rf(e) to its ID in the restricted graph.
   // If rf(e) is not in Previous, the equality must fail (it cannot match any
@@ -330,14 +331,13 @@ template <typename ValueT>
         "revisit_condition invariant violated: blocking receive reads from bottom");
   }
   const auto current_rf_original = rf_it->second.send_id();
-  auto rf_map_it = id_map.find(current_rf_original);
-  if (rf_map_it == id_map.end()) {
+  const auto remapped_rf = id_map[current_rf_original];
+  if (remapped_rf == kNoSource) {
     // This is a normal blocking-receive failure case, not an invariant break:
     // Algorithm 1 compares rf(e) against a tiebreaker computed on G|Previous,
     // so if the current source is not in Previous the equality cannot hold.
     return false;
   }
-  const EvId remapped_rf = rf_map_it->second;
 
   const auto tiebreaker = get_cons_tiebreaker(restricted, remapped_e);
   return remapped_rf == tiebreaker;
@@ -382,14 +382,13 @@ template <typename ValueT>
       continue;
     }
 
-    std::unordered_set<EvId> keep_set;
-    keep_set.reserve(graph.event_count());
+    std::vector<std::uint8_t> keep_mask(graph.event_count(), 1);
     for (EvId id = 0; id < graph.event_count(); ++id) {
-      if (id != last_id) {
-        keep_set.insert(id);
+      if (id == last_id) {
+        keep_mask[id] = 0;
       }
     }
-    auto unblocked_graph = graph.restrict(keep_set);
+    auto unblocked_graph = model::detail::restrict_masked(graph, keep_mask);
 
     const auto& thread_fn = program.threads.at(tid);
     const auto trace = unblocked_graph.thread_trace(tid);
@@ -475,7 +474,7 @@ inline void backward_revisit(
     // Line 11: Deleted = {e' ∈ G.E | r <_G e' ∧ ⟨e', send⟩ ∉ G.porf}
     // Note: send_id itself is never deleted — porf is irreflexive, but the
     // send trivially "reaches itself" in the paper's reflexive reading.
-    std::unordered_set<EvId> deleted;
+    std::vector<std::uint8_t> deleted(graph.event_count(), 0);
     for (EvId ep = 0; ep < graph.event_count(); ++ep) {
       if (ep == recv_id || ep == send_id) {
         continue;
@@ -485,7 +484,7 @@ inline void backward_revisit(
       }
       // ep is strictly after r in insertion order.
       if (!graph.porf_contains(ep, send_id)) {
-        deleted.insert(ep);
+        deleted[ep] = 1;
       }
     }
 
@@ -494,7 +493,10 @@ inline void backward_revisit(
       continue;
     }
     bool all_pass = true;
-    for (const auto ep : deleted) {
+    for (EvId ep = 0; ep < deleted.size(); ++ep) {
+      if (deleted[ep] == 0U) {
+        continue;
+      }
       if (!revisit_condition(graph, ep, send_id)) {
         all_pass = false;
         break;
@@ -505,33 +507,30 @@ inline void backward_revisit(
     }
 
     // Line 13: keep_set = G.E \ Deleted.
-    std::unordered_set<EvId> keep_set;
+    std::vector<std::uint8_t> keep_mask(graph.event_count(), 1);
     for (EvId ep = 0; ep < graph.event_count(); ++ep) {
-      if (deleted.count(ep) == 0U) {
-        keep_set.insert(ep);
+      if (deleted[ep] != 0U) {
+        keep_mask[ep] = 0;
       }
     }
 
-    auto restricted = graph.restrict(keep_set);
+    auto restricted = model::detail::restrict_masked(graph, keep_mask);
 
     // Map old IDs to new IDs in the restricted graph.
-    std::vector<EvId> kept_in_order;
-    kept_in_order.reserve(keep_set.size());
-    for (const auto old_id : graph.insertion_order()) {
-      if (keep_set.count(old_id) != 0U) {
-        kept_in_order.push_back(old_id);
-      }
-    }
-
     EvId new_recv_id = model::ExplorationGraphT<ValueT>::kNoSource;
     EvId new_send_id = model::ExplorationGraphT<ValueT>::kNoSource;
-    for (EvId new_id = 0; new_id < kept_in_order.size(); ++new_id) {
-      if (kept_in_order[new_id] == recv_id) {
+    EvId new_id = 0;
+    for (const auto old_id : graph.insertion_order()) {
+      if (keep_mask[old_id] == 0U) {
+        continue;
+      }
+      if (old_id == recv_id) {
         new_recv_id = new_id;
       }
-      if (kept_in_order[new_id] == send_id) {
+      if (old_id == send_id) {
         new_send_id = new_id;
       }
+      ++new_id;
     }
 
     if (new_recv_id == model::ExplorationGraphT<ValueT>::kNoSource ||
