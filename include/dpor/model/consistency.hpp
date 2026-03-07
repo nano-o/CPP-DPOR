@@ -64,6 +64,9 @@ class AsyncConsistencyCheckerT {
     if (!validation.cycle_query_safe) {
       return validation.result;
     }
+    if (graph.is_known_acyclic()) {
+      return validation.result;
+    }
 
     const bool has_cycle = graph.has_porf_cache()
         ? graph.has_causal_cycle()

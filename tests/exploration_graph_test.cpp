@@ -253,6 +253,88 @@ TEST_CASE("with_nd_value returns copy with changed ND value", "[model][explorati
   REQUIRE(new_nd->value == "new");
 }
 
+// --- known acyclic metadata ---
+
+TEST_CASE("known acyclicity is preserved on safe forward appends",
+    "[model][exploration_graph][known_acyclic]") {
+  ExplorationGraph g;
+  REQUIRE(g.is_known_acyclic());
+
+  const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  REQUIRE(g.is_known_acyclic());
+
+  const auto r = g.add_event(2, make_receive_label<Value>());
+  REQUIRE(g.is_known_acyclic());
+  g.set_reads_from(r, s);
+  REQUIRE(g.is_known_acyclic());
+
+  const auto nb = g.add_event(2, make_nonblocking_receive_label<Value>());
+  REQUIRE(g.is_known_acyclic());
+  g.set_reads_from_bottom(nb);
+  REQUIRE(g.is_known_acyclic());
+}
+
+TEST_CASE("with_nd_value preserves known acyclicity metadata",
+    "[model][exploration_graph][known_acyclic]") {
+  ExplorationGraph g;
+  const auto nd = g.add_event(
+      1, NondeterministicChoiceLabel{.value = "old", .choices = {"old", "new"}});
+
+  REQUIRE(g.is_known_acyclic());
+  const auto g2 = g.with_nd_value(nd, "new");
+  REQUIRE(g2.is_known_acyclic());
+}
+
+TEST_CASE("older fresh receives lose the append-only fast path once they stop being leaves",
+    "[model][exploration_graph][known_acyclic]") {
+  ExplorationGraph g;
+  const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r = g.add_event(2, make_receive_label<Value>());
+
+  REQUIRE(g.is_known_acyclic());
+
+  static_cast<void>(g.add_event(2, SendLabel{.destination = 1, .value = "y"}));
+  REQUIRE(g.is_known_acyclic());
+
+  g.set_reads_from(r, s);
+  REQUIRE_FALSE(g.is_known_acyclic());
+}
+
+TEST_CASE("rewriting rf on a pre-existing receive clears known acyclicity",
+    "[model][exploration_graph][known_acyclic]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r = g.add_event(2, make_receive_label<Value>());
+  g.set_reads_from(r, s1);
+
+  REQUIRE(g.is_known_acyclic());
+
+  const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
+  REQUIRE(g.is_known_acyclic());
+
+  g.set_reads_from(r, s2);
+  REQUIRE_FALSE(g.is_known_acyclic());
+}
+
+TEST_CASE("restrict and rf-copy helpers clear known acyclicity",
+    "[model][exploration_graph][known_acyclic]") {
+  ExplorationGraph g;
+  const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r = g.add_event(2, make_receive_label<Value>());
+  g.set_reads_from(r, s);
+
+  REQUIRE(g.is_known_acyclic());
+
+  const auto rewired = g.with_rf(r, s);
+  REQUIRE_FALSE(rewired.is_known_acyclic());
+
+  const auto bottomed = g.with_bottom_rf(r);
+  REQUIRE_FALSE(bottomed.is_known_acyclic());
+
+  const auto restricted = g.restrict({s, r});
+  REQUIRE_FALSE(restricted.is_known_acyclic());
+}
+
 // --- porf_contains ---
 
 TEST_CASE("porf_contains detects po reachability", "[model][exploration_graph]") {

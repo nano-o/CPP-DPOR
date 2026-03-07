@@ -624,6 +624,7 @@ TEST_CASE("exploration-graph checker overload leaves cold porf cache untouched",
   const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
   graph.set_reads_from(r, s);
 
+  REQUIRE(graph.is_known_acyclic());
   REQUIRE_FALSE(graph.has_porf_cache());
 
   const AsyncConsistencyChecker checker;
@@ -649,6 +650,28 @@ TEST_CASE("exploration-graph checker overload reuses warm porf cache",
 
   REQUIRE(result.is_consistent());
   REQUIRE(graph.has_porf_cache());
+}
+
+TEST_CASE("exploration-graph checker overload still detects cycles after with_rf clears known acyclicity",
+    "[model][consistency][exploration_graph]") {
+  ExplorationGraph graph;
+  const auto r1 = graph.add_event(1, make_receive_label<Value>());
+  const auto s1 = graph.add_event(1, SendLabel{.destination = 2, .value = "a"});
+  const auto r2 = graph.add_event(2, make_receive_label<Value>());
+  const auto s2 = graph.add_event(2, SendLabel{.destination = 1, .value = "b"});
+
+  graph.set_reads_from(r2, s1);
+
+  const auto revisited = graph.with_rf(r1, s2);
+  REQUIRE_FALSE(revisited.is_known_acyclic());
+  REQUIRE_FALSE(revisited.has_porf_cache());
+
+  const AsyncConsistencyChecker checker;
+  const auto execution_result = checker.check(revisited.execution_graph());
+  const auto exploration_result = checker.check(revisited);
+
+  REQUIRE(issue_codes(exploration_result) == issue_codes(execution_result));
+  REQUIRE(has_issue(exploration_result, ConsistencyIssueCode::CausalCycle));
 }
 
 // --- Custom value type ---

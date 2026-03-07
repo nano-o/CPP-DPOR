@@ -10,6 +10,8 @@
 // - thread_trace(tid): extracts value sequence for a thread
 // - porf_contains(from, to): checks (po ∪ rf)+ reachability
 // - has_porf_cache(): reports whether PORF reachability has been materialized
+// - is_known_acyclic(): reports whether append-only forward-path mutations have
+//   preserved a known-acyclic (po ∪ rf) structure
 // - has_causal_cycle_without_cache(): cycle-only check without building PORF cache
 // - receives_in_destination(send_id): receives in the send's destination thread
 // - has_causal_cycle(): cache-backed cycle check
@@ -27,6 +29,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <stdexcept>
 #include <string>
@@ -79,22 +82,26 @@ class ExplorationGraphT {
     assert(ts.last_event_id == kNoSource || event(id).index > event(ts.last_event_id).index);
     ts.event_count++;
     ts.last_event_id = id;
+    update_acyclicity_after_add_event(id);
     return id;
   }
 
   void set_reads_from(EventId receive_id, EventId source_id) {
     graph_.set_reads_from(receive_id, source_id);
     porf_cache_ = nullptr;
+    update_acyclicity_after_rf_assignment(receive_id);
   }
 
   void set_reads_from_source(EventId receive_id, ReadsFromSource source) {
     graph_.set_reads_from_source(receive_id, std::move(source));
     porf_cache_ = nullptr;
+    update_acyclicity_after_rf_assignment(receive_id);
   }
 
   void set_reads_from_bottom(EventId receive_id) {
     graph_.set_reads_from_bottom(receive_id);
     porf_cache_ = nullptr;
+    update_acyclicity_after_rf_assignment(receive_id);
   }
 
   [[nodiscard]] const Event& event(EventId id) const {
@@ -266,24 +273,28 @@ class ExplorationGraphT {
       }
     }
 
+    result.invalidate_known_acyclicity();
     return result;
   }
 
   // Returns a copy with the rf assignment for recv changed to send.
   [[nodiscard]] ExplorationGraphT with_rf(EventId recv, EventId send) const {
     auto copy = *this;
+    copy.invalidate_known_acyclicity();
     copy.set_reads_from(recv, send);
     return copy;
   }
 
   [[nodiscard]] ExplorationGraphT with_rf_source(EventId recv, ReadsFromSource source) const {
     auto copy = *this;
+    copy.invalidate_known_acyclicity();
     copy.set_reads_from_source(recv, std::move(source));
     return copy;
   }
 
   [[nodiscard]] ExplorationGraphT with_bottom_rf(EventId recv) const {
     auto copy = *this;
+    copy.invalidate_known_acyclicity();
     copy.set_reads_from_bottom(recv);
     return copy;
   }
@@ -325,6 +336,12 @@ class ExplorationGraphT {
 
   [[nodiscard]] bool has_porf_cache() const noexcept {
     return static_cast<bool>(porf_cache_);
+  }
+
+  // This tracks only the narrow append-only fast path. The checker still runs
+  // full endpoint/RF validation before using it.
+  [[nodiscard]] bool is_known_acyclic() const noexcept {
+    return known_acyclic_;
   }
 
   // Returns receive event IDs in the destination thread of the given send.
@@ -369,6 +386,8 @@ class ExplorationGraphT {
   std::vector<EventId> insertion_order_{};
   std::vector<std::size_t> insertion_position_{};
   std::vector<ThreadState> thread_state_{};
+  bool known_acyclic_{true};
+  std::optional<EventId> pending_fresh_receive_id_{};
   mutable std::shared_ptr<PorfCache> porf_cache_{};
 
   struct PorfGraphStructure {
@@ -376,6 +395,28 @@ class ExplorationGraphT {
     std::vector<std::vector<EventId>> successors{};
     std::vector<std::size_t> in_degree{};
   };
+
+  void invalidate_known_acyclicity() {
+    known_acyclic_ = false;
+    pending_fresh_receive_id_.reset();
+  }
+
+  void update_acyclicity_after_add_event(EventId event_id) {
+    pending_fresh_receive_id_.reset();
+    if (known_acyclic_ && is_receive(event(event_id))) {
+      pending_fresh_receive_id_ = event_id;
+    }
+  }
+
+  void update_acyclicity_after_rf_assignment(EventId receive_id) {
+    if (known_acyclic_ &&
+        pending_fresh_receive_id_.has_value() &&
+        *pending_fresh_receive_id_ == receive_id) {
+      pending_fresh_receive_id_.reset();
+      return;
+    }
+    invalidate_known_acyclicity();
+  }
 
   // ExplorationGraphT only grows through add_event(), which assigns fresh
   // monotonic per-thread indices. Scanning events in ID order therefore
