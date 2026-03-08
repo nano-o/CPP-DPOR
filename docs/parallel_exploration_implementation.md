@@ -89,6 +89,18 @@ For ND and receive branches, the enqueue budget is a best-effort snapshot:
 This avoids copying child graphs for siblings that cannot fit in the queue
 under the current backlog pressure.
 
+An exact-reservation variant for ND/receive branches was also tested: reserve
+queue capacity first, eagerly materialize and enqueue exactly those reserved
+siblings, then recurse locally. On the timeout benchmark (`participants=4`,
+`--parallel --max-workers 8`) that was consistently worse than the current
+snapshot-budget heuristic:
+
+- default queue budget: `12815.865 ms -> 17183.547 ms`
+- `--max-queued-tasks 1`: `13380.854 ms -> 17829.186 ms`
+
+The likely reason is that eager reserved enqueue pays remote copy/materialize
+cost before the local work-first path can make progress.
+
 ## Branch Handling
 
 The implementation parallelizes only at existing DPOR branch points.
