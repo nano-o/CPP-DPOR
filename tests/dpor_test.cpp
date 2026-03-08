@@ -104,22 +104,6 @@ ObservedRun collect_observed_executions(
   return observed_run;
 }
 
-ParallelVerifyOptions make_parallel_options(
-    const std::size_t max_workers,
-    const std::size_t max_queued_tasks,
-    const ParallelSchedulerPolicy scheduler_policy =
-        ParallelSchedulerPolicy::QueueBacklog,
-    const std::size_t max_acquired_workers = 0,
-    const std::size_t max_send_revisits_remote = 2) {
-  ParallelVerifyOptions options;
-  options.max_workers = max_workers;
-  options.max_queued_tasks = max_queued_tasks;
-  options.scheduler_policy = scheduler_policy;
-  options.max_acquired_workers = max_acquired_workers;
-  options.max_send_revisits_remote = max_send_revisits_remote;
-  return options;
-}
-
 Program make_parallel_mixed_program() {
   Program program;
 
@@ -2018,69 +2002,6 @@ TEST_CASE("verify_parallel matches sequential and oracle execution sets on mixed
   REQUIRE(parallel.unique.size() == parallel.observed.size());
 }
 
-TEST_CASE("verify_parallel idle-worker handoff matches sequential and oracle execution sets",
-    "[algo][dpor][parallel]") {
-  const auto program = make_parallel_mixed_program();
-  const auto oracle = dpor::test_support::collect_oracle_stats(program);
-
-  const auto sequential = collect_observed_executions(
-      program,
-      [](const DporConfig& config) {
-        return verify(config);
-      });
-
-  const auto parallel = collect_observed_executions(
-      program,
-      [](const DporConfig& config) {
-        return verify_parallel(
-            config,
-            make_parallel_options(
-                4,
-                16,
-                ParallelSchedulerPolicy::IdleWorkerHandoff,
-                2));
-      });
-
-  REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);
-  REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
-  REQUIRE(parallel.result.executions_explored == sequential.result.executions_explored);
-  REQUIRE(parallel.unique == sequential.unique);
-  REQUIRE(parallel.unique == oracle.signatures);
-  REQUIRE(parallel.unique.size() == parallel.observed.size());
-}
-
-TEST_CASE("verify_parallel accepts a non-default max_send_revisits_remote",
-    "[algo][dpor][parallel]") {
-  const auto program = make_parallel_mixed_program();
-  const auto oracle = dpor::test_support::collect_oracle_stats(program);
-
-  const auto sequential = collect_observed_executions(
-      program,
-      [](const DporConfig& config) {
-        return verify(config);
-      });
-
-  const auto parallel = collect_observed_executions(
-      program,
-      [](const DporConfig& config) {
-        auto options = make_parallel_options(
-            4,
-            16,
-            ParallelSchedulerPolicy::QueueBacklog,
-            0,
-            3);
-        options.min_fanout = 3;
-        return verify_parallel(config, options);
-      });
-
-  REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);
-  REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
-  REQUIRE(parallel.result.executions_explored == sequential.result.executions_explored);
-  REQUIRE(parallel.unique == sequential.unique);
-  REQUIRE(parallel.unique == oracle.signatures);
-  REQUIRE(parallel.unique.size() == parallel.observed.size());
-}
-
 TEST_CASE("verify_parallel stops cleanly when sibling branches race to error",
     "[algo][dpor][parallel]") {
   Program program;
@@ -2196,53 +2117,6 @@ TEST_CASE("verify_parallel matches sequential under tiny queue budget and high f
         options.max_workers = 2;
         options.max_queued_tasks = 1;
         return verify_parallel(config, options);
-      });
-
-  REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);
-  REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
-  REQUIRE(parallel.result.executions_explored == 15);
-  REQUIRE(parallel.result.executions_explored == sequential.result.executions_explored);
-  REQUIRE(parallel.unique == sequential.unique);
-  REQUIRE(parallel.unique == oracle.signatures);
-  REQUIRE(parallel.unique.size() == parallel.observed.size());
-}
-
-TEST_CASE("verify_parallel idle-worker handoff matches sequential under branch cap",
-    "[algo][dpor][parallel]") {
-  Program program;
-  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
-    if (step == 0 && trace.empty()) {
-      return NondeterministicChoiceLabel{
-          .value = "a",
-          .choices = {"a", "b", "c", "d", "e"},
-      };
-    }
-    if (step == 1 && trace.size() == 1) {
-      return NondeterministicChoiceLabel{
-          .value = "u",
-          .choices = {"u", "v", "w"},
-      };
-    }
-    return std::nullopt;
-  };
-
-  const auto oracle = dpor::test_support::collect_oracle_stats(program);
-  const auto sequential = collect_observed_executions(
-      program,
-      [](const DporConfig& config) {
-        return verify(config);
-      });
-
-  const auto parallel = collect_observed_executions(
-      program,
-      [](const DporConfig& config) {
-        return verify_parallel(
-            config,
-            make_parallel_options(
-                4,
-                8,
-                ParallelSchedulerPolicy::IdleWorkerHandoff,
-                1));
       });
 
   REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);

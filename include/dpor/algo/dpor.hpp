@@ -50,20 +50,14 @@ struct DporConfigT {
   ExecutionObserverT<ValueT> on_execution{};
 };
 
-enum class ParallelSchedulerPolicy { QueueBacklog, IdleWorkerHandoff };
-
 // Experimental options for verify_parallel(). A zero max_workers selects a
 // hardware-based default; a zero max_queued_tasks derives a small queue budget
-// from the resolved worker count. A zero max_acquired_workers derives to
-// max_workers - 1 when the IdleWorkerHandoff scheduler is selected.
+// from the resolved worker count.
 struct ParallelVerifyOptions {
   std::size_t max_workers{0};
   std::size_t max_queued_tasks{0};
   std::size_t spawn_depth_cutoff{0};
   std::size_t min_fanout{2};
-  std::size_t max_send_revisits_remote{2};
-  ParallelSchedulerPolicy scheduler_policy{ParallelSchedulerPolicy::QueueBacklog};
-  std::size_t max_acquired_workers{0};
   // When non-zero, workers read the shared stop flag only every sync_steps
   // stop_requested() calls and batch execution counts in thread-local
   // accumulators.  This reduces contention at the cost of weaker error-stop
@@ -403,17 +397,6 @@ inline void visit_if_consistent_impl(
 template <typename ValueT>
 class SequentialExecutor {
  public:
-  class BranchReservation {
-   public:
-    [[nodiscard]] bool can_dispatch_more() const noexcept {
-      return false;
-    }
-
-    [[nodiscard]] bool try_dispatch(ExplorationTask<ValueT>) const noexcept {
-      return false;
-    }
-  };
-
   SequentialExecutor(VerifyResult& result, const DporConfigT<ValueT>& config)
       : result_(result), config_(config) {}
 
@@ -427,16 +410,12 @@ class SequentialExecutor {
     }
   }
 
-  [[nodiscard]] bool can_attempt_remote(std::size_t, std::size_t) const noexcept {
+  [[nodiscard]] bool can_spawn(std::size_t, std::size_t) const noexcept {
     return false;
   }
 
-  [[nodiscard]] BranchReservation reserve_remote_branch(std::size_t) const noexcept {
-    return {};
-  }
-
-  [[nodiscard]] std::size_t max_send_revisits_remote() const noexcept {
-    return 2;
+  [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT>) const noexcept {
+    return false;
   }
 
   [[nodiscard]] bool publish_complete_execution(
@@ -468,87 +447,6 @@ class SequentialExecutor {
 template <typename ValueT>
 class ParallelExecutor {
  public:
-  class BranchReservation {
-   public:
-    BranchReservation() = default;
-    BranchReservation(const BranchReservation&) = delete;
-    BranchReservation& operator=(const BranchReservation&) = delete;
-
-    BranchReservation(BranchReservation&& other) noexcept {
-      move_from(std::move(other));
-    }
-
-    BranchReservation& operator=(BranchReservation&& other) noexcept {
-      if (this != &other) {
-        release_unused();
-        move_from(std::move(other));
-      }
-      return *this;
-    }
-
-    ~BranchReservation() {
-      release_unused();
-    }
-
-    [[nodiscard]] bool can_dispatch_more() const noexcept {
-      if (mode_ == Mode::QueueBacklog) {
-        return executor_ != nullptr;
-      }
-      return remaining_idle_permits_ > 0;
-    }
-
-    [[nodiscard]] bool try_dispatch(ExplorationTask<ValueT>& task) {
-      if (executor_ == nullptr) {
-        return false;
-      }
-      if (mode_ == Mode::QueueBacklog) {
-        return executor_->try_enqueue_backlog(task);
-      }
-      if (remaining_idle_permits_ == 0) {
-        return false;
-      }
-      if (executor_->try_enqueue_reserved(task)) {
-        --remaining_idle_permits_;
-        return true;
-      }
-      return false;
-    }
-
-   private:
-    friend class ParallelExecutor<ValueT>;
-
-    enum class Mode { None, QueueBacklog, IdleWorkerHandoff };
-
-    BranchReservation(
-        ParallelExecutor* executor,
-        const Mode mode,
-        const std::size_t remaining_idle_permits) noexcept
-        : executor_(executor),
-          mode_(mode),
-          remaining_idle_permits_(remaining_idle_permits) {}
-
-    void move_from(BranchReservation&& other) noexcept {
-      executor_ = std::exchange(other.executor_, nullptr);
-      mode_ = std::exchange(other.mode_, Mode::None);
-      remaining_idle_permits_ = std::exchange(other.remaining_idle_permits_, 0);
-    }
-
-    void release_unused() noexcept {
-      if (executor_ != nullptr &&
-          mode_ == Mode::IdleWorkerHandoff &&
-          remaining_idle_permits_ != 0) {
-        executor_->release_idle_worker_permits(remaining_idle_permits_);
-      }
-      executor_ = nullptr;
-      mode_ = Mode::None;
-      remaining_idle_permits_ = 0;
-    }
-
-    ParallelExecutor* executor_{nullptr};
-    Mode mode_{Mode::None};
-    std::size_t remaining_idle_permits_{0};
-  };
-
   ParallelExecutor(
       const DporConfigT<ValueT>& config,
       ParallelVerifyOptions options,
@@ -559,10 +457,6 @@ class ParallelExecutor {
         max_workers_(resolve_max_workers(options.max_workers)),
         max_queued_tasks_(resolve_max_queued_tasks(options.max_queued_tasks, max_workers_)),
         min_fanout_(std::max<std::size_t>(1, options.min_fanout)),
-        max_send_revisits_remote_(std::max<std::size_t>(1, options.max_send_revisits_remote)),
-        scheduler_policy_(options.scheduler_policy),
-        max_acquired_workers_(
-            resolve_max_acquired_workers(options.max_acquired_workers, max_workers_)),
         sync_steps_(options.sync_steps) {}
 
   [[nodiscard]] VerifyResult run() {
@@ -621,7 +515,7 @@ class ParallelExecutor {
     depth_limit_reached_.store(true, std::memory_order_relaxed);
   }
 
-  [[nodiscard]] bool can_attempt_remote(
+  [[nodiscard]] bool can_spawn(
       const std::size_t child_depth,
       const std::size_t fanout) noexcept {
     if (max_workers_ <= 1 || stop_requested()) {
@@ -637,28 +531,26 @@ class ParallelExecutor {
     return true;
   }
 
-  [[nodiscard]] BranchReservation reserve_remote_branch(
-      const std::size_t remote_children_needed) {
-    if (max_workers_ <= 1 || stop_requested() || remote_children_needed == 0) {
-      return {};
+  [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT> task) {
+    if (max_workers_ <= 1 || stop_requested()) {
+      return false;
     }
 
-    if (scheduler_policy_ == ParallelSchedulerPolicy::QueueBacklog) {
-      return BranchReservation(this, BranchReservation::Mode::QueueBacklog, 0);
+    bool enqueued = false;
+    {
+      std::lock_guard lock(queue_mutex_);
+      if (!stop_requested_.load(std::memory_order_relaxed) &&
+          !search_complete_ &&
+          task_queue_.size() < max_queued_tasks_) {
+        task_queue_.push(std::move(task));
+        enqueued = true;
+      }
     }
 
-    const auto reserved_idle_permits = reserve_idle_worker_permits(remote_children_needed);
-    if (reserved_idle_permits == 0) {
-      return {};
+    if (enqueued) {
+      queue_cv_.notify_one();
     }
-    return BranchReservation(
-        this,
-        BranchReservation::Mode::IdleWorkerHandoff,
-        reserved_idle_permits);
-  }
-
-  [[nodiscard]] std::size_t max_send_revisits_remote() const noexcept {
-    return max_send_revisits_remote_;
+    return enqueued;
   }
 
   [[nodiscard]] bool publish_complete_execution(
@@ -721,38 +613,6 @@ class ParallelExecutor {
   }
 
  private:
-  [[nodiscard]] bool try_enqueue_backlog(ExplorationTask<ValueT>& task) {
-    if (max_workers_ <= 1 || stop_requested()) {
-      return false;
-    }
-
-    return try_enqueue_task(task);
-  }
-
-  [[nodiscard]] bool try_enqueue_reserved(ExplorationTask<ValueT>& task) {
-    // Reserved idle-worker permits already prove the caller passed the
-    // scheduler policy checks, so this path only needs the bounded queue push.
-    return try_enqueue_task(task);
-  }
-
-  [[nodiscard]] bool try_enqueue_task(ExplorationTask<ValueT>& task) {
-    bool enqueued = false;
-    {
-      std::lock_guard lock(queue_mutex_);
-      if (!stop_requested_.load(std::memory_order_relaxed) &&
-          !search_complete_ &&
-          task_queue_.size() < max_queued_tasks_) {
-        task_queue_.push(std::move(task));
-        enqueued = true;
-      }
-    }
-
-    if (enqueued) {
-      queue_cv_.notify_one();
-    }
-    return enqueued;
-  }
-
   [[nodiscard]] static std::size_t resolve_max_workers(const std::size_t requested) {
     if (requested != 0) {
       return requested;
@@ -770,81 +630,18 @@ class ParallelExecutor {
     return std::max<std::size_t>(1, max_workers * 2U);
   }
 
-  [[nodiscard]] static std::size_t resolve_max_acquired_workers(
-      const std::size_t requested,
-      const std::size_t max_workers) {
-    if (max_workers <= 1) {
-      return 0;
-    }
-    if (requested != 0) {
-      return requested;
-    }
-    return max_workers - 1U;
-  }
-
-  [[nodiscard]] std::size_t reserve_idle_worker_permits(
-      const std::size_t remote_children_needed) {
-    if (remote_children_needed == 0 || max_acquired_workers_ == 0) {
-      return 0;
-    }
-
-    std::lock_guard lock(queue_mutex_);
-    if (stop_requested_.load(std::memory_order_relaxed) ||
-        search_complete_ ||
-        idle_waiters_ == 0 ||
-        task_queue_.size() >= max_queued_tasks_) {
-      return 0;
-    }
-
-    const auto available_queue_slots = max_queued_tasks_ - task_queue_.size();
-    const auto reserved = std::min({
-        remote_children_needed,
-        max_acquired_workers_,
-        idle_waiters_,
-        available_queue_slots,
-    });
-    // idle_waiters_ counts only unreserved idle workers. A successful branch
-    // reservation consumes permits here, before any woken worker dequeues the
-    // task, so the dequeue path must not decrement again.
-    idle_waiters_ -= reserved;
-    return reserved;
-  }
-
-  void release_idle_worker_permits(const std::size_t released_permits) noexcept {
-    if (released_permits == 0) {
-      return;
-    }
-
-    std::lock_guard lock(queue_mutex_);
-    // Releasing permits only restores logical reservation capacity; the
-    // corresponding workers are already asleep on queue_cv_.
-    idle_waiters_ += released_permits;
-  }
-
   void worker_loop() {
     while (true) {
       std::optional<ExplorationTask<ValueT>> task;
       {
         std::unique_lock lock(queue_mutex_);
-        const bool track_idle_waiters =
-            scheduler_policy_ == ParallelSchedulerPolicy::IdleWorkerHandoff;
-        bool counted_as_idle = false;
-        while (!stop_requested_.load(std::memory_order_acquire) &&
-               !search_complete_ &&
-               task_queue_.empty()) {
-          if (track_idle_waiters && !counted_as_idle) {
-            // Under IdleWorkerHandoff this worker becomes reservable exactly
-            // while blocked on the empty queue.
-            ++idle_waiters_;
-            counted_as_idle = true;
-          }
-          queue_cv_.wait(lock);
-        }
+        queue_cv_.wait(lock, [this]() {
+          return stop_requested_.load(std::memory_order_acquire) ||
+              search_complete_ ||
+              !task_queue_.empty();
+        });
 
         if (stop_requested_.load(std::memory_order_acquire) || search_complete_) {
-          if (counted_as_idle && idle_waiters_ != 0) {
-            --idle_waiters_;
-          }
           flush_worker_state();
           return;
         }
@@ -935,9 +732,6 @@ class ParallelExecutor {
   std::size_t max_workers_{1};
   std::size_t max_queued_tasks_{1};
   std::size_t min_fanout_{1};
-  std::size_t max_send_revisits_remote_{2};
-  ParallelSchedulerPolicy scheduler_policy_{ParallelSchedulerPolicy::QueueBacklog};
-  std::size_t max_acquired_workers_{0};
   std::size_t sync_steps_{0};
 
   std::atomic<bool> stop_requested_{false};
@@ -947,7 +741,6 @@ class ParallelExecutor {
   mutable std::mutex queue_mutex_{};
   std::condition_variable queue_cv_{};
   std::queue<ExplorationTask<ValueT>> task_queue_{};
-  std::size_t idle_waiters_{0};
   std::size_t active_workers_{0};
   bool search_complete_{false};
 
@@ -984,70 +777,6 @@ inline void process_owned_task(
   recurse_graph(program, graph, executor, config, depth, thread_ids, mode);
 }
 
-template <typename ValueT, typename ExecutorT>
-class BranchRemoteDispatch {
- public:
-  using ReservationT = typename ExecutorT::BranchReservation;
-
-  BranchRemoteDispatch(
-      ExecutorT& executor,
-      const std::size_t child_depth,
-      const std::size_t fanout,
-      const std::size_t remote_children_needed)
-      : executor_(executor),
-        allow_remote_(executor.can_attempt_remote(child_depth, fanout)),
-        remote_children_remaining_(remote_children_needed) {}
-
-  [[nodiscard]] bool can_dispatch_more() const {
-    if (!allow_remote_ || remote_children_remaining_ == 0) {
-      return false;
-    }
-    if (!reservation_.has_value()) {
-      return true;
-    }
-    return reservation_->can_dispatch_more();
-  }
-
-  [[nodiscard]] bool try_dispatch(ExplorationTask<ValueT>& task) {
-    if (!allow_remote_ || remote_children_remaining_ == 0) {
-      return false;
-    }
-    if (!reservation_.has_value()) {
-      reservation_.emplace(executor_.reserve_remote_branch(remote_children_remaining_));
-    }
-    if (!reservation_->can_dispatch_more()) {
-      return false;
-    }
-    if (reservation_->try_dispatch(task)) {
-      --remote_children_remaining_;
-      return true;
-    }
-    return false;
-  }
-
-  [[nodiscard]] bool try_dispatch_owned(
-      model::ExplorationGraphT<ValueT>& graph,
-      const std::size_t depth,
-      const ExplorationTaskMode mode) {
-    ExplorationTask<ValueT> task{
-        .graph = std::move(graph),
-        .depth = depth,
-        .mode = mode,
-    };
-    if (try_dispatch(task)) {
-      return true;
-    }
-    graph = std::move(task.graph);
-    return false;
-  }
-
- private:
-  ExecutorT& executor_;
-  bool allow_remote_{false};
-  std::size_t remote_children_remaining_{0};
-  std::optional<ReservationT> reservation_{};
-};
-
 template <typename ValueT, typename ExecutorT, typename MutateFn>
 inline void explore_branch(
     const ProgramT<ValueT>& program,
@@ -1058,7 +787,7 @@ inline void explore_branch(
     const std::vector<model::ThreadId>& thread_ids,
     const ExplorationTaskMode mode,
     bool& kept_local_child,
-    BranchRemoteDispatch<ValueT, ExecutorT>& remote_dispatch,
+    const bool allow_enqueue,
     MutateFn&& mutate_branch) {
   using ScopedRollback = typename model::ExplorationGraphT<ValueT>::ScopedRollback;
 
@@ -1070,10 +799,14 @@ inline void explore_branch(
     return;
   }
 
-  if (remote_dispatch.can_dispatch_more()) {
+  if (allow_enqueue) {
     auto child_graph = parent_graph;
     mutate_branch(child_graph);
-    if (remote_dispatch.try_dispatch_owned(child_graph, depth, mode)) {
+    if (executor.try_enqueue(ExplorationTask<ValueT>{
+            .graph = std::move(child_graph),
+            .depth = depth,
+            .mode = mode,
+        })) {
       return;
     }
   }
@@ -1327,11 +1060,7 @@ inline void visit_impl(
     }
 
     bool kept_local_child = false;
-    BranchRemoteDispatch<ValueT, ExecutorT> remote_dispatch(
-        executor,
-        depth + 1,
-        nd->choices.size(),
-        nd->choices.size() - 1U);
+    const auto allow_enqueue = executor.can_spawn(depth + 1, nd->choices.size());
     for (const auto& choice : nd->choices) {
       if (executor.stop_requested()) {
         return;
@@ -1347,7 +1076,7 @@ inline void visit_impl(
           thread_ids,
           ExplorationTaskMode::Visit,
           kept_local_child,
-          remote_dispatch,
+          allow_enqueue,
           [tid, nd_label = std::move(nd_label)](auto& branch_graph) {
             static_cast<void>(branch_graph.add_event(
                 tid,
@@ -1371,11 +1100,7 @@ inline void visit_impl(
     bool kept_local_child = false;
     const auto total_children =
         compatible_sends.size() + (recv->is_nonblocking() ? 1U : 0U);
-    BranchRemoteDispatch<ValueT, ExecutorT> remote_dispatch(
-        executor,
-        depth + 1,
-        total_children,
-        total_children > 0 ? total_children - 1U : 0U);
+    const auto allow_enqueue = executor.can_spawn(depth + 1, total_children);
 
     for (const auto send_id : compatible_sends) {
       if (executor.stop_requested()) {
@@ -1390,7 +1115,7 @@ inline void visit_impl(
           thread_ids,
           ExplorationTaskMode::VisitIfConsistent,
           kept_local_child,
-          remote_dispatch,
+          allow_enqueue,
           [tid, &label, send_id](auto& branch_graph) {
             const auto recv_id = branch_graph.add_event(tid, label);
             branch_graph.set_reads_from(recv_id, send_id);
@@ -1407,7 +1132,7 @@ inline void visit_impl(
           thread_ids,
           ExplorationTaskMode::VisitIfConsistent,
           kept_local_child,
-          remote_dispatch,
+          allow_enqueue,
           [tid, &label](auto& branch_graph) {
             const auto recv_id = branch_graph.add_event(tid, label);
             branch_graph.set_reads_from_bottom(recv_id);
@@ -1419,15 +1144,7 @@ inline void visit_impl(
   if (std::holds_alternative<model::SendLabelT<ValueT>>(label)) {
     ScopedRollback rollback(graph);
     const auto send_id = graph.add_event(tid, label);
-    const auto send_hint = executor.max_send_revisits_remote();
-    BranchRemoteDispatch<ValueT, ExecutorT> remote_dispatch(
-        executor,
-        depth + 1,
-        // Send revisits are emitted lazily, so we do not know the true revisit
-        // fanout up front. Use the configured hint as both the min-fanout gate
-        // value and the remote-children budget.
-        send_hint,
-        send_hint);
+    const auto allow_enqueue = executor.can_spawn(depth + 1, 2);
 
     for_each_backward_revisit_child(
         graph,
@@ -1436,10 +1153,12 @@ inline void visit_impl(
           return executor.stop_requested();
         },
         [&](model::ExplorationGraphT<ValueT> revisited) {
-          if (remote_dispatch.try_dispatch_owned(
-                  revisited,
-                  depth + 1,
-                  ExplorationTaskMode::VisitIfConsistent)) {
+          if (allow_enqueue &&
+              executor.try_enqueue(ExplorationTask<ValueT>{
+                  .graph = std::move(revisited),
+                  .depth = depth + 1,
+                  .mode = ExplorationTaskMode::VisitIfConsistent,
+              })) {
             return true;
           }
 

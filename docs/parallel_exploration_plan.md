@@ -23,31 +23,6 @@ The recommended scheduler policy is work-first:
 
 This preserves the cheap rollback-based local path and avoids sharing mutable graph state across workers.
 
-## Current Status
-
-The last two commits implemented the first scheduler-policy follow-up that this
-plan called for:
-
-- `verify_parallel()` now accepts an explicit scheduler selector, with the
-  original queue-backlog policy still the default
-- the alternative `IdleWorkerHandoff` policy is implemented with branch-scoped
-  permit reservation, `idle_waiters_` accounting under `queue_mutex_`, and
-  RAII release of unused permits
-- branch scheduling now goes through a common `can_attempt_remote(...)` plus
-  reservation/dispatch path shared by ND, receive, and send/revisit branching
-- benchmark CLIs now expose `--scheduler` and `--max-acquired-workers` for A/B
-  measurement
-- tests now cover both scheduler policies and a small branch-cap setting
-
-The most recent tuning follow-up also landed:
-
-- the send-branch remote revisit budget is now configurable via
-  `max_send_revisits_remote`, which caps how many backward-revisit children
-  from a send branch may be dispatched remotely (default `2`)
-- the queue-enqueue helpers were deduplicated
-- comments now document the `idle_waiters_` invariant and why releasing unused
-  permits does not notify the worker condition variable
-
 ## Current Engine Constraints
 
 The current code shape matters here:
@@ -93,9 +68,9 @@ bool parallel_experimental{false};
 
 Recommendation: prefer a separate `verify_parallel()` first. That keeps semantic caveats isolated and avoids quietly widening the contract of the existing `verify()` API.
 
-That scheduler selection knob now exists. `verify_parallel()` takes
-`ParallelVerifyOptions`, and the current queue-backlog policy remains the
-default while `IdleWorkerHandoff` is opt-in.
+If parallel exploration grows multiple scheduler policies, `verify_parallel()`
+should also take an explicit scheduler selection knob, with the current
+queue-backlog policy remaining the default.
 
 ## Core Internal Types
 
@@ -364,7 +339,7 @@ This needs to be documented next to the new API/config surface.
 
 ### Phase 4A: Add Alternative Scheduler Policy
 
-Status: implemented.
+This should be the next implementation step.
 
 1. Add a scheduler selector to `ParallelVerifyOptions`, with the current
    queue-backlog policy as the default.
@@ -438,3 +413,86 @@ Parallel exploration can speed up branch-heavy workloads, but it will not be fre
 - revisit-heavy workloads may scale poorly until revisit materialization is revisited later
 - scheduler overhead should be acceptable if tasks are coarse, but some spawned subtrees will still prune quickly, so this must be measured rather than assumed
 - queue limits only bound queued snapshots; total memory also includes each worker's local DFS/rollback state, so memory budgeting must consider both components
+
+## Current Benchmark Findings
+
+Early measurements on the timeout-inclusive two-phase commit benchmark show that
+the current parallel implementation does not yet have a good default split
+policy.
+
+- `participants=3`, `iterations=1`, `--no-crash`:
+  - sequential: about `549 ms`
+  - parallel with `max_workers=1`: about `585 ms`
+  - parallel with `max_workers=4` and the current defaults
+    (`spawn_depth_cutoff=0`, `min_fanout=2`): still running after about `20 s`,
+    manually stopped
+  - parallel with `max_workers=4` plus either `spawn_depth_cutoff=1` or
+    `spawn_depth_cutoff=2`: about `590 ms`
+  - parallel with `max_workers=4`, `spawn_depth_cutoff=0`,
+    `min_fanout=4`: about `590 ms`
+
+- `participants=4`, `iterations=1`, `--no-crash`:
+  - sequential: about `80.2 s`
+  - parallel with `max_workers=1`: about `80.4 s`
+  - parallel with `max_workers=4` and current defaults used about four cores in
+    a short probe, but did not finish within `30 s`
+  - more conservative settings that avoided the blow-up only used about one
+    core during the first `10-15 s` of the same probe, so they were unlikely to
+    deliver meaningful speedup
+
+These results are useful because they isolate the problem:
+
+- the parallel executor path itself is close to neutral when no real spawning
+  happens (`max_workers=1`)
+- the default split policy is too aggressive on this workload
+- once spawning is constrained enough to avoid the blow-up, the search no
+  longer exposes enough parallel work to keep multiple workers busy
+
+The current working diagnosis is:
+
+- spawning on binary branches at arbitrary depth is too fine-grained for this
+  state space
+- graph snapshot copying and queue/scheduler overhead dominate any useful
+  parallelism under the current defaults
+- a shallow depth cutoff or higher fan-out gate suppresses that overhead, but
+  also suppresses most available parallel work
+
+That means the next step should be measurement-driven tuning rather than blind
+default changes. In particular, the executor should grow low-overhead counters
+for:
+
+- spawn attempts
+- idle-worker availability at handoff attempt
+- successful enqueues
+- enqueue-failure fallbacks to local recursion
+- tasks processed
+- maximum queue depth
+- branch-type breakdowns for ND, receive, and send-revisit splits
+
+Those counters should be used to drive a capped benchmark matrix before claiming
+any general speedup on this workload.
+
+The next concrete implementation step should therefore be:
+
+- add the branch-scoped `IdleWorkerHandoff` alternative strategy with a
+  selectable scheduler knob and a `max_acquired_workers`-style branch cap
+- instrument both scheduler strategies and compare them on the timeout
+  benchmark before changing defaults
+
+Success criteria for the first landing:
+
+- no correctness regressions
+- measurable wall-clock win on branch-heavy examples with more than one worker
+- bounded memory growth under queue pressure
+- sequential performance with one worker unchanged or near-unchanged
+
+## Recommendation Summary
+
+A thread pool is worth doing, but the right shape is:
+
+- local rollback-based DFS inside a worker
+- owned graph snapshots across worker boundaries
+- work-first scheduling, not recursive firehose spawning
+- explicit experimental semantics at first, especially around `ErrorFound` and `on_execution`
+
+That fits the current engine instead of fighting it.
