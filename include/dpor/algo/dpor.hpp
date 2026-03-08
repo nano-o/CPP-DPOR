@@ -58,6 +58,14 @@ struct ParallelVerifyOptions {
   std::size_t max_queued_tasks{0};
   std::size_t spawn_depth_cutoff{0};
   std::size_t min_fanout{2};
+  // When non-zero, workers read the shared stop flag only every sync_steps
+  // stop_requested() calls and batch execution counts in thread-local
+  // accumulators.  This reduces contention at the cost of weaker error-stop
+  // semantics: multiple workers may independently reach error terminals, and
+  // complete executions may be counted after an error has been committed.
+  // When zero (the default) the publication mutex serialises these paths so
+  // that exactly one error is observed and no work is done after the stop.
+  std::size_t sync_steps{0};
 };
 
 using DporConfig = DporConfigT<model::Value>;
@@ -448,7 +456,8 @@ class ParallelExecutor {
         thread_ids_(std::move(thread_ids)),
         max_workers_(resolve_max_workers(options.max_workers)),
         max_queued_tasks_(resolve_max_queued_tasks(options.max_queued_tasks, max_workers_)),
-        min_fanout_(std::max<std::size_t>(1, options.min_fanout)) {}
+        min_fanout_(std::max<std::size_t>(1, options.min_fanout)),
+        sync_steps_(options.sync_steps) {}
 
   [[nodiscard]] VerifyResult run() {
     {
@@ -474,31 +483,32 @@ class ParallelExecutor {
       worker.join();
     }
 
-    std::exception_ptr exception;
-    std::optional<std::string> error_message;
-    {
-      std::lock_guard lock(publication_mutex_);
-      exception = first_exception_;
-      error_message = first_error_message_;
-    }
-
-    if (exception) {
-      std::rethrow_exception(exception);
+    // All workers have joined; no synchronisation needed.
+    if (first_exception_) {
+      std::rethrow_exception(first_exception_);
     }
 
     VerifyResult result;
     result.executions_explored = executions_explored_.load(std::memory_order_relaxed);
-    if (error_message.has_value()) {
+    if (first_error_message_.has_value()) {
       result.kind = VerifyResultKind::ErrorFound;
-      result.message = *error_message;
+      result.message = *first_error_message_;
     } else if (depth_limit_reached_.load(std::memory_order_relaxed)) {
       result.kind = VerifyResultKind::DepthLimitReached;
     }
     return result;
   }
 
-  [[nodiscard]] bool stop_requested() const noexcept {
-    return stop_requested_.load(std::memory_order_acquire);
+  [[nodiscard]] bool stop_requested() noexcept {
+    if (sync_steps_ == 0) {
+      return stop_requested_.load(std::memory_order_acquire);
+    }
+    auto& state = worker_state();
+    if (++state.steps_since_sync >= sync_steps_) {
+      state.steps_since_sync = 0;
+      state.cached_stop = stop_requested_.load(std::memory_order_acquire);
+    }
+    return state.cached_stop;
   }
 
   void note_depth_limit() noexcept {
@@ -507,7 +517,7 @@ class ParallelExecutor {
 
   [[nodiscard]] bool can_spawn(
       const std::size_t child_depth,
-      const std::size_t fanout) const noexcept {
+      const std::size_t fanout) noexcept {
     if (max_workers_ <= 1 || stop_requested()) {
       return false;
     }
@@ -545,12 +555,19 @@ class ParallelExecutor {
 
   [[nodiscard]] bool publish_complete_execution(
       const model::ExplorationGraphT<ValueT>& graph) {
-    {
+    if (sync_steps_ == 0) {
+      // Serialise with publish_error_execution so that no complete execution
+      // is counted or observed after an error has been committed.
       std::lock_guard lock(publication_mutex_);
       if (stop_requested_.load(std::memory_order_acquire)) {
         return false;
       }
-      executions_explored_.fetch_add(1, std::memory_order_relaxed);
+      ++worker_state().local_executions;
+    } else {
+      if (stop_requested()) {
+        return false;
+      }
+      ++worker_state().local_executions;
     }
 
     if (config_.on_execution) {
@@ -565,24 +582,34 @@ class ParallelExecutor {
     bool published = false;
     {
       std::lock_guard lock(publication_mutex_);
-      if (!stop_requested_.load(std::memory_order_acquire)) {
+      if (sync_steps_ == 0) {
+        // Strict mode: only the first error is counted and observed.
+        if (stop_requested_.load(std::memory_order_acquire)) {
+          return false;
+        }
+        ++worker_state().local_executions;
         first_error_message_ =
             "error event reached in thread " + std::to_string(tid);
-        executions_explored_.fetch_add(1, std::memory_order_relaxed);
+        stop_requested_.store(true, std::memory_order_release);
+        published = true;
+      } else {
+        // Relaxed mode: every worker that independently reaches an error
+        // is counted and observed; only the first message is kept.
+        ++worker_state().local_executions;
+        if (!first_error_message_.has_value()) {
+          first_error_message_ =
+              "error event reached in thread " + std::to_string(tid);
+        }
         stop_requested_.store(true, std::memory_order_release);
         published = true;
       }
     }
 
-    if (!published) {
-      return false;
-    }
-
-    if (config_.on_execution) {
+    if (published && config_.on_execution) {
       config_.on_execution(graph);
     }
     queue_cv_.notify_all();
-    return true;
+    return published;
   }
 
  private:
@@ -615,6 +642,7 @@ class ParallelExecutor {
         });
 
         if (stop_requested_.load(std::memory_order_acquire) || search_complete_) {
+          flush_worker_state();
           return;
         }
 
@@ -667,6 +695,26 @@ class ParallelExecutor {
         thread_ids_);
   }
 
+  struct WorkerState {
+    std::size_t local_executions{0};
+    std::size_t steps_since_sync{0};
+    bool cached_stop{false};
+  };
+
+  WorkerState& worker_state() noexcept {
+    thread_local WorkerState state;
+    return state;
+  }
+
+  void flush_worker_state() {
+    auto& state = worker_state();
+    if (state.local_executions > 0) {
+      executions_explored_.fetch_add(
+          state.local_executions, std::memory_order_relaxed);
+    }
+    state = WorkerState{};
+  }
+
   void record_exception(std::exception_ptr exception) {
     {
       std::lock_guard lock(publication_mutex_);
@@ -684,6 +732,7 @@ class ParallelExecutor {
   std::size_t max_workers_{1};
   std::size_t max_queued_tasks_{1};
   std::size_t min_fanout_{1};
+  std::size_t sync_steps_{0};
 
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> depth_limit_reached_{false};
@@ -1207,8 +1256,10 @@ template <typename ValueT>
 [[nodiscard]] inline VerifyResult verify_parallel(
     const DporConfigT<ValueT>& config,
     ParallelVerifyOptions options = {}) {
-  // Experimental semantics: the winning error branch and callback order are
-  // unspecified when multiple workers race.
+  // Experimental.  With sync_steps=0 (default), exactly one error terminal is
+  // counted and observed; callback order among successful executions is
+  // unspecified.  With sync_steps>0, multiple workers may independently reach
+  // error terminals before the stop signal propagates.
   const auto thread_ids = detail::sorted_thread_ids(config.program);
   detail::ParallelExecutor<ValueT> executor(config, options, thread_ids);
   return executor.run();
