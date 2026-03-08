@@ -142,6 +142,13 @@ Program make_parallel_mixed_program() {
 
   return program;
 }
+
+struct RejectingEnqueueExecutor {
+  template <typename ValueT>
+  [[nodiscard]] bool try_enqueue(dpor::algo::detail::ExplorationTask<ValueT>&) const noexcept {
+    return false;
+  }
+};
 }  // namespace
 
 // --- Empty and trivial programs ---
@@ -1972,6 +1979,25 @@ TEST_CASE("verify_parallel with one worker matches sequential execution order ex
   REQUIRE(parallel.result.executions_explored == sequential.result.executions_explored);
   REQUIRE(parallel.unique == sequential.unique);
   REQUIRE(parallel.observed == sequential.observed);
+}
+
+TEST_CASE("try_enqueue_owned_task restores the graph after enqueue rejection",
+    "[algo][dpor][parallel]") {
+  ExplorationGraph graph;
+  const auto send_id = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto recv_id = graph.add_event(
+      2,
+      make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking));
+  graph.set_reads_from(recv_id, send_id);
+  const auto before = graph_signature(graph);
+
+  RejectingEnqueueExecutor executor;
+  REQUIRE_FALSE(dpor::algo::detail::try_enqueue_owned_task<Value>(
+      executor,
+      graph,
+      1,
+      dpor::algo::detail::ExplorationTaskMode::VisitIfConsistent));
+  REQUIRE(graph_signature(graph) == before);
 }
 
 TEST_CASE("verify_parallel matches sequential and oracle execution sets on mixed branching",

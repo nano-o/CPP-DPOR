@@ -414,7 +414,7 @@ class SequentialExecutor {
     return false;
   }
 
-  [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT>) const noexcept {
+  [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT>&) const noexcept {
     return false;
   }
 
@@ -531,7 +531,7 @@ class ParallelExecutor {
     return true;
   }
 
-  [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT> task) {
+  [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT>& task) {
     if (max_workers_ <= 1 || stop_requested()) {
       return false;
     }
@@ -777,6 +777,24 @@ inline void process_owned_task(
   recurse_graph(program, graph, executor, config, depth, thread_ids, mode);
 }
 
+template <typename ValueT, typename ExecutorT>
+[[nodiscard]] inline bool try_enqueue_owned_task(
+    ExecutorT& executor,
+    model::ExplorationGraphT<ValueT>& graph,
+    const std::size_t depth,
+    const ExplorationTaskMode mode) {
+  ExplorationTask<ValueT> task{
+      .graph = std::move(graph),
+      .depth = depth,
+      .mode = mode,
+  };
+  if (executor.try_enqueue(task)) {
+    return true;
+  }
+  graph = std::move(task.graph);
+  return false;
+}
+
 template <typename ValueT, typename ExecutorT, typename MutateFn>
 inline void explore_branch(
     const ProgramT<ValueT>& program,
@@ -802,11 +820,12 @@ inline void explore_branch(
   if (allow_enqueue) {
     auto child_graph = parent_graph;
     mutate_branch(child_graph);
-    if (executor.try_enqueue(ExplorationTask<ValueT>{
-            .graph = std::move(child_graph),
-            .depth = depth,
-            .mode = mode,
-        })) {
+    ExplorationTask<ValueT> task{
+        .graph = std::move(child_graph),
+        .depth = depth,
+        .mode = mode,
+    };
+    if (executor.try_enqueue(task)) {
       return;
     }
   }
@@ -1154,11 +1173,11 @@ inline void visit_impl(
         },
         [&](model::ExplorationGraphT<ValueT> revisited) {
           if (allow_enqueue &&
-              executor.try_enqueue(ExplorationTask<ValueT>{
-                  .graph = std::move(revisited),
-                  .depth = depth + 1,
-                  .mode = ExplorationTaskMode::VisitIfConsistent,
-              })) {
+              try_enqueue_owned_task<ValueT>(
+                  executor,
+                  revisited,
+                  depth + 1,
+                  ExplorationTaskMode::VisitIfConsistent)) {
             return true;
           }
 
