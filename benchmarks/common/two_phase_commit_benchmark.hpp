@@ -29,6 +29,8 @@ struct Options {
   std::size_t participants{3};
   std::size_t iterations{1};
   bool inject_crash{true};
+  bool parallel{false};
+  algo::ParallelVerifyOptions parallel_options{};
 };
 
 struct Measurement {
@@ -57,7 +59,9 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
   std::ostream& os = exit_code == 0 ? std::cout : std::cerr;
   os << "Usage: " << argv0
      << " [--mode dpor|oracle|both] [--participants N] [--iterations N]"
-        " [--no-crash]\n";
+        " [--no-crash] [--parallel]"
+        " [--max-workers N] [--max-queued-tasks N]"
+        " [--spawn-depth-cutoff N] [--min-fanout N]\n";
   os << benchmark_label << '\n';
   std::exit(exit_code);
 }
@@ -65,6 +69,9 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
 [[nodiscard]] inline std::size_t parse_positive_int(
     std::string_view text,
     std::string_view flag) {
+  if (!text.empty() && text.front() == '-') {
+    throw std::invalid_argument("invalid numeric value for " + std::string(flag));
+  }
   std::size_t value = 0;
   try {
     value = static_cast<std::size_t>(std::stoull(std::string{text}));
@@ -75,6 +82,19 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
     throw std::invalid_argument(std::string(flag) + " must be positive");
   }
   return value;
+}
+
+[[nodiscard]] inline std::size_t parse_nonnegative_int(
+    std::string_view text,
+    std::string_view flag) {
+  if (!text.empty() && text.front() == '-') {
+    throw std::invalid_argument("invalid numeric value for " + std::string(flag));
+  }
+  try {
+    return static_cast<std::size_t>(std::stoull(std::string{text}));
+  } catch (const std::exception&) {
+    throw std::invalid_argument("invalid numeric value for " + std::string(flag));
+  }
 }
 
 [[nodiscard]] inline Options parse_args(
@@ -90,6 +110,10 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
     }
     if (arg == "--no-crash") {
       options.inject_crash = false;
+      continue;
+    }
+    if (arg == "--parallel") {
+      options.parallel = true;
       continue;
     }
     if (i + 1 >= argc) {
@@ -115,6 +139,26 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
     }
     if (arg == "--iterations") {
       options.iterations = parse_positive_int(value, arg);
+      continue;
+    }
+    if (arg == "--max-workers") {
+      options.parallel = true;
+      options.parallel_options.max_workers = parse_positive_int(value, arg);
+      continue;
+    }
+    if (arg == "--max-queued-tasks") {
+      options.parallel = true;
+      options.parallel_options.max_queued_tasks = parse_nonnegative_int(value, arg);
+      continue;
+    }
+    if (arg == "--spawn-depth-cutoff") {
+      options.parallel = true;
+      options.parallel_options.spawn_depth_cutoff = parse_nonnegative_int(value, arg);
+      continue;
+    }
+    if (arg == "--min-fanout") {
+      options.parallel = true;
+      options.parallel_options.min_fanout = parse_nonnegative_int(value, arg);
       continue;
     }
 
@@ -183,15 +227,16 @@ inline void print_measurements(
 
 template <typename ProgramFactory>
 [[nodiscard]] inline OracleRunResult run_dpor(
-    std::size_t participants,
-    bool inject_crash,
+    const Options& options,
     const ProgramFactory& make_program) {
-  auto program = make_program(participants, inject_crash);
+  auto program = make_program(options.participants, options.inject_crash);
   using ValueT =
       typename ProgramValueType<std::decay_t<decltype(program)>>::type;
   algo::DporConfigT<ValueT> config;
   config.program = std::move(program);
-  const auto result = algo::verify(config);
+  const auto result = options.parallel
+      ? algo::verify_parallel(config, options.parallel_options)
+      : algo::verify(config);
   if (result.kind != algo::VerifyResultKind::AllExecutionsExplored) {
     throw std::runtime_error("DPOR did not explore all executions");
   }
@@ -216,22 +261,20 @@ template <typename ProgramFactory>
 
 template <typename ProgramFactory>
 [[nodiscard]] inline std::vector<Measurement> collect_measurements(
-    std::size_t iterations,
-    std::size_t participants,
-    bool inject_crash,
+    const Options& options,
     bool use_oracle,
     const ProgramFactory& make_program) {
   std::vector<Measurement> measurements;
-  measurements.reserve(iterations);
+  measurements.reserve(options.iterations);
 
-  for (std::size_t i = 0; i < iterations; ++i) {
+  for (std::size_t i = 0; i < options.iterations; ++i) {
     measurements.push_back(
         use_oracle
             ? measure_once([&] {
-                return run_oracle(participants, inject_crash, make_program);
+                return run_oracle(options.participants, options.inject_crash, make_program);
               })
             : measure_once([&] {
-                return run_dpor(participants, inject_crash, make_program);
+                return run_dpor(options, make_program);
               }));
     if (measurements.back().executions != measurements.front().executions) {
       throw std::runtime_error("execution count changed across iterations");
@@ -259,6 +302,13 @@ inline int run_two_phase_commit_benchmark(
               << " participants=" << options.participants
               << " inject_crash=" << std::boolalpha << options.inject_crash
               << " iterations=" << options.iterations;
+    if (options.parallel && options.mode != detail::Options::Mode::Oracle) {
+      std::cout << " parallel=true"
+                << " max_workers=" << options.parallel_options.max_workers
+                << " max_queued_tasks=" << options.parallel_options.max_queued_tasks
+                << " spawn_depth_cutoff=" << options.parallel_options.spawn_depth_cutoff
+                << " min_fanout=" << options.parallel_options.min_fanout;
+    }
 #ifdef NDEBUG
     std::cout << " optimized_build=true\n";
 #else
@@ -268,12 +318,14 @@ inline int run_two_phase_commit_benchmark(
     std::vector<detail::Measurement> dpor_measurements;
     std::vector<detail::Measurement> oracle_measurements;
 
+    if (options.parallel && options.mode == detail::Options::Mode::Oracle) {
+      std::cerr << "warning: parallel options are ignored in oracle-only mode\n";
+    }
+
     if (options.mode == detail::Options::Mode::Dpor ||
         options.mode == detail::Options::Mode::Both) {
       dpor_measurements = detail::collect_measurements(
-          options.iterations,
-          options.participants,
-          options.inject_crash,
+          options,
           false,
           make_program);
       detail::print_measurements("DPOR", dpor_measurements, false);
@@ -282,9 +334,7 @@ inline int run_two_phase_commit_benchmark(
     if (options.mode == detail::Options::Mode::Oracle ||
         options.mode == detail::Options::Mode::Both) {
       oracle_measurements = detail::collect_measurements(
-          options.iterations,
-          options.participants,
-          options.inject_crash,
+          options,
           true,
           make_program);
       detail::print_measurements("Oracle", oracle_measurements, true);

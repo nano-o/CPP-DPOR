@@ -19,6 +19,11 @@ Both executables support the same CLI:
 --participants N
 --iterations N
 --no-crash
+--parallel
+--max-workers N
+--max-queued-tasks N
+--spawn-depth-cutoff N
+--min-fanout N
 ```
 
 - `--mode dpor` measures only DPOR exploration.
@@ -28,6 +33,13 @@ Both executables support the same CLI:
 - `--iterations` defaults to `1`.
 - `--no-crash` disables the coordinator crash choice so you can benchmark the
   no-crash state space separately.
+- `--parallel` switches DPOR runs from `verify()` to `verify_parallel()`. If
+  `--max-workers` is omitted, worker count falls back to the library's
+  hardware-based default.
+- `--max-workers`, `--max-queued-tasks`, `--spawn-depth-cutoff`, and
+  `--min-fanout` pass through to `ParallelVerifyOptions`. Supplying any of
+  these also enables `--parallel`.
+- Parallel flags are ignored in `--mode oracle`.
 
 When the oracle runs, the benchmark also prints `paths_explored`, which counts
 raw oracle DFS terminal paths before deduplication. That number is typically
@@ -118,6 +130,15 @@ build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_ti
   --mode dpor --participants 3 --iterations 1
 ```
 
+Timeout-inclusive 2PC, parallel DPOR with conservative split heuristics:
+
+```bash
+build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \
+  --mode dpor --participants 4 --iterations 1 --no-crash \
+  --parallel --max-workers 8 --max-queued-tasks 8 \
+  --spawn-depth-cutoff 2 --min-fanout 4
+```
+
 Timeout-inclusive 2PC, oracle only:
 
 ```bash
@@ -140,3 +161,4 @@ Oracle
 ```
 
 Use `--iterations N` to get repeated timings in a single process.
+Parallel runs print the selected `ParallelVerifyOptions` on the header line.
