@@ -20,10 +20,12 @@ Both executables support the same CLI:
 --iterations N
 --no-crash
 --parallel
+--scheduler queue-backlog|idle-worker-handoff
 --max-workers N
 --max-queued-tasks N
 --spawn-depth-cutoff N
 --min-fanout N
+--max-acquired-workers N
 ```
 
 - `--mode dpor` measures only DPOR exploration.
@@ -36,9 +38,15 @@ Both executables support the same CLI:
 - `--parallel` switches DPOR runs from `verify()` to `verify_parallel()`. If
   `--max-workers` is omitted, worker count falls back to the library's
   hardware-based default.
+- `--scheduler` selects the parallel scheduler policy. `queue-backlog` is the
+  existing default. `idle-worker-handoff` enables the branch-scoped idle-helper
+  reservation strategy.
 - `--max-workers`, `--max-queued-tasks`, `--spawn-depth-cutoff`, and
   `--min-fanout` pass through to `ParallelVerifyOptions`. Supplying any of
   these also enables `--parallel`.
+- `--max-acquired-workers` caps how many idle-worker permits a single branch
+  may reserve under `idle-worker-handoff`. Supplying it also enables parallel
+  mode and selects `idle-worker-handoff`.
 - Parallel flags are ignored in `--mode oracle`.
 
 When the oracle runs, the benchmark also prints `paths_explored`, which counts
@@ -137,6 +145,17 @@ build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_ti
   --mode dpor --participants 4 --iterations 1 --no-crash \
   --parallel --max-workers 8 --max-queued-tasks 8 \
   --spawn-depth-cutoff 2 --min-fanout 4
+```
+
+Timeout-inclusive 2PC, parallel DPOR with idle-worker handoff:
+
+```bash
+build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \
+  --mode dpor --participants 4 --iterations 1 --no-crash \
+  --parallel --scheduler idle-worker-handoff \
+  --max-workers 8 --max-queued-tasks 8 \
+  --spawn-depth-cutoff 2 --min-fanout 4 \
+  --max-acquired-workers 2
 ```
 
 Timeout-inclusive 2PC, oracle only:

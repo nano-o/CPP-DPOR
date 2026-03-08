@@ -60,8 +60,10 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
   os << "Usage: " << argv0
      << " [--mode dpor|oracle|both] [--participants N] [--iterations N]"
         " [--no-crash] [--parallel]"
+        " [--scheduler queue-backlog|idle-worker-handoff]"
         " [--max-workers N] [--max-queued-tasks N]"
-        " [--spawn-depth-cutoff N] [--min-fanout N]\n";
+        " [--spawn-depth-cutoff N] [--min-fanout N]"
+        " [--max-acquired-workers N]\n";
   os << benchmark_label << '\n';
   std::exit(exit_code);
 }
@@ -95,6 +97,28 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
   } catch (const std::exception&) {
     throw std::invalid_argument("invalid numeric value for " + std::string(flag));
   }
+}
+
+[[nodiscard]] inline algo::ParallelSchedulerPolicy parse_scheduler_policy(
+    std::string_view text) {
+  if (text == "queue-backlog") {
+    return algo::ParallelSchedulerPolicy::QueueBacklog;
+  }
+  if (text == "idle-worker-handoff") {
+    return algo::ParallelSchedulerPolicy::IdleWorkerHandoff;
+  }
+  throw std::invalid_argument("invalid scheduler: " + std::string(text));
+}
+
+[[nodiscard]] inline const char* scheduler_policy_name(
+    const algo::ParallelSchedulerPolicy policy) {
+  switch (policy) {
+    case algo::ParallelSchedulerPolicy::QueueBacklog:
+      return "queue-backlog";
+    case algo::ParallelSchedulerPolicy::IdleWorkerHandoff:
+      return "idle-worker-handoff";
+  }
+  return "unknown";
 }
 
 [[nodiscard]] inline Options parse_args(
@@ -141,6 +165,11 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
       options.iterations = parse_positive_int(value, arg);
       continue;
     }
+    if (arg == "--scheduler") {
+      options.parallel = true;
+      options.parallel_options.scheduler_policy = parse_scheduler_policy(value);
+      continue;
+    }
     if (arg == "--max-workers") {
       options.parallel = true;
       options.parallel_options.max_workers = parse_positive_int(value, arg);
@@ -159,6 +188,13 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
     if (arg == "--min-fanout") {
       options.parallel = true;
       options.parallel_options.min_fanout = parse_nonnegative_int(value, arg);
+      continue;
+    }
+    if (arg == "--max-acquired-workers") {
+      options.parallel = true;
+      options.parallel_options.scheduler_policy =
+          algo::ParallelSchedulerPolicy::IdleWorkerHandoff;
+      options.parallel_options.max_acquired_workers = parse_nonnegative_int(value, arg);
       continue;
     }
 
@@ -304,10 +340,14 @@ inline int run_two_phase_commit_benchmark(
               << " iterations=" << options.iterations;
     if (options.parallel && options.mode != detail::Options::Mode::Oracle) {
       std::cout << " parallel=true"
+                << " scheduler="
+                << detail::scheduler_policy_name(options.parallel_options.scheduler_policy)
                 << " max_workers=" << options.parallel_options.max_workers
                 << " max_queued_tasks=" << options.parallel_options.max_queued_tasks
                 << " spawn_depth_cutoff=" << options.parallel_options.spawn_depth_cutoff
-                << " min_fanout=" << options.parallel_options.min_fanout;
+                << " min_fanout=" << options.parallel_options.min_fanout
+                << " max_acquired_workers="
+                << options.parallel_options.max_acquired_workers;
     }
 #ifdef NDEBUG
     std::cout << " optimized_build=true\n";
