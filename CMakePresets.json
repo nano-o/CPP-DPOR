@@ -40,7 +40,18 @@
       "cacheVariables": {
         "CMAKE_CXX_FLAGS_DEBUG": "-fsanitize=address,undefined -fno-omit-frame-pointer",
         "CMAKE_EXE_LINKER_FLAGS_DEBUG": "-fsanitize=address,undefined",
-        "CMAKE_SHARED_LINKER_FLAGS_DEBUG": "-fsanitize=address,undefined"
+        "CMAKE_SHARED_LINKER_FLAGS_DEBUG": "-fsanitize=address,undefined",
+        "DPOR_FETCH_CATCH2": "ON"
+      }
+    },
+    {
+      "name": "tsan",
+      "inherits": ["debug"],
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS_DEBUG": "-fsanitize=thread -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS_DEBUG": "-fsanitize=thread",
+        "CMAKE_SHARED_LINKER_FLAGS_DEBUG": "-fsanitize=thread",
+        "DPOR_FETCH_CATCH2": "ON"
       }
     },
     {
@@ -65,6 +76,10 @@
       "configurePreset": "asan"
     },
     {
+      "name": "tsan",
+      "configurePreset": "tsan"
+    },
+    {
       "name": "debug-fetch-catch2",
       "configurePreset": "debug-fetch-catch2"
     }
@@ -80,6 +95,13 @@
     {
       "name": "asan",
       "configurePreset": "asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
       "output": {
         "outputOnFailure": true
       }
