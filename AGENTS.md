@@ -71,11 +71,34 @@ This is required to preserve DPOR soundness/completeness assumptions.
 
 - **Build system**: CMake 3.22+ with Ninja generator, C++20
 - **Test framework**: Catch2 v3
-- **CMake presets**: `debug`, `release`, `asan`, `debug-fetch-catch2`
+- **CMake presets**: `debug`, `release`, `asan`, `tsan`, `debug-fetch-catch2`
 - Build: `cmake --preset debug && cmake --build --preset debug`
 - Run tests: `ctest --preset debug`
 - The `debug-fetch-catch2` preset auto-fetches Catch2 if not installed locally
 - The `asan` preset enables AddressSanitizer and UndefinedBehaviorSanitizer
+- The `tsan` preset enables ThreadSanitizer; use `scripts/run_tsan.sh` to build and run (handles ASLR)
+- **After big changes**, run ASAN tests (`cmake --preset asan && cmake --build --preset asan && ctest --preset asan`) and TSAN tests (`scripts/run_tsan.sh`)
+
+## Performance Smoke Tests
+
+For a lightweight performance smoke test, run DPOR-only with 4 participants,
+1 iteration, and no crash injection:
+
+```bash
+build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \
+  --mode dpor --participants 4 --iterations 1 --no-crash
+```
+
+To sanity-check parallel mode, first run the same workload with `--max-workers 1`:
+
+```bash
+build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \
+  --mode dpor --participants 4 --iterations 1 --no-crash \
+  --parallel --max-workers 1
+```
+
+The single-worker timing should be roughly the same as the non-parallel run.
+If it is noticeably slower, the parallel infrastructure is adding unexpected overhead.
 
 ## Code Organization
 
@@ -96,10 +119,12 @@ examples/   → minimal/, two_phase_commit/, and two_phase_commit_timeout/
 
 The engine in `include/dpor/algo/dpor.hpp` implements **Algorithm 1** from the Must paper:
 
-- `verify()` — top-level entry point, returns `VerifyResult` (AllExecutionsExplored / ErrorFound / DepthLimitReached)
+- `verify()` — sequential DFS entry point, returns `VerifyResult` (AllExecutionsExplored / ErrorFound / DepthLimitReached)
+- `verify_parallel()` — experimental parallel exploration with configurable worker threads
 - `visit()` — recursive exploration of consistent executions
 - `backward_revisit()` — identifies alternative interleavings or message matches
 - `DporConfigT` — configuration: program, max_depth, on_execution observer callback
+- `ParallelVerifyOptions` — parallel tuning: `max_workers`, `max_queued_tasks`, `spawn_depth_cutoff`, `min_fanout`, `sync_steps`
 
 Programs are defined via `ProgramT` / `ThreadFunctionT` in `include/dpor/algo/program.hpp`.
 Thread-function traces use `ObservedValueT` entries rather than raw payloads.
