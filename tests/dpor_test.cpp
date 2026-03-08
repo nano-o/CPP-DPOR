@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -75,6 +76,71 @@ ExplorationGraph::EventId find_event_id_by_thread_index(
     }
   }
   return ExplorationGraph::kNoSource;
+}
+
+struct ObservedRun {
+  VerifyResult result{};
+  std::vector<std::string> observed{};
+  std::set<std::string> unique{};
+};
+
+template <typename RunFn>
+ObservedRun collect_observed_executions(
+    const Program& program,
+    RunFn&& run) {
+  ObservedRun observed_run;
+  std::mutex observed_mutex;
+
+  DporConfig config;
+  config.program = program;
+  config.on_execution = [&](const ExplorationGraph& graph) {
+    const auto signature = graph_signature(graph);
+    std::lock_guard lock(observed_mutex);
+    observed_run.observed.push_back(signature);
+    observed_run.unique.insert(signature);
+  };
+
+  observed_run.result = run(config);
+  return observed_run;
+}
+
+Program make_parallel_mixed_program() {
+  Program program;
+
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking);
+    }
+    if (step == 1 && trace.size() == 1) {
+      return SendLabel{
+          .destination = 3,
+          .value = trace[0].is_bottom() ? "timeout" : trace[0].value(),
+      };
+    }
+    return std::nullopt;
+  };
+
+  program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "x"};
+    }
+    return std::nullopt;
+  };
+
+  program.threads[3] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"timeout", "x"});
+    }
+    if (step == 1 && trace.size() == 1) {
+      return NondeterministicChoiceLabel{
+          .value = "ack",
+          .choices = {"ack", "nack"},
+      };
+    }
+    return std::nullopt;
+  };
+
+  return program;
 }
 }  // namespace
 
@@ -1880,4 +1946,100 @@ TEST_CASE("paper ex 4.3: revisiting condition avoids duplicate exploration in s+
   require_dpor_matches_oracle(
       config.program,
       "T1=[S(1,0),Rb(*)]; T2=[S(4,1)]; T3=[S(4,2)]; T4=[Rb(*)]; T5=[S(1,42)]");
+}
+
+TEST_CASE("verify_parallel with one worker matches sequential execution order exactly",
+    "[algo][dpor][parallel]") {
+  const auto program = make_parallel_mixed_program();
+
+  const auto sequential = collect_observed_executions(
+      program,
+      [](const DporConfig& config) {
+        return verify(config);
+      });
+
+  const auto parallel = collect_observed_executions(
+      program,
+      [](const DporConfig& config) {
+        ParallelVerifyOptions options;
+        options.max_workers = 1;
+        options.max_queued_tasks = 4;
+        return verify_parallel(config, options);
+      });
+
+  REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(parallel.result.executions_explored == sequential.result.executions_explored);
+  REQUIRE(parallel.unique == sequential.unique);
+  REQUIRE(parallel.observed == sequential.observed);
+}
+
+TEST_CASE("verify_parallel matches sequential and oracle execution sets on mixed branching",
+    "[algo][dpor][parallel]") {
+  const auto program = make_parallel_mixed_program();
+  const auto oracle = dpor::test_support::collect_oracle_stats(program);
+
+  const auto sequential = collect_observed_executions(
+      program,
+      [](const DporConfig& config) {
+        return verify(config);
+      });
+
+  const auto parallel = collect_observed_executions(
+      program,
+      [](const DporConfig& config) {
+        ParallelVerifyOptions options;
+        options.max_workers = 4;
+        options.max_queued_tasks = 16;
+        return verify_parallel(config, options);
+      });
+
+  REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(parallel.result.executions_explored == sequential.result.executions_explored);
+  REQUIRE(parallel.unique == sequential.unique);
+  REQUIRE(parallel.unique == oracle.signatures);
+  REQUIRE(parallel.unique.size() == parallel.observed.size());
+}
+
+TEST_CASE("verify_parallel stops cleanly when sibling branches race to error",
+    "[algo][dpor][parallel]") {
+  Program program;
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return NondeterministicChoiceLabel{
+          .value = "left",
+          .choices = {"left", "right"},
+      };
+    }
+    if (step == 1 && trace.size() == 1) {
+      return ErrorLabel{};
+    }
+    return std::nullopt;
+  };
+
+  std::size_t observed_count = 0;
+  bool saw_bad_error_graph = false;
+  std::mutex observed_mutex;
+
+  DporConfig config;
+  config.program = program;
+  config.on_execution = [&](const ExplorationGraph& graph) {
+    std::lock_guard lock(observed_mutex);
+    ++observed_count;
+    if (graph.event_count() != 2 ||
+        !is_error(graph.event(1))) {
+      saw_bad_error_graph = true;
+    }
+  };
+
+  ParallelVerifyOptions options;
+  options.max_workers = 2;
+  options.max_queued_tasks = 4;
+
+  const auto result = verify_parallel(config, options);
+  REQUIRE(result.kind == VerifyResultKind::ErrorFound);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(observed_count == 1);
+  REQUIRE_FALSE(saw_bad_error_graph);
 }
