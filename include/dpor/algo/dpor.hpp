@@ -61,6 +61,7 @@ struct ParallelVerifyOptions {
   std::size_t max_queued_tasks{0};
   std::size_t spawn_depth_cutoff{0};
   std::size_t min_fanout{2};
+  std::size_t send_branch_fanout_hint{2};
   ParallelSchedulerPolicy scheduler_policy{ParallelSchedulerPolicy::QueueBacklog};
   std::size_t max_acquired_workers{0};
   // When non-zero, workers read the shared stop flag only every sync_steps
@@ -434,6 +435,10 @@ class SequentialExecutor {
     return {};
   }
 
+  [[nodiscard]] std::size_t send_branch_fanout_hint() const noexcept {
+    return 2;
+  }
+
   [[nodiscard]] bool publish_complete_execution(
       const model::ExplorationGraphT<ValueT>& graph) {
     ++result_.executions_explored;
@@ -554,6 +559,7 @@ class ParallelExecutor {
         max_workers_(resolve_max_workers(options.max_workers)),
         max_queued_tasks_(resolve_max_queued_tasks(options.max_queued_tasks, max_workers_)),
         min_fanout_(std::max<std::size_t>(1, options.min_fanout)),
+        send_branch_fanout_hint_(std::max<std::size_t>(1, options.send_branch_fanout_hint)),
         scheduler_policy_(options.scheduler_policy),
         max_acquired_workers_(
             resolve_max_acquired_workers(options.max_acquired_workers, max_workers_)),
@@ -651,6 +657,10 @@ class ParallelExecutor {
         reserved_idle_permits);
   }
 
+  [[nodiscard]] std::size_t send_branch_fanout_hint() const noexcept {
+    return send_branch_fanout_hint_;
+  }
+
   [[nodiscard]] bool publish_complete_execution(
       const model::ExplorationGraphT<ValueT>& graph) {
     if (sync_steps_ == 0) {
@@ -716,24 +726,16 @@ class ParallelExecutor {
       return false;
     }
 
-    bool enqueued = false;
-    {
-      std::lock_guard lock(queue_mutex_);
-      if (!stop_requested_.load(std::memory_order_relaxed) &&
-          !search_complete_ &&
-          task_queue_.size() < max_queued_tasks_) {
-        task_queue_.push(std::move(task));
-        enqueued = true;
-      }
-    }
-
-    if (enqueued) {
-      queue_cv_.notify_one();
-    }
-    return enqueued;
+    return try_enqueue_task(task);
   }
 
   [[nodiscard]] bool try_enqueue_reserved(ExplorationTask<ValueT>& task) {
+    // Reserved idle-worker permits already prove the caller passed the
+    // scheduler policy checks, so this path only needs the bounded queue push.
+    return try_enqueue_task(task);
+  }
+
+  [[nodiscard]] bool try_enqueue_task(ExplorationTask<ValueT>& task) {
     bool enqueued = false;
     {
       std::lock_guard lock(queue_mutex_);
@@ -801,6 +803,9 @@ class ParallelExecutor {
         idle_waiters_,
         available_queue_slots,
     });
+    // idle_waiters_ counts only unreserved idle workers. A successful branch
+    // reservation consumes permits here, before any woken worker dequeues the
+    // task, so the dequeue path must not decrement again.
     idle_waiters_ -= reserved;
     return reserved;
   }
@@ -811,6 +816,8 @@ class ParallelExecutor {
     }
 
     std::lock_guard lock(queue_mutex_);
+    // Releasing permits only restores logical reservation capacity; the
+    // corresponding workers are already asleep on queue_cv_.
     idle_waiters_ += released_permits;
   }
 
@@ -826,6 +833,8 @@ class ParallelExecutor {
                !search_complete_ &&
                task_queue_.empty()) {
           if (track_idle_waiters && !counted_as_idle) {
+            // Under IdleWorkerHandoff this worker becomes reservable exactly
+            // while blocked on the empty queue.
             ++idle_waiters_;
             counted_as_idle = true;
           }
@@ -926,6 +935,7 @@ class ParallelExecutor {
   std::size_t max_workers_{1};
   std::size_t max_queued_tasks_{1};
   std::size_t min_fanout_{1};
+  std::size_t send_branch_fanout_hint_{2};
   ParallelSchedulerPolicy scheduler_policy_{ParallelSchedulerPolicy::QueueBacklog};
   std::size_t max_acquired_workers_{0};
   std::size_t sync_steps_{0};
@@ -1412,7 +1422,10 @@ inline void visit_impl(
     BranchRemoteDispatch<ValueT, ExecutorT> remote_dispatch(
         executor,
         depth + 1,
-        2,
+        // Send revisits are emitted lazily, so we do not know the true revisit
+        // fanout up front. Use the configured hint here and let the streamed
+        // emission plus branch reservation cap govern actual remote work.
+        executor.send_branch_fanout_hint(),
         graph.receives_in_destination(send_id).size());
 
     for_each_backward_revisit_child(

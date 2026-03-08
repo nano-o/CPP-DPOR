@@ -63,6 +63,7 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
         " [--scheduler queue-backlog|idle-worker-handoff]"
         " [--max-workers N] [--max-queued-tasks N]"
         " [--spawn-depth-cutoff N] [--min-fanout N]"
+        " [--send-branch-fanout-hint N]"
         " [--max-acquired-workers N]\n";
   os << benchmark_label << '\n';
   std::exit(exit_code);
@@ -188,6 +189,11 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
     if (arg == "--min-fanout") {
       options.parallel = true;
       options.parallel_options.min_fanout = parse_nonnegative_int(value, arg);
+      continue;
+    }
+    if (arg == "--send-branch-fanout-hint") {
+      options.parallel = true;
+      options.parallel_options.send_branch_fanout_hint = parse_positive_int(value, arg);
       continue;
     }
     if (arg == "--max-acquired-workers") {
@@ -346,6 +352,8 @@ inline int run_two_phase_commit_benchmark(
                 << " max_queued_tasks=" << options.parallel_options.max_queued_tasks
                 << " spawn_depth_cutoff=" << options.parallel_options.spawn_depth_cutoff
                 << " min_fanout=" << options.parallel_options.min_fanout
+                << " send_branch_fanout_hint="
+                << options.parallel_options.send_branch_fanout_hint
                 << " max_acquired_workers="
                 << options.parallel_options.max_acquired_workers;
     }

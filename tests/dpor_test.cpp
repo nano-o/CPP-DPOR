@@ -109,12 +109,14 @@ ParallelVerifyOptions make_parallel_options(
     const std::size_t max_queued_tasks,
     const ParallelSchedulerPolicy scheduler_policy =
         ParallelSchedulerPolicy::QueueBacklog,
-    const std::size_t max_acquired_workers = 0) {
+    const std::size_t max_acquired_workers = 0,
+    const std::size_t send_branch_fanout_hint = 2) {
   ParallelVerifyOptions options;
   options.max_workers = max_workers;
   options.max_queued_tasks = max_queued_tasks;
   options.scheduler_policy = scheduler_policy;
   options.max_acquired_workers = max_acquired_workers;
+  options.send_branch_fanout_hint = send_branch_fanout_hint;
   return options;
 }
 
@@ -2037,6 +2039,38 @@ TEST_CASE("verify_parallel idle-worker handoff matches sequential and oracle exe
                 16,
                 ParallelSchedulerPolicy::IdleWorkerHandoff,
                 2));
+      });
+
+  REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(parallel.result.executions_explored == sequential.result.executions_explored);
+  REQUIRE(parallel.unique == sequential.unique);
+  REQUIRE(parallel.unique == oracle.signatures);
+  REQUIRE(parallel.unique.size() == parallel.observed.size());
+}
+
+TEST_CASE("verify_parallel accepts a non-default send branch fanout hint",
+    "[algo][dpor][parallel]") {
+  const auto program = make_parallel_mixed_program();
+  const auto oracle = dpor::test_support::collect_oracle_stats(program);
+
+  const auto sequential = collect_observed_executions(
+      program,
+      [](const DporConfig& config) {
+        return verify(config);
+      });
+
+  const auto parallel = collect_observed_executions(
+      program,
+      [](const DporConfig& config) {
+        auto options = make_parallel_options(
+            4,
+            16,
+            ParallelSchedulerPolicy::QueueBacklog,
+            0,
+            3);
+        options.min_fanout = 3;
+        return verify_parallel(config, options);
       });
 
   REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);

@@ -25,6 +25,7 @@ Both executables support the same CLI:
 --max-queued-tasks N
 --spawn-depth-cutoff N
 --min-fanout N
+--send-branch-fanout-hint N
 --max-acquired-workers N
 ```
 
@@ -44,6 +45,9 @@ Both executables support the same CLI:
 - `--max-workers`, `--max-queued-tasks`, `--spawn-depth-cutoff`, and
   `--min-fanout` pass through to `ParallelVerifyOptions`. Supplying any of
   these also enables `--parallel`.
+- `--send-branch-fanout-hint` overrides the heuristic fanout value used when
+  deciding whether send/backward-revisit branches are wide enough to spill
+  work remotely. The default is `2`.
 - `--max-acquired-workers` caps how many idle-worker permits a single branch
   may reserve under `idle-worker-handoff`. Supplying it also enables parallel
   mode and selects `idle-worker-handoff`.
@@ -144,7 +148,8 @@ Timeout-inclusive 2PC, parallel DPOR with conservative split heuristics:
 build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \
   --mode dpor --participants 4 --iterations 1 --no-crash \
   --parallel --max-workers 8 --max-queued-tasks 8 \
-  --spawn-depth-cutoff 2 --min-fanout 4
+  --spawn-depth-cutoff 2 --min-fanout 4 \
+  --send-branch-fanout-hint 4
 ```
 
 Timeout-inclusive 2PC, parallel DPOR with idle-worker handoff:
@@ -155,6 +160,7 @@ build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_ti
   --parallel --scheduler idle-worker-handoff \
   --max-workers 8 --max-queued-tasks 8 \
   --spawn-depth-cutoff 2 --min-fanout 4 \
+  --send-branch-fanout-hint 4 \
   --max-acquired-workers 2
 ```
 
