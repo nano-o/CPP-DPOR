@@ -61,7 +61,7 @@ struct ParallelVerifyOptions {
   std::size_t max_queued_tasks{0};
   std::size_t spawn_depth_cutoff{0};
   std::size_t min_fanout{2};
-  std::size_t send_branch_fanout_hint{2};
+  std::size_t max_send_revisits_remote{2};
   ParallelSchedulerPolicy scheduler_policy{ParallelSchedulerPolicy::QueueBacklog};
   std::size_t max_acquired_workers{0};
   // When non-zero, workers read the shared stop flag only every sync_steps
@@ -435,7 +435,7 @@ class SequentialExecutor {
     return {};
   }
 
-  [[nodiscard]] std::size_t send_branch_fanout_hint() const noexcept {
+  [[nodiscard]] std::size_t max_send_revisits_remote() const noexcept {
     return 2;
   }
 
@@ -559,7 +559,7 @@ class ParallelExecutor {
         max_workers_(resolve_max_workers(options.max_workers)),
         max_queued_tasks_(resolve_max_queued_tasks(options.max_queued_tasks, max_workers_)),
         min_fanout_(std::max<std::size_t>(1, options.min_fanout)),
-        send_branch_fanout_hint_(std::max<std::size_t>(1, options.send_branch_fanout_hint)),
+        max_send_revisits_remote_(std::max<std::size_t>(1, options.max_send_revisits_remote)),
         scheduler_policy_(options.scheduler_policy),
         max_acquired_workers_(
             resolve_max_acquired_workers(options.max_acquired_workers, max_workers_)),
@@ -657,8 +657,8 @@ class ParallelExecutor {
         reserved_idle_permits);
   }
 
-  [[nodiscard]] std::size_t send_branch_fanout_hint() const noexcept {
-    return send_branch_fanout_hint_;
+  [[nodiscard]] std::size_t max_send_revisits_remote() const noexcept {
+    return max_send_revisits_remote_;
   }
 
   [[nodiscard]] bool publish_complete_execution(
@@ -935,7 +935,7 @@ class ParallelExecutor {
   std::size_t max_workers_{1};
   std::size_t max_queued_tasks_{1};
   std::size_t min_fanout_{1};
-  std::size_t send_branch_fanout_hint_{2};
+  std::size_t max_send_revisits_remote_{2};
   ParallelSchedulerPolicy scheduler_policy_{ParallelSchedulerPolicy::QueueBacklog};
   std::size_t max_acquired_workers_{0};
   std::size_t sync_steps_{0};
@@ -1419,14 +1419,15 @@ inline void visit_impl(
   if (std::holds_alternative<model::SendLabelT<ValueT>>(label)) {
     ScopedRollback rollback(graph);
     const auto send_id = graph.add_event(tid, label);
+    const auto send_hint = executor.max_send_revisits_remote();
     BranchRemoteDispatch<ValueT, ExecutorT> remote_dispatch(
         executor,
         depth + 1,
         // Send revisits are emitted lazily, so we do not know the true revisit
-        // fanout up front. Use the configured hint here and let the streamed
-        // emission plus branch reservation cap govern actual remote work.
-        executor.send_branch_fanout_hint(),
-        graph.receives_in_destination(send_id).size());
+        // fanout up front. Use the configured hint as both the min-fanout gate
+        // value and the remote-children budget.
+        send_hint,
+        send_hint);
 
     for_each_backward_revisit_child(
         graph,
