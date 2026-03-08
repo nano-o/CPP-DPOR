@@ -318,6 +318,63 @@ Parallel exploration can speed up branch-heavy workloads, but it will not be fre
 - scheduler overhead should be acceptable if tasks are coarse, but some spawned subtrees will still prune quickly, so this must be measured rather than assumed
 - queue limits only bound queued snapshots; total memory also includes each worker's local DFS/rollback state, so memory budgeting must consider both components
 
+## Current Benchmark Findings
+
+Early measurements on the timeout-inclusive two-phase commit benchmark show that
+the current parallel implementation does not yet have a good default split
+policy.
+
+- `participants=3`, `iterations=1`, `--no-crash`:
+  - sequential: about `549 ms`
+  - parallel with `max_workers=1`: about `585 ms`
+  - parallel with `max_workers=4` and the current defaults
+    (`spawn_depth_cutoff=0`, `min_fanout=2`): still running after about `20 s`,
+    manually stopped
+  - parallel with `max_workers=4` plus either `spawn_depth_cutoff=1` or
+    `spawn_depth_cutoff=2`: about `590 ms`
+  - parallel with `max_workers=4`, `spawn_depth_cutoff=0`,
+    `min_fanout=4`: about `590 ms`
+
+- `participants=4`, `iterations=1`, `--no-crash`:
+  - sequential: about `80.2 s`
+  - parallel with `max_workers=1`: about `80.4 s`
+  - parallel with `max_workers=4` and current defaults used about four cores in
+    a short probe, but did not finish within `30 s`
+  - more conservative settings that avoided the blow-up only used about one
+    core during the first `10-15 s` of the same probe, so they were unlikely to
+    deliver meaningful speedup
+
+These results are useful because they isolate the problem:
+
+- the parallel executor path itself is close to neutral when no real spawning
+  happens (`max_workers=1`)
+- the default split policy is too aggressive on this workload
+- once spawning is constrained enough to avoid the blow-up, the search no
+  longer exposes enough parallel work to keep multiple workers busy
+
+The current working diagnosis is:
+
+- spawning on binary branches at arbitrary depth is too fine-grained for this
+  state space
+- graph snapshot copying and queue/scheduler overhead dominate any useful
+  parallelism under the current defaults
+- a shallow depth cutoff or higher fan-out gate suppresses that overhead, but
+  also suppresses most available parallel work
+
+That means the next step should be measurement-driven tuning rather than blind
+default changes. In particular, the executor should grow low-overhead counters
+for:
+
+- spawn attempts
+- successful enqueues
+- enqueue-failure fallbacks to local recursion
+- tasks processed
+- maximum queue depth
+- branch-type breakdowns for ND, receive, and send-revisit splits
+
+Those counters should be used to drive a capped benchmark matrix before claiming
+any general speedup on this workload.
+
 Success criteria for the first landing:
 
 - no correctness regressions
