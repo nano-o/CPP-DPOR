@@ -68,6 +68,10 @@ bool parallel_experimental{false};
 
 Recommendation: prefer a separate `verify_parallel()` first. That keeps semantic caveats isolated and avoids quietly widening the contract of the existing `verify()` API.
 
+If parallel exploration grows multiple scheduler policies, `verify_parallel()`
+should also take an explicit scheduler selection knob, with the current
+queue-backlog policy remaining the default.
+
 ## Core Internal Types
 
 One conservative internal shape is:
@@ -119,6 +123,65 @@ Why this is the right first implementation:
 
 Start with a single global queue protected by `std::mutex` + `std::condition_variable`. If profiling later shows scheduler contention, move to per-worker deques plus work stealing as a follow-up.
 
+This queue-backlog policy should remain one valid strategy, not the only one.
+
+### Alternative Strategy: Idle-Worker Handoff
+
+An alternative policy is to reserve idle-worker permits per branch, rather than
+making an independent remote-placement decision for every child.
+
+The intended shape is:
+
+- keep the same work-first local-first branch policy
+- keep the same bounded central queue and worker pool
+- allow any worker, not just a distinguished main worker, to reserve idle
+  helpers for one branch expansion
+- acquire permits only after the next event and branch shape are known
+- reserve at most `min(max_acquired_workers, idle_waiters, remote_children_needed)`
+  permits for that branch
+- consume those permits for remote siblings, then continue in local-only mode
+  for the rest of the branch
+- release any unused permits immediately before continuing local recursion
+- otherwise recurse locally and do not build backlog
+
+This strategy should be added as an alternative to the current queue-backlog
+policy, not as a replacement.
+
+The scheduler interface should reflect that split:
+
+- keep a cheap lock-free pre-check such as `can_attempt_remote(child_depth, fanout)`
+- only if the pre-check passes, enter the mutex path through a common
+  branch-reservation path
+- let that path dispatch to the selected strategy
+- model the reservation as a small branch-scoped permit object so unused
+  reservations are released reliably on normal exit, stop, or exception
+
+For the idle-worker handoff policy, the key invariants should be:
+
+- `idle_waiters_` is modified only under `queue_mutex_`
+- reserving branch permits atomically decrements `idle_waiters_` under the same lock
+- remote dispatch consumes only previously reserved permits for that branch
+
+That gives the property this strategy is trying to buy:
+
+- the worker knows up front how many remote children it is allowed to create
+- no branch builds more remote backlog than its reserved idle-helper budget
+
+The first landing should keep the accounting simple:
+
+- use only `idle_waiters_`
+- do not add a separate `reserved_handoffs_` counter unless later evidence
+  shows it is needed
+
+Under this policy, `max_queued_tasks` still matters, but the effective queue
+bound becomes:
+
+- `min(reserved_idle_permits, max_queued_tasks_)` for a branch, with the global
+  reservation pool still bounded by `idle_waiters_`
+
+So `max_queued_tasks` remains a safety cap, while idle-worker availability is
+the real gate in the normal case.
+
 ## Duplicate Exploration
 
 No global deduplication layer is planned for the first landing.
@@ -158,6 +221,12 @@ Parallelism should be added by enumerating owned child graphs at the branch poin
 - let `backward_revisit()` materialize revisited child graphs and emit them to the scheduler one by one
 - do not try to share the worker's mutated post-send graph across threads
 - do not batch all revisited graphs before dispatch; streaming them reduces memory pressure and lets idle workers start earlier
+- under branch-scoped permit reservation, acquire at most `K` idle-worker
+  permits for the send branch, dispatch up to the first `K` revisits remotely,
+  then fall back to local revisit handling for the remainder
+- this still keeps revisit enumeration streaming; it does not make revisit
+  materialization free, but it does cap remote revisit snapshots and queue
+  traffic more tightly
 
 ### Block branch
 
@@ -268,6 +337,27 @@ This needs to be documented next to the new API/config surface.
    - do not spawn past a configurable depth cutoff
    - cap queued tasks to control memory
 
+### Phase 4A: Add Alternative Scheduler Policy
+
+This should be the next implementation step.
+
+1. Add a scheduler selector to `ParallelVerifyOptions`, with the current
+   queue-backlog policy as the default.
+2. Add a `max_acquired_workers`-style knob for the alternative policy so one
+   branch cannot reserve an unbounded number of idle helpers at once.
+3. Refactor branch code so it uses:
+   - a cheap lock-free pre-check such as `can_attempt_remote(...)`
+   - a branch-scoped reservation path for remote permits
+4. Implement `IdleWorkerHandoff` inside the current executor:
+   - maintain `idle_waiters_` only under `queue_mutex_`
+   - reserve idle-worker permits only after the next event and branch shape are known
+   - reserve at most `min(max_acquired_workers, idle_waiters, remote_children_needed)`
+   - dispatch only as many remote children as permits were reserved for that branch
+   - release unused permits immediately when the branch finishes or falls back local
+5. Keep runtime strategy selection first for easier A/B benchmarking. If the
+   strategy survives and dispatch overhead matters, compile-time selection can
+   be revisited later.
+
 ### Phase 5: Result Aggregation And Error Cancellation
 
 1. Count completed executions atomically.
@@ -300,6 +390,12 @@ This needs to be documented next to the new API/config surface.
 - repeated stress runs of the existing randomized DPOR tests in parallel mode
 - a test where multiple workers race to report an error and exploration still terminates cleanly
 - a test that saturated branching obeys queue and task-budget limits
+- a test that `IdleWorkerHandoff` does not build backlog when no helper is idle
+- a test that handoff failure falls back to local recursion without deadlock
+- a test that branch-scoped permit reservation never dispatches more remote
+  children than were reserved for that branch
+- an asymmetric-fanout case where one deep branch ties up a worker while shallow
+  siblings finish quickly, so the strategy's weakness on skewed trees is measured
 - a test that no shared graph mutation occurs across tasks, backed first by ownership discipline and later by TSAN if a TSAN build is added
 - if a TSAN build/preset is added, the work-first branch-splitting landing should be TSAN-clean before it is considered done
 
@@ -366,6 +462,7 @@ default changes. In particular, the executor should grow low-overhead counters
 for:
 
 - spawn attempts
+- idle-worker availability at handoff attempt
 - successful enqueues
 - enqueue-failure fallbacks to local recursion
 - tasks processed
@@ -374,6 +471,13 @@ for:
 
 Those counters should be used to drive a capped benchmark matrix before claiming
 any general speedup on this workload.
+
+The next concrete implementation step should therefore be:
+
+- add the branch-scoped `IdleWorkerHandoff` alternative strategy with a
+  selectable scheduler knob and a `max_acquired_workers`-style branch cap
+- instrument both scheduler strategies and compare them on the timeout
+  benchmark before changing defaults
 
 Success criteria for the first landing:
 
