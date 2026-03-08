@@ -104,9 +104,17 @@ therefore still consume queue capacity that had been "reserved", so the result
 applies to that imperfect implementation rather than to a fully enforced
 reservation scheme.
 
-Even with that caveat, the likely reason for the slowdown is that eager
-reserved enqueue pays remote copy/materialize cost before the local work-first
-path can make progress.
+A follow-up hard-reservation variant was also tested, where ordinary enqueue
+treated reserved credits as consumed capacity until they were used or released.
+That was still slower than the current heuristic:
+
+- default queue budget: `12815.865 ms -> 16673.359 ms`
+- `--max-queued-tasks 1`: `13380.854 ms -> 17895.274 ms`
+
+Taken together, the likely issue is not just imperfect reservation accounting.
+The eager reserved-enqueue shape itself appears to pay remote
+copy/materialize/scheduling cost before the local work-first path can make
+progress.
 
 ## Branch Handling
 
