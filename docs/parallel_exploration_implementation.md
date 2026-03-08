@@ -98,8 +98,15 @@ snapshot-budget heuristic:
 - default queue budget: `12815.865 ms -> 17183.547 ms`
 - `--max-queued-tasks 1`: `13380.854 ms -> 17829.186 ms`
 
-The likely reason is that eager reserved enqueue pays remote copy/materialize
-cost before the local work-first path can make progress.
+One important caveat: that prototype tracked reserved credits separately, but
+the ordinary enqueue path did not subtract those credits. Other workers could
+therefore still consume queue capacity that had been "reserved", so the result
+applies to that imperfect implementation rather than to a fully enforced
+reservation scheme.
+
+Even with that caveat, the likely reason for the slowdown is that eager
+reserved enqueue pays remote copy/materialize cost before the local work-first
+path can make progress.
 
 ## Branch Handling
 
