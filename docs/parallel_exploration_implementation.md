@@ -65,8 +65,11 @@ same `worker_loop()` on the calling thread.
 The implemented strategy is work-first:
 
 1. Keep the first child of a branch local.
-2. Attempt to enqueue later siblings only if `can_spawn(...)` passes.
-3. If enqueue fails, recurse locally instead.
+2. On ND and receive branches, compute a branch-local enqueue budget from the
+   current queue occupancy before copying any later sibling.
+3. Attempt to enqueue later siblings only while that budget remains and
+   `can_spawn(...)` passes.
+4. If enqueue fails, recurse locally instead.
 
 `can_spawn(child_depth, fanout)` currently requires:
 
@@ -78,6 +81,14 @@ The implemented strategy is work-first:
 The queue is only a backlog buffer. Workers always prefer continuing local
 rollback-based recursion over waiting for queue space.
 
+For ND and receive branches, the enqueue budget is a best-effort snapshot:
+
+- `min(total_children - 1, available_queue_slots)` at branch entry
+- still subject to the final locked `try_enqueue(...)` check
+
+This avoids copying child graphs for siblings that cannot fit in the queue
+under the current backlog pressure.
+
 ## Branch Handling
 
 The implementation parallelizes only at existing DPOR branch points.
@@ -85,13 +96,16 @@ The implementation parallelizes only at existing DPOR branch points.
 ### ND Branches
 
 - The first choice stays local.
-- Later choices may be enqueued as owned child graphs.
+- Later choices may be enqueued as owned child graphs, but only up to the
+  branch-local enqueue budget derived from visible queue capacity.
 
 ### Receive Branches
 
 - The compatible unread sends are computed once.
 - Each matching `(recv, send_id)` child becomes an independent graph.
 - The non-blocking bottom branch is treated as another child.
+- As with ND, later siblings only take the copy-and-enqueue path while the
+  branch-local enqueue budget remains non-zero.
 
 ### Send Branches
 
