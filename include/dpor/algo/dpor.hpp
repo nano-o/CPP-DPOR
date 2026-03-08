@@ -775,6 +775,9 @@ inline void for_each_backward_revisit_child(
     EmitFn&& emit_revisited) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
 
+  // Backward revisiting: Algorithm 1 lines 10-13. For each receive in the
+  // destination thread of the new send, check compatibility and revisit
+  // conditions, then emit an owned restricted+rewired child graph.
   if (should_stop()) {
     return;
   }

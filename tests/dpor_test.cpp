@@ -2043,3 +2043,87 @@ TEST_CASE("verify_parallel stops cleanly when sibling branches race to error",
   REQUIRE(observed_count == 1);
   REQUIRE_FALSE(saw_bad_error_graph);
 }
+
+TEST_CASE("verify_parallel reports depth limit when one branch exceeds max_depth",
+    "[algo][dpor][parallel]") {
+  Program program;
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return NondeterministicChoiceLabel{
+          .value = "done",
+          .choices = {"done", "loop"},
+      };
+    }
+    if (trace.size() != 1) {
+      return std::nullopt;
+    }
+    if (trace[0].value() == "done") {
+      return std::nullopt;
+    }
+    return SendLabel{.destination = 2, .value = "tick"};
+  };
+
+  std::size_t observed_count = 0;
+  std::mutex observed_mutex;
+
+  DporConfig config;
+  config.program = program;
+  config.max_depth = 2;
+  config.on_execution = [&](const ExplorationGraph&) {
+    std::lock_guard lock(observed_mutex);
+    ++observed_count;
+  };
+
+  ParallelVerifyOptions options;
+  options.max_workers = 2;
+  options.max_queued_tasks = 4;
+
+  const auto result = verify_parallel(config, options);
+  REQUIRE(result.kind == VerifyResultKind::DepthLimitReached);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(observed_count == 1);
+}
+
+TEST_CASE("verify_parallel matches sequential under tiny queue budget and high fanout",
+    "[algo][dpor][parallel]") {
+  Program program;
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return NondeterministicChoiceLabel{
+          .value = "a",
+          .choices = {"a", "b", "c", "d", "e"},
+      };
+    }
+    if (step == 1 && trace.size() == 1) {
+      return NondeterministicChoiceLabel{
+          .value = "u",
+          .choices = {"u", "v", "w"},
+      };
+    }
+    return std::nullopt;
+  };
+
+  const auto oracle = dpor::test_support::collect_oracle_stats(program);
+  const auto sequential = collect_observed_executions(
+      program,
+      [](const DporConfig& config) {
+        return verify(config);
+      });
+
+  const auto parallel = collect_observed_executions(
+      program,
+      [](const DporConfig& config) {
+        ParallelVerifyOptions options;
+        options.max_workers = 2;
+        options.max_queued_tasks = 1;
+        return verify_parallel(config, options);
+      });
+
+  REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(parallel.result.executions_explored == 15);
+  REQUIRE(parallel.result.executions_explored == sequential.result.executions_explored);
+  REQUIRE(parallel.unique == sequential.unique);
+  REQUIRE(parallel.unique == oracle.signatures);
+  REQUIRE(parallel.unique.size() == parallel.observed.size());
+}
