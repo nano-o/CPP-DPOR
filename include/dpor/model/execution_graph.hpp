@@ -307,7 +307,8 @@ class ExecutionGraphT {
 
  private:
   template <typename Callback>
-  void for_each_validated_rf_edge(const Callback& callback) const {
+  void for_each_validated_rf_edge(
+      Callback&& callback) const {  // NOLINT(cppcoreguidelines-missing-std-forward)
     for (const auto& [receive_id, source] : reads_from_) {
       if (!is_valid_event_id(receive_id)) {
         throw std::invalid_argument("reads-from relation refers to an unknown receive event id");

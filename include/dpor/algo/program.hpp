@@ -116,7 +116,7 @@ class ThreadMapT {
   }
 
   template <typename Fn>
-  void for_each_assigned(const Fn& fn) const {
+  void for_each_assigned(Fn&& fn) const {  // NOLINT(cppcoreguidelines-missing-std-forward)
     for (std::size_t index = 0; index < entries_.size(); ++index) {
       if (entries_[index].has_value()) {
         fn(static_cast<model::ThreadId>(index),

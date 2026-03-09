@@ -749,8 +749,9 @@ inline void explore_branch(const ProgramT<ValueT>& program,
 template <typename ValueT, typename StopFn, typename EmitFn>
 inline void for_each_backward_revisit_child(
     const model::ExplorationGraphT<ValueT>& graph,
-    const typename model::ExplorationGraphT<ValueT>::EventId send_id, const StopFn& should_stop,
-    const EmitFn& emit_revisited) {
+    const typename model::ExplorationGraphT<ValueT>::EventId send_id,
+    StopFn&& should_stop,  // NOLINT(cppcoreguidelines-missing-std-forward)
+    EmitFn&& emit_revisited) {  // NOLINT(cppcoreguidelines-missing-std-forward)
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
 
   // Backward revisiting: Algorithm 1 lines 10-13. For each receive in the

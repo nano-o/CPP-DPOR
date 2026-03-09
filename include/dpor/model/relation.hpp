@@ -55,7 +55,8 @@ class ExplicitRelation {
   }
 
   template <typename Func>
-  void for_each_successor(NodeId from, const Func& func) const {
+  void for_each_successor(NodeId from,
+                          Func&& func) const {  // NOLINT(cppcoreguidelines-missing-std-forward)
     validate_node(from);
     for (const auto successor : successors_[from]) {
       func(successor);
@@ -115,7 +116,8 @@ class ProgramOrderRelation {
   }
 
   template <typename Func>
-  void for_each_successor(NodeId from, const Func& func) const {
+  void for_each_successor(NodeId from,
+                          Func&& func) const {  // NOLINT(cppcoreguidelines-missing-std-forward)
     validate_node(from);
     const auto thread = thread_of_[from];
     if (thread == kNoThread) {
@@ -192,7 +194,8 @@ class ComposeRelation {
   }
 
   template <typename Func>
-  void for_each_successor(NodeId from, const Func& func) const {
+  void for_each_successor(NodeId from,
+                          Func&& func) const {  // NOLINT(cppcoreguidelines-missing-std-forward)
     validate_node(from);
 
     std::vector<bool> emitted(node_count(), false);
@@ -245,7 +248,8 @@ class TransitiveClosureRelation {
   }
 
   template <typename Func>
-  void for_each_successor(NodeId from, const Func& func) const {
+  void for_each_successor(NodeId from,
+                          Func&& func) const {  // NOLINT(cppcoreguidelines-missing-std-forward)
     validate_node(from);
 
     std::vector<bool> visited(node_count(), false);
@@ -306,7 +310,8 @@ class UnionRelation {
   }
 
   template <typename Func>
-  void for_each_successor(NodeId from, const Func& func) const {
+  void for_each_successor(NodeId from,
+                          Func&& func) const {  // NOLINT(cppcoreguidelines-missing-std-forward)
     validate_node(from);
 
     std::vector<bool> emitted(node_count(), false);
