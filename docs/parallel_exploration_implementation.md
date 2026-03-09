@@ -62,14 +62,15 @@ same `worker_loop()` on the calling thread.
 
 ## Scheduling Policy
 
-The implemented strategy is work-first:
+The implemented strategy is work-first, with parallel spawning restricted to
+send backward-revisit branches:
 
-1. Keep the first child of a branch local.
-2. On ND and receive branches, compute a branch-local enqueue budget from the
-   current queue occupancy before copying any later sibling.
-3. Attempt to enqueue later siblings only while that budget remains and
-   `can_spawn(...)` passes.
-4. If enqueue fails, recurse locally instead.
+1. ND and receive branches explore all children locally via `ScopedRollback`.
+2. Send branches keep the forward continuation local. Backward-revisit children
+   — which are already materialized as independent owned graphs by
+   `for_each_backward_revisit_child(...)` — may be enqueued for remote
+   execution if `can_spawn(...)` passes. If enqueue fails, they are explored
+   locally instead.
 
 `can_spawn(child_depth, fanout)` currently requires:
 
@@ -81,19 +82,31 @@ The implemented strategy is work-first:
 The queue is only a backlog buffer. Workers always prefer continuing local
 rollback-based recursion over waiting for queue space.
 
-For ND and receive branches, the enqueue budget is a best-effort snapshot:
+### Why only send branches spawn
 
-- `min(total_children - 1, available_queue_slots)` at branch entry
-- still subject to the final locked `try_enqueue(...)` check
+ND and receive branches use in-place mutation with `ScopedRollback` to avoid
+graph copies. Enqueuing a sibling from these branches requires copying the
+parent graph, which is pure overhead. Send backward-revisit children, by
+contrast, are already fully materialized owned graphs (via `restrict_masked` +
+`with_rf`), so enqueuing them costs no additional copy.
 
-This avoids copying child graphs for siblings that cannot fit in the queue
-under the current backlog pressure.
+On the 4-participant no-crash 2PC timeout benchmark, restricting parallelism to
+send branches is neutral to ~8% faster across 1-20 workers compared to also
+enqueuing ND/receive siblings, with identical execution counts (7,262,928).
 
-An exact-reservation variant for ND/receive branches was also tested: reserve
-queue capacity first, eagerly materialize and enqueue exactly those reserved
-siblings, then recurse locally. On the timeout benchmark (`participants=4`,
-`--parallel --max-workers 8`) that was consistently worse than the current
-snapshot-budget heuristic:
+Earlier variants that enqueued ND/receive siblings used an `enqueue_budget`
+mechanism to limit graph copies by snapshotting queue occupancy at branch entry.
+That machinery (including the locked capacity snapshot in
+`ParallelExecutor::enqueue_budget()`) has been removed in favor of the simpler
+send-only policy.
+
+### Previously tested ND/receive enqueue strategies
+
+An exact-reservation variant for ND/receive branches was tested: reserve queue
+capacity first, eagerly materialize and enqueue exactly those reserved siblings,
+then recurse locally. On the timeout benchmark (`participants=4`, `--parallel
+--max-workers 8`) that was consistently worse than the snapshot-budget heuristic
+it aimed to replace:
 
 - default queue budget: `12815.865 ms -> 17183.547 ms`
 - `--max-queued-tasks 1`: `13380.854 ms -> 17829.186 ms`
@@ -106,7 +119,7 @@ reservation scheme.
 
 A follow-up hard-reservation variant was also tested, where ordinary enqueue
 treated reserved credits as consumed capacity until they were used or released.
-That was still slower than the current heuristic:
+That was still slower than the snapshot-budget heuristic:
 
 - default queue budget: `12815.865 ms -> 16673.359 ms`
 - `--max-queued-tasks 1`: `13380.854 ms -> 17895.274 ms`
@@ -122,27 +135,24 @@ The implementation parallelizes only at existing DPOR branch points.
 
 ### ND Branches
 
-- The first choice stays local.
-- Later choices may be enqueued as owned child graphs, but only up to the
-  branch-local enqueue budget derived from visible queue capacity.
+- All choices are explored locally via `ScopedRollback` on the parent graph.
 
 ### Receive Branches
 
 - The compatible unread sends are computed once.
-- Each matching `(recv, send_id)` child becomes an independent graph.
-- The non-blocking bottom branch is treated as another child.
-- As with ND, later siblings only take the copy-and-enqueue path while the
-  branch-local enqueue budget remains non-zero.
+- Each matching `(recv, send_id)` child and the non-blocking bottom branch are
+  explored locally via `ScopedRollback` on the parent graph.
 
 ### Send Branches
 
 - The worker appends the send locally and keeps the forward continuation local.
 - Backward-revisit children are streamed one by one out of
   `for_each_backward_revisit_child(...)`.
-- Each revisited graph may be enqueued; if not, it is explored locally.
+- Each revisited graph may be enqueued for remote execution; if enqueue fails,
+  it is explored locally.
 
-This is the most important spawn boundary in the current implementation because
-revisit children are already fully materialized owned graphs.
+This is the sole parallel spawn point. Revisit children are already fully
+materialized owned graphs, so enqueuing them incurs no additional copy.
 
 ### Block / Reschedule Paths
 
@@ -263,7 +273,7 @@ The implemented parallel mode is:
 
 - a separate `verify_parallel()` entry point
 - a bounded central queue plus worker pool
-- work-first local recursion with optional sibling handoff
+- work-first local recursion with send-revisit handoff
 - value-based graph handoff only
 - correctness-first, not order-preserving
 

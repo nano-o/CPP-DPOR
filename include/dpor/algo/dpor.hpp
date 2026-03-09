@@ -414,10 +414,6 @@ class SequentialExecutor {
     return false;
   }
 
-  [[nodiscard]] std::size_t enqueue_budget(std::size_t, std::size_t) const noexcept {
-    return 0;
-  }
-
   [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT>&) const noexcept {
     return false;
   }
@@ -533,27 +529,6 @@ class ParallelExecutor {
       return false;
     }
     return true;
-  }
-
-  [[nodiscard]] std::size_t enqueue_budget(
-      const std::size_t child_depth,
-      const std::size_t fanout) noexcept {
-    if (!can_spawn(child_depth, fanout) || fanout <= 1) {
-      return 0;
-    }
-
-    std::lock_guard lock(queue_mutex_);
-    if (stop_requested_.load(std::memory_order_relaxed) || search_complete_) {
-      return 0;
-    }
-
-    // Snapshot visible backlog capacity so ND/receive branches can skip
-    // sibling graph copies that would be rejected immediately.
-    const auto available_slots =
-        task_queue_.size() < max_queued_tasks_
-        ? max_queued_tasks_ - task_queue_.size()
-        : 0U;
-    return std::min(fanout - 1U, available_slots);
   }
 
   [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT>& task) {
@@ -820,6 +795,8 @@ template <typename ValueT, typename ExecutorT>
   return false;
 }
 
+// Explore a single child of an ND or receive branch locally.  The first child
+// reuses the parent graph via ScopedRollback; subsequent children do the same.
 template <typename ValueT, typename ExecutorT, typename MutateFn>
 inline void explore_branch(
     const ProgramT<ValueT>& program,
@@ -829,32 +806,8 @@ inline void explore_branch(
     const std::size_t depth,
     const std::vector<model::ThreadId>& thread_ids,
     const ExplorationTaskMode mode,
-    bool& kept_local_child,
-    std::size_t& remaining_enqueue_budget,
     MutateFn&& mutate_branch) {
   using ScopedRollback = typename model::ExplorationGraphT<ValueT>::ScopedRollback;
-
-  if (!kept_local_child) {
-    kept_local_child = true;
-    ScopedRollback rollback(parent_graph);
-    mutate_branch(parent_graph);
-    recurse_graph(program, parent_graph, executor, config, depth, thread_ids, mode);
-    return;
-  }
-
-  if (remaining_enqueue_budget != 0) {
-    auto child_graph = parent_graph;
-    --remaining_enqueue_budget;
-    mutate_branch(child_graph);
-    ExplorationTask<ValueT> task{
-        .graph = std::move(child_graph),
-        .depth = depth,
-        .mode = mode,
-    };
-    if (executor.try_enqueue(task)) {
-      return;
-    }
-  }
 
   ScopedRollback rollback(parent_graph);
   mutate_branch(parent_graph);
@@ -1104,8 +1057,6 @@ inline void visit_impl(
       return;
     }
 
-    bool kept_local_child = false;
-    auto enqueue_budget = executor.enqueue_budget(depth + 1, nd->choices.size());
     for (const auto& choice : nd->choices) {
       if (executor.stop_requested()) {
         return;
@@ -1120,8 +1071,6 @@ inline void visit_impl(
           depth + 1,
           thread_ids,
           ExplorationTaskMode::Visit,
-          kept_local_child,
-          enqueue_budget,
           [tid, nd_label = std::move(nd_label)](auto& branch_graph) {
             static_cast<void>(branch_graph.add_event(
                 tid,
@@ -1142,11 +1091,6 @@ inline void visit_impl(
       }
     }
 
-    bool kept_local_child = false;
-    const auto total_children =
-        compatible_sends.size() + (recv->is_nonblocking() ? 1U : 0U);
-    auto enqueue_budget = executor.enqueue_budget(depth + 1, total_children);
-
     for (const auto send_id : compatible_sends) {
       if (executor.stop_requested()) {
         return;
@@ -1159,8 +1103,6 @@ inline void visit_impl(
           depth + 1,
           thread_ids,
           ExplorationTaskMode::VisitIfConsistent,
-          kept_local_child,
-          enqueue_budget,
           [tid, &label, send_id](auto& branch_graph) {
             const auto recv_id = branch_graph.add_event(tid, label);
             branch_graph.set_reads_from(recv_id, send_id);
@@ -1176,8 +1118,6 @@ inline void visit_impl(
           depth + 1,
           thread_ids,
           ExplorationTaskMode::VisitIfConsistent,
-          kept_local_child,
-          enqueue_budget,
           [tid, &label](auto& branch_graph) {
             const auto recv_id = branch_graph.add_event(tid, label);
             branch_graph.set_reads_from_bottom(recv_id);
