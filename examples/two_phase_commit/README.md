@@ -86,9 +86,8 @@ awareness.
 
 ## The replay-from-scratch approach
 
-The DPOR engine is single-threaded and calls each `ThreadFunction`
-non-linearly across exploration branches. The simulation handles this with a
-simple replay strategy:
+The DPOR engine may call each `ThreadFunction` non-linearly across exploration
+branches. The simulation handles this with a simple replay strategy:
 
 1. Each `ThreadFunction` call creates a fresh protocol object and
    `SimEnvironment`.

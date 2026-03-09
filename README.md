@@ -36,9 +36,10 @@ ctest --preset debug-fetch-catch2
 
 ## Static analysis
 
-The project includes configuration for four static analysis tools, all off by
-default. The `lint` preset enables clang-tidy and cppcheck with enforcing
-settings (`WarningsAsErrors: '*'`, `--error-exitcode=1`):
+The project includes configuration for three integrated static-analysis tools,
+all off by default: `clang-tidy`, `cppcheck`, and `IWYU`. The `lint` preset
+enables `clang-tidy` and `cppcheck` with enforcing settings
+(`WarningsAsErrors: '*'`, `--error-exitcode=1`):
 
 ```bash
 cmake --preset lint
@@ -94,33 +95,36 @@ If installed to a non-default prefix, add it to `CMAKE_PREFIX_PATH`.
 ## Performance: lazy PorfCache with vector clocks
 
 `ExplorationGraphT` uses a lazy, shared vector-clock cache (`PorfCache`) to
-accelerate two hot-path queries:
+accelerate hot-path reachability and warm-cache cycle queries:
 
 | Operation | Without cache | With cache |
 |---|---|---|
 | `porf_contains(from, to)` | O(N+E) per call | O(1) amortized |
 | `has_causal_cycle()` | O(N+E) per call | O(1) amortized |
 
-The cache is built on first query via Kahn's topological sort and stores a
+The cache is built on demand via Kahn's topological sort and stores a
 per-event vector clock (one entry per thread). Subsequent `porf_contains` calls
 compare a single clock entry. Cycle detection is a byproduct of the topological
-sort (incomplete sort = cycle).
+sort (incomplete sort = cycle). The consistency checker can also use the
+cheaper `has_causal_cycle_without_cache()` path when it only needs a cycle
+answer and the cache is still cold.
 
 Key properties:
 
-- **Lazy**: the cache is only built when `porf_contains` or `has_causal_cycle`
-  is first called.
+- **Lazy**: vector clocks are only built when `porf_contains()` or the
+  cache-backed `has_causal_cycle()` path needs them.
 - **Shared across copies**: the cache is held via `std::shared_ptr`, so
   graph copies (from `with_rf`, `with_nd_value`, etc.) share the parent's
   cache until they mutate.
 - **Auto-invalidated**: any call to `add_event` or `set_reads_from` resets
   the cache to null, triggering a rebuild on the next query.
-- **Cycle-safe**: if the graph contains a causal cycle, `porf_contains` falls
-  back to the original BFS/transitive-closure implementation.
+- **Cycle-safe for DPOR**: `porf_contains()` throws on cyclic graphs. The DPOR
+  engine only calls it on consistent graphs, and consistency checking prunes
+  causal cycles before those queries.
 
 ## Layout
 
-- `include/dpor/api`: public, stable headers
+- `include/dpor/api`: public headers
 - `include/dpor/model`: core model types (events, relations, execution/exploration graphs)
 - `src`: implementation details
 - `tests`: unit/integration tests with CTest

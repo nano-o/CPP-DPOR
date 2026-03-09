@@ -97,9 +97,8 @@ awareness.
 
 ## The replay-from-scratch approach
 
-The DPOR engine is single-threaded and calls each `ThreadFunction`
-non-linearly across exploration branches. The simulation handles this with a
-simple replay strategy:
+The DPOR engine may call each `ThreadFunction` non-linearly across exploration
+branches. The simulation handles this with a simple replay strategy:
 
 1. Each `ThreadFunction` call creates a fresh protocol object and
    `SimEnvironment`.
@@ -214,15 +213,18 @@ cmake --build --preset debug
 ./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[two_phase_commit]"
 
 # DPOR exploration/invariants only:
-./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[two_phase_commit]~[protocol]~[udp]"
+./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[two_phase_commit]~[protocol]~[simulation]~[udp]"
 
 # Protocol-state-machine checks, including coordinator and participant timeouts:
 ./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[protocol]"
 
+# Simulation-adapter checks for timer/replay behavior:
+./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[simulation]"
+
 # UDP transport tests (this also includes the UDP timer tests):
 ./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[udp]"
 
-# Timer-focused tests across both the pure protocol harness and UDP runtime:
+# Timer-focused tests across protocol, simulation, and UDP layers:
 ./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[timer]"
 ```
 

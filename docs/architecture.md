@@ -32,15 +32,16 @@ The algorithm layer implements the core DPOR engine and the system-under-test (S
 
 ## 3. API Layer (`dpor::api`)
 
-The API layer provides the stable integration surface for users of the library.
+The API layer is currently thin.
 
-- **`Session`**: The primary entry point. A session configures the exploration (e.g., max depth, name) and manages the execution of the DPOR algorithm.
-- **`SessionConfig`**: Allows users to tune parameters like resource limits and exploration strategies.
+- **`Session`**: A lightweight public wrapper that stores `SessionConfig` and exposes `describe()`. It is not the DPOR execution entry point today.
+- **`SessionConfig`**: The configuration payload owned by `Session`; it currently contains `name` and `max_depth`.
+- **Exploration entry points**: The actual DPOR APIs are still `dpor::algo::verify()` and `dpor::algo::verify_parallel()`.
 
 ## 4. Demonstration and Examples (`examples/`)
 
 The library includes examples that demonstrate how to model distributed protocols:
-- **`minimal/`**: A basic example of setting up a `ProgramT` and running a DPOR session.
+- **`minimal/`**: A tiny smoke example for the current `Session` API.
 - **`two_phase_commit/`**: A more complex case study modeling the Two-Phase Commit (2PC) protocol, including UDP network modeling and simulation logic.
 - **`two_phase_commit_timeout/`**: A 2PC variant that adds timers in the UDP runtime while keeping current DPOR exploration focused on async message interleavings.
 
@@ -48,7 +49,7 @@ The library includes examples that demonstrate how to model distributed protocol
 
 ## Design Principles
 
-- **Immutability**: Exploration graphs are treated as mostly immutable or copy-on-write to simplify the backtracking logic in the DPOR algorithm.
+- **Isolated ownership at task boundaries**: parallel tasks own graph values, while worker-local recursion mutates graphs temporarily and restores them with checkpoint/rollback.
 - **Determinism**: Given a fixed seed and program, the exploration is fully deterministic.
 - **Separation of Concerns**: The consistency rules (what makes an execution valid) are decoupled from the DPOR algorithm (how to find all valid executions).
-- **Zero Global State**: All state is encapsulated within `Session` or passed explicitly through the exploration recursion.
+- **Zero Global State**: Exploration state lives in explicit configs, executors, results, and graphs rather than hidden global mutable state.
