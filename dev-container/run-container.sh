@@ -42,12 +42,18 @@ if [[ -z "${container_name}" ]]; then
   container_name="$(printf 'dev-%s' "${project_name}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_.-' '-')"
 fi
 
+claude_state_dir="${HOME}/.claude"
+codex_state_dir="${HOME}/.codex"
+mkdir -p "${claude_state_dir}" "${codex_state_dir}"
+
 docker_args=(
   --rm -it
   --name "${container_name}"
   -e PROJECT_NAME="${project_name}"
   -e COLORTERM=truecolor
   -v "${PWD}:/home/dev/project"
+  -v "${claude_state_dir}:/home/dev/.claude"
+  -v "${codex_state_dir}:/home/dev/.codex"
 
   # --- hardening (transparent to normal use) ---
   --cap-drop=ALL                        # drop all default capabilities

@@ -8,10 +8,11 @@ host system.
 ## Why a container?
 
 Coding agents run arbitrary shell commands.  A container limits the blast
-radius: the agent can only see the mounted project directory and read-only
-credential files.  Everything else on the host is invisible.  If an agent
-does something destructive, `git checkout` restores the working tree —
-nothing outside the mount is affected.
+radius: the agent can only see the mounted project directory plus the
+bind-mounted agent state directories (`~/.claude`, `~/.codex`).  Everything
+else on the host is invisible.  If an agent does something destructive,
+`git checkout` restores the working tree — nothing outside the mounts is
+affected.
 
 ## Quick start
 
@@ -47,7 +48,9 @@ passwordless `sudo` for installing additional packages on the fly.
 
 ## Agent login
 
-Agent CLIs are pre-installed but not pre-authenticated. Log in inside the
+Agent CLIs are pre-installed but not pre-authenticated. The launcher
+bind-mounts your host `~/.claude` and `~/.codex` directories into the
+container, so the first login persists across later runs. Log in inside the
 container:
 
 ```bash
