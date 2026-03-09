@@ -1,12 +1,13 @@
 #include "dpor/algo/dpor.hpp"
 #include "dpor/model/consistency.hpp"
-#include "support/oracle.hpp"
 
+#include "support/oracle.hpp"
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <iterator>
 #include <map>
 #include <optional>
@@ -24,7 +25,7 @@ using namespace dpor::algo;
 using namespace dpor::model;
 using dpor::test_support::require_dpor_matches_oracle;
 
-enum class ScriptOpKind {
+enum class ScriptOpKind : std::uint8_t {
   SendFixed,
   SendFromLastTrace,
   ReceiveAny,
@@ -36,8 +37,8 @@ enum class ScriptOpKind {
 struct ScriptOp {
   ScriptOpKind kind{ScriptOpKind::SendFixed};
   ThreadId destination{0};
-  Value value{};
-  std::vector<Value> values{};
+  Value value;
+  std::vector<Value> values;
   ReceiveMode receive_mode{ReceiveMode::Blocking};
 };
 
@@ -48,8 +49,8 @@ Program build_program_from_spec(const ProgramSpec& spec) {
   Program program;
 
   for (const auto& [tid, script] : spec) {
-    program.threads[tid] = [script](const ThreadTrace& trace, std::size_t step)
-        -> std::optional<EventLabel> {
+    program.threads[tid] = [script](const ThreadTrace& trace,
+                                    std::size_t step) -> std::optional<EventLabel> {
       if (step >= script.size()) {
         return std::nullopt;
       }
@@ -66,8 +67,7 @@ Program build_program_from_spec(const ProgramSpec& spec) {
             return std::nullopt;
           }
           if (trace.back().is_bottom()) {
-            throw std::logic_error(
-                "SendFromLastTrace requires a concrete prior observation");
+            throw std::logic_error("SendFromLastTrace requires a concrete prior observation");
           }
           return SendLabel{
               .destination = op.destination,
@@ -82,9 +82,7 @@ Program build_program_from_spec(const ProgramSpec& spec) {
             return std::nullopt;
           }
           return make_receive_label<Value>(
-              [expected = trace.back()](const Value& candidate) {
-                return candidate == expected;
-              },
+              [expected = trace.back()](const Value& candidate) { return candidate == expected; },
               op.receive_mode);
         case ScriptOpKind::NondeterministicChoice:
           if (!op.values.empty()) {
@@ -107,8 +105,7 @@ Program build_program_from_spec(const ProgramSpec& spec) {
 
 std::string script_op_to_string(const ScriptOp& op) {
   std::ostringstream oss;
-  const auto receive_prefix =
-      op.receive_mode == ReceiveMode::NonBlocking ? "Rnb" : "Rb";
+  const auto* const receive_prefix = op.receive_mode == ReceiveMode::NonBlocking ? "Rnb" : "Rb";
   switch (op.kind) {
     case ScriptOpKind::SendFixed:
       oss << "S(" << op.destination << "," << op.value << ")";
@@ -166,8 +163,8 @@ std::string spec_to_string(const ProgramSpec& spec) {
   return oss.str();
 }
 
-std::vector<ProgramSpec> generate_stress_specs(
-    std::size_t target_count, std::uint32_t seed = 0xC0FFEEu) {
+std::vector<ProgramSpec> generate_stress_specs(std::size_t target_count,
+                                               std::uint32_t seed = 0xC0FFEEU) {
   std::vector<ProgramSpec> specs;
   std::set<std::string> seen_specs;
 
@@ -200,9 +197,7 @@ std::vector<ProgramSpec> generate_stress_specs(
     // remains cheap while still exercising nb-receive semantics.
     bool used_nonblocking_receive = false;
     const auto choose_receive_mode = [&](const bool allow_nonblocking = true) {
-      if (!allow_nonblocking ||
-          used_nonblocking_receive ||
-          !nonblocking_receive(rng)) {
+      if (!allow_nonblocking || used_nonblocking_receive || !nonblocking_receive(rng)) {
         return ReceiveMode::Blocking;
       }
       used_nonblocking_receive = true;
@@ -366,9 +361,8 @@ std::vector<ProgramSpec> generate_stress_specs(
 bool spec_uses_nonblocking_receive(const ProgramSpec& spec) {
   for (const auto& [_, script] : spec) {
     for (const auto& op : script) {
-      if ((op.kind == ScriptOpKind::ReceiveAny ||
-              op.kind == ScriptOpKind::ReceiveValues ||
-              op.kind == ScriptOpKind::ReceiveLastTraceValue) &&
+      if ((op.kind == ScriptOpKind::ReceiveAny || op.kind == ScriptOpKind::ReceiveValues ||
+           op.kind == ScriptOpKind::ReceiveLastTraceValue) &&
           op.receive_mode == ReceiveMode::NonBlocking) {
         return true;
       }
@@ -379,7 +373,7 @@ bool spec_uses_nonblocking_receive(const ProgramSpec& spec) {
 }  // namespace
 
 TEST_CASE("Algorithm 1 stress: DPOR matches independent oracle on generated async programs",
-    "[algo][dpor][stress][paper]") {
+          "[algo][dpor][stress][paper]") {
   const auto specs = generate_stress_specs(72);
   REQUIRE(specs.size() == 72);
   REQUIRE(std::any_of(specs.begin(), specs.end(), spec_uses_nonblocking_receive));
@@ -391,7 +385,7 @@ TEST_CASE("Algorithm 1 stress: DPOR matches independent oracle on generated asyn
 }
 
 TEST_CASE("Algorithm 1 stress: trace-dependent receive predicates remain complete and sound",
-    "[algo][dpor][stress][paper]") {
+          "[algo][dpor][stress][paper]") {
   Program program;
 
   // T1: nd({a,b}); send(T3, choice)
@@ -435,20 +429,17 @@ TEST_CASE("Algorithm 1 stress: trace-dependent receive predicates remain complet
     }
     if (step == 1 && trace.size() == 1) {
       return make_receive_label<Value>(
-          [expected = trace[0].value()](const Value& candidate) {
-            return candidate == expected;
-          });
+          [expected = trace[0].value()](const Value& candidate) { return candidate == expected; });
     }
     return std::nullopt;
   };
 
   require_dpor_matches_oracle(
-      program,
-      "T1=[ND({a,b}),S(3,trace[0])]; T2=[S(3,b),S(3,a)]; T3=[R(*),R(x==trace[0])]");
+      program, "T1=[ND({a,b}),S(3,trace[0])]; T2=[S(3,b),S(3,a)]; T3=[R(*),R(x==trace[0])]");
 }
 
 TEST_CASE("Algorithm 1 stress: non-blocking receives expose bottom in traces",
-    "[algo][dpor][stress][paper][nonblocking]") {
+          "[algo][dpor][stress][paper][nonblocking]") {
   Program program;
 
   // T1: recv_nb(*); send(T3, timeout) on bottom, otherwise forward the value.
@@ -491,21 +482,20 @@ TEST_CASE("Algorithm 1 stress: non-blocking receives expose bottom in traces",
   };
 
   require_dpor_matches_oracle(
-      program,
-      "T1=[Rnb(*),S(3,bottom?timeout:trace[0])]; T2=[S(1,x)]; T3=[Rb({timeout,x})]");
+      program, "T1=[Rnb(*),S(3,bottom?timeout:trace[0])]; T2=[S(1,x)]; T3=[Rb({timeout,x})]");
 }
 
 TEST_CASE("Algorithm 1 fuzz: DPOR matches oracle across many random seeds",
-    "[algo][dpor][fuzz][paper]") {
+          "[algo][dpor][fuzz][paper]") {
   constexpr std::size_t kRounds = 20;
   constexpr std::size_t kSpecsPerRound = 36;
 
   for (std::size_t round = 0; round < kRounds; ++round) {
-    const auto seed = static_cast<std::uint32_t>(round * 0x9E3779B9u);
+    const auto seed = static_cast<std::uint32_t>(round * 0x9E3779B9U);
     const auto specs = generate_stress_specs(kSpecsPerRound, seed);
 
     INFO("fuzz round " << round << " (seed=0x" << std::hex << seed << std::dec
-         << ", specs=" << specs.size() << ")");
+                       << ", specs=" << specs.size() << ")");
     REQUIRE(specs.size() <= kSpecsPerRound);
 
     for (const auto& spec : specs) {

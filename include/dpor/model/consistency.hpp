@@ -10,7 +10,7 @@
 
 namespace dpor::model {
 
-enum class ConsistencyIssueCode {
+enum class ConsistencyIssueCode : std::uint8_t {
   InvalidEventReference,
   ReadsFromTargetNotReceive,
   ReadsFromSourceNotSend,
@@ -24,15 +24,13 @@ enum class ConsistencyIssueCode {
 
 struct ConsistencyIssue {
   ConsistencyIssueCode code{};
-  std::string message{};
+  std::string message;
 };
 
 struct ConsistencyResult {
-  std::vector<ConsistencyIssue> issues{};
+  std::vector<ConsistencyIssue> issues;
 
-  [[nodiscard]] static ConsistencyResult success() {
-    return ConsistencyResult{};
-  }
+  [[nodiscard]] static ConsistencyResult success() { return ConsistencyResult{}; }
 
   [[nodiscard]] static ConsistencyResult failure(ConsistencyIssueCode code, std::string message) {
     ConsistencyResult result;
@@ -40,9 +38,7 @@ struct ConsistencyResult {
     return result;
   }
 
-  [[nodiscard]] bool is_consistent() const noexcept {
-    return issues.empty();
-  }
+  [[nodiscard]] bool is_consistent() const noexcept { return issues.empty(); }
 };
 
 template <typename ValueT>
@@ -50,10 +46,7 @@ class AsyncConsistencyCheckerT {
  public:
   [[nodiscard]] ConsistencyResult check(const ExecutionGraphT<ValueT>& graph) const {
     auto validation = validate_graph<true>(graph);
-    if (has_causal_cycle(
-            graph.po_relation(),
-            validation.valid_rf_edges,
-            graph.events().size())) {
+    if (has_causal_cycle(graph.po_relation(), validation.valid_rf_edges, graph.events().size())) {
       add_causal_cycle_issue(validation.result);
     }
     return validation.result;
@@ -71,9 +64,8 @@ class AsyncConsistencyCheckerT {
       return validation.result;
     }
 
-    const bool has_cycle = graph.has_porf_cache()
-        ? graph.has_causal_cycle()
-        : graph.has_causal_cycle_without_cache();
+    const bool has_cycle =
+        graph.has_porf_cache() ? graph.has_causal_cycle() : graph.has_causal_cycle_without_cache();
     if (has_cycle) {
       add_causal_cycle_issue(validation.result);
     }
@@ -94,15 +86,12 @@ class AsyncConsistencyCheckerT {
   }
 
   static void add_causal_cycle_issue(ConsistencyResult& result) {
-    add_issue(
-        result,
-        ConsistencyIssueCode::CausalCycle,
-        "program order and reads-from relations form a causal cycle");
+    add_issue(result, ConsistencyIssueCode::CausalCycle,
+              "program order and reads-from relations form a causal cycle");
   }
 
   template <bool CollectValidRfEdges>
-  [[nodiscard]] static ValidationPassResult validate_graph(
-      const ExecutionGraphT<ValueT>& graph) {
+  [[nodiscard]] static ValidationPassResult validate_graph(const ExecutionGraphT<ValueT>& graph) {
     ValidationPassResult validation;
 
     const auto event_count = graph.events().size();
@@ -117,20 +106,16 @@ class AsyncConsistencyCheckerT {
       bool has_valid_ids = true;
 
       if (!graph.is_valid_event_id(receive_id)) {
-        add_issue(
-            validation.result,
-            ConsistencyIssueCode::InvalidEventReference,
-            "reads-from target references unknown event id " + std::to_string(receive_id));
+        add_issue(validation.result, ConsistencyIssueCode::InvalidEventReference,
+                  "reads-from target references unknown event id " + std::to_string(receive_id));
         validation.cycle_query_safe = false;
         has_valid_ids = false;
       }
       if (source.is_send()) {
         const auto source_id = source.send_id();
         if (!graph.is_valid_event_id(source_id)) {
-          add_issue(
-              validation.result,
-              ConsistencyIssueCode::InvalidEventReference,
-              "reads-from source references unknown event id " + std::to_string(source_id));
+          add_issue(validation.result, ConsistencyIssueCode::InvalidEventReference,
+                    "reads-from source references unknown event id " + std::to_string(source_id));
           validation.cycle_query_safe = false;
           has_valid_ids = false;
         }
@@ -145,10 +130,8 @@ class AsyncConsistencyCheckerT {
       const auto& receive_event = graph.event(receive_id);
       bool has_valid_endpoint_kinds = true;
       if (!is_receive(receive_event)) {
-        add_issue(
-            validation.result,
-            ConsistencyIssueCode::ReadsFromTargetNotReceive,
-            "reads-from target event " + std::to_string(receive_id) + " is not a receive");
+        add_issue(validation.result, ConsistencyIssueCode::ReadsFromTargetNotReceive,
+                  "reads-from target event " + std::to_string(receive_id) + " is not a receive");
         validation.cycle_query_safe = false;
         has_valid_endpoint_kinds = false;
       }
@@ -156,10 +139,8 @@ class AsyncConsistencyCheckerT {
         const auto source_id = source.send_id();
         const auto& source_event = graph.event(source_id);
         if (!is_send(source_event)) {
-          add_issue(
-              validation.result,
-              ConsistencyIssueCode::ReadsFromSourceNotSend,
-              "reads-from source event " + std::to_string(source_id) + " is not a send");
+          add_issue(validation.result, ConsistencyIssueCode::ReadsFromSourceNotSend,
+                    "reads-from source event " + std::to_string(source_id) + " is not a send");
           validation.cycle_query_safe = false;
           has_valid_endpoint_kinds = false;
         }
@@ -176,11 +157,8 @@ class AsyncConsistencyCheckerT {
 
       if (source.is_bottom()) {
         if (receive_label->is_blocking()) {
-          add_issue(
-              validation.result,
-              ConsistencyIssueCode::BlockingReceiveReadsBottom,
-              "blocking receive event " + std::to_string(receive_id) +
-                  " reads from bottom");
+          add_issue(validation.result, ConsistencyIssueCode::BlockingReceiveReadsBottom,
+                    "blocking receive event " + std::to_string(receive_id) + " reads from bottom");
         }
         continue;
       }
@@ -196,27 +174,22 @@ class AsyncConsistencyCheckerT {
       ++read_count;
       if (read_count > 1U) {
         add_issue(
-            validation.result,
-            ConsistencyIssueCode::SendConsumedMultipleTimes,
+            validation.result, ConsistencyIssueCode::SendConsumedMultipleTimes,
             "send event " + std::to_string(source_id) + " is consumed by more than one receive");
       }
 
       if (send_label->destination != receive_event.thread) {
-        add_issue(
-            validation.result,
-            ConsistencyIssueCode::ReceiveDestinationMismatch,
-            "receive event " + std::to_string(receive_id) + " in thread " +
-                std::to_string(receive_event.thread) + " reads from send event " +
-                std::to_string(source_id) + " targeting thread " +
-                std::to_string(send_label->destination));
+        add_issue(validation.result, ConsistencyIssueCode::ReceiveDestinationMismatch,
+                  "receive event " + std::to_string(receive_id) + " in thread " +
+                      std::to_string(receive_event.thread) + " reads from send event " +
+                      std::to_string(source_id) + " targeting thread " +
+                      std::to_string(send_label->destination));
       }
 
       if (!receive_label->accepts(send_label->value)) {
-        add_issue(
-            validation.result,
-            ConsistencyIssueCode::ReceiveValueMismatch,
-            "receive event " + std::to_string(receive_id) +
-                " does not accept the value sent by event " + std::to_string(source_id));
+        add_issue(validation.result, ConsistencyIssueCode::ReceiveValueMismatch,
+                  "receive event " + std::to_string(receive_id) +
+                      " does not accept the value sent by event " + std::to_string(source_id));
       }
 
       if constexpr (CollectValidRfEdges) {
@@ -226,11 +199,8 @@ class AsyncConsistencyCheckerT {
 
     for (EventId event_id = 0; event_id < event_count; ++event_id) {
       if (is_receive(graph.event(event_id)) && !receive_has_source[event_id]) {
-        add_issue(
-            validation.result,
-            ConsistencyIssueCode::MissingReadsFromForReceive,
-            "receive event " + std::to_string(event_id) +
-                " has no reads-from assignment");
+        add_issue(validation.result, ConsistencyIssueCode::MissingReadsFromForReceive,
+                  "receive event " + std::to_string(event_id) + " has no reads-from assignment");
       }
     }
 
@@ -238,15 +208,12 @@ class AsyncConsistencyCheckerT {
   }
 
   [[nodiscard]] static bool has_causal_cycle(
-      const ProgramOrderRelation& po,
-      const std::vector<std::pair<EventId, EventId>>& rf_edges,
+      const ProgramOrderRelation& po, const std::vector<std::pair<EventId, EventId>>& rf_edges,
       const std::size_t event_count) {
     std::vector<std::vector<EventId>> successors(event_count);
 
     for (EventId from = 0; from < event_count; ++from) {
-      po.for_each_successor(from, [&](const NodeId to) {
-        successors[from].push_back(to);
-      });
+      po.for_each_successor(from, [&](const NodeId to) { successors[from].push_back(to); });
     }
 
     for (const auto& [from, to] : rf_edges) {

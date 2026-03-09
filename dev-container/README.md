@@ -35,27 +35,25 @@ cmake --preset debug && cmake --build --preset debug && ctest --preset debug
 | Category | Packages |
 |---|---|
 | C++ toolchain | `g++`, `clang`, `clang-format`, `clang-tidy`, `gdb` |
+| Static analysis | `cppcheck`, `iwyu` (include-what-you-use) |
 | Build system | `cmake`, `ninja-build` |
 | Test framework | `catch2` |
-| AI agents | Codex CLI (`@openai/codex`); Claude Code can be installed at runtime via `npm i -g @anthropic-ai/claude-code` |
+| AI agents | Claude Code (`@anthropic-ai/claude-code`), Codex CLI (`@openai/codex`) |
 | Shell / editor | `bash`, `tmux`, `vim`, `fzf`, `ripgrep`, `fd-find`, `bat`, `jq` |
 | Networking | `curl`, `wget`, `openssh-client` |
 
 The image runs as a non-root `dev` user (UID/GID matched to the host) with
 passwordless `sudo` for installing additional packages on the fly.
 
-## Credential handling
+## Agent login
 
-`run-container.sh` auto-detects which agent credentials exist on the host
-and bind-mounts them read-only:
+Agent CLIs are pre-installed but not pre-authenticated. Log in inside the
+container:
 
-| Agent | Host path | Container path |
-|---|---|---|
-| Claude Code | `~/.claude/.credentials.json` | `/home/dev/.claude/.credentials.json` |
-| Codex | `~/.codex/auth.json` | `/home/dev/.codex/auth.json` |
-
-At least one must be present.  If both exist, both are mounted so you can
-use either agent inside the same container.
+```bash
+claude login    # Claude Code
+codex auth      # Codex
+```
 
 ## Debug modes
 

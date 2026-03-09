@@ -31,7 +31,7 @@ class ExplorationGraphT;
 
 template <typename EventIdT>
 struct ReadsFromSourceT {
-  std::optional<EventIdT> send{};
+  std::optional<EventIdT> send;
 
   [[nodiscard]] static ReadsFromSourceT from_send(EventIdT source) {
     return ReadsFromSourceT{
@@ -39,17 +39,11 @@ struct ReadsFromSourceT {
     };
   }
 
-  [[nodiscard]] static ReadsFromSourceT bottom() {
-    return ReadsFromSourceT{};
-  }
+  [[nodiscard]] static ReadsFromSourceT bottom() { return ReadsFromSourceT{}; }
 
-  [[nodiscard]] bool is_send() const noexcept {
-    return send.has_value();
-  }
+  [[nodiscard]] bool is_send() const noexcept { return send.has_value(); }
 
-  [[nodiscard]] bool is_bottom() const noexcept {
-    return !send.has_value();
-  }
+  [[nodiscard]] bool is_bottom() const noexcept { return !send.has_value(); }
 
   [[nodiscard]] EventIdT send_id() const {
     if (!send.has_value()) {
@@ -58,9 +52,7 @@ struct ReadsFromSourceT {
     return *send;
   }
 
-  [[nodiscard]] bool operator==(EventIdT other) const noexcept {
-    return send == other;
-  }
+  [[nodiscard]] bool operator==(EventIdT other) const noexcept { return send == other; }
 
   bool operator==(const ReadsFromSourceT&) const = default;
 };
@@ -81,9 +73,7 @@ class ReadsFromRelationT {
     struct arrow_proxy {
       Entry entry;
 
-      [[nodiscard]] const Entry* operator->() const noexcept {
-        return &entry;
-      }
+      [[nodiscard]] const Entry* operator->() const noexcept { return &entry; }
     };
 
     using iterator_category = std::input_iterator_tag;
@@ -97,13 +87,12 @@ class ReadsFromRelationT {
     [[nodiscard]] reference operator*() const {
       return Entry{
           index_,
-          *relation_->entries_.at(static_cast<std::size_t>(index_)),
+          *relation_->entries_.at(  // NOLINT(bugprone-unchecked-optional-access)
+              static_cast<std::size_t>(index_)),
       };
     }
 
-    [[nodiscard]] pointer operator->() const {
-      return arrow_proxy{**this};
-    }
+    [[nodiscard]] pointer operator->() const { return arrow_proxy{**this}; }
 
     const_iterator& operator++() {
       ++index_;
@@ -143,9 +132,7 @@ class ReadsFromRelationT {
     EventIdT index_{0};
   };
 
-  [[nodiscard]] const_iterator begin() const {
-    return const_iterator(this, 0);
-  }
+  [[nodiscard]] const_iterator begin() const { return const_iterator(this, 0); }
 
   [[nodiscard]] const_iterator end() const {
     return const_iterator(this, static_cast<EventIdT>(entries_.size()));
@@ -164,16 +151,12 @@ class ReadsFromRelationT {
     if (index >= entries_.size() || !entries_[index].has_value()) {
       throw std::out_of_range("reads-from entry not found");
     }
-    return *entries_[index];
+    return *entries_[index];  // NOLINT(bugprone-unchecked-optional-access)
   }
 
-  [[nodiscard]] std::size_t size() const noexcept {
-    return size_;
-  }
+  [[nodiscard]] std::size_t size() const noexcept { return size_; }
 
-  [[nodiscard]] bool empty() const noexcept {
-    return size_ == 0;
-  }
+  [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
 
   void set(EventIdT receive_id, ReadsFromSource source) {
     const auto index = static_cast<std::size_t>(receive_id);
@@ -196,7 +179,7 @@ class ReadsFromRelationT {
   }
 
  private:
-  std::vector<std::optional<ReadsFromSource>> entries_{};
+  std::vector<std::optional<ReadsFromSource>> entries_;
   std::size_t size_{0};
 };
 
@@ -215,10 +198,8 @@ class ExecutionGraphT {
   }
 
   // Replay/import path when event indices come from external traces.
-  [[nodiscard]] EventId add_event_with_index(
-      ThreadId thread,
-      EventIndex index,
-      EventLabelT<ValueT> label) {
+  [[nodiscard]] EventId add_event_with_index(ThreadId thread, EventIndex index,
+                                             EventLabelT<ValueT> label) {
     ensure_thread_storage(thread);
     auto& used_indices = used_event_indices_by_thread_[thread];
     if (used_indices.find(index) != used_indices.end()) {
@@ -244,7 +225,7 @@ class ExecutionGraphT {
   }
 
   void set_reads_from_source(EventId receive_event_id, ReadsFromSource source) {
-    reads_from_.set(receive_event_id, std::move(source));
+    reads_from_.set(receive_event_id, source);
   }
 
   void set_reads_from(EventId receive_event_id, EventId source_id) {
@@ -259,17 +240,11 @@ class ExecutionGraphT {
     return event_id < events_.size();
   }
 
-  [[nodiscard]] const Event& event(EventId event_id) const {
-    return events_.at(event_id);
-  }
+  [[nodiscard]] const Event& event(EventId event_id) const { return events_.at(event_id); }
 
-  [[nodiscard]] const std::vector<Event>& events() const noexcept {
-    return events_;
-  }
+  [[nodiscard]] const std::vector<Event>& events() const noexcept { return events_; }
 
-  [[nodiscard]] const ReadsFromRelation& reads_from() const noexcept {
-    return reads_from_;
-  }
+  [[nodiscard]] const ReadsFromRelation& reads_from() const noexcept { return reads_from_; }
 
   [[nodiscard]] ProgramOrderRelation po_relation() const {
     return ProgramOrderRelation(events_.size(), derive_thread_event_sequences());
@@ -332,7 +307,7 @@ class ExecutionGraphT {
 
  private:
   template <typename Callback>
-  void for_each_validated_rf_edge(Callback&& callback) const {
+  void for_each_validated_rf_edge(const Callback& callback) const {
     for (const auto& [receive_id, source] : reads_from_) {
       if (!is_valid_event_id(receive_id)) {
         throw std::invalid_argument("reads-from relation refers to an unknown receive event id");
@@ -347,7 +322,8 @@ class ExecutionGraphT {
 
       const auto source_id = source.send_id();
       if (!is_valid_event_id(source_id)) {
-        throw std::invalid_argument("reads-from relation source refers to an unknown send event id");
+        throw std::invalid_argument(
+            "reads-from relation source refers to an unknown send event id");
       }
       if (!is_send(events_[source_id])) {
         throw std::invalid_argument("reads-from relation source event is not a send");
@@ -366,15 +342,10 @@ class ExecutionGraphT {
   }
 
   // Mutable access to events for in-place label modifications (e.g., ND value updates).
-  [[nodiscard]] std::vector<Event>& events_mutable() noexcept {
-    return events_;
-  }
+  [[nodiscard]] std::vector<Event>& events_mutable() noexcept { return events_; }
 
-  void rollback_last_event(
-      EventId expected_event_id,
-      ThreadId expected_thread,
-      EventIndex expected_index,
-      EventIndex previous_next_index) {
+  void rollback_last_event(EventId expected_event_id, ThreadId expected_thread,
+                           EventIndex expected_index, EventIndex previous_next_index) {
     if (events_.empty() || expected_event_id != events_.size() - 1U) {
       throw std::logic_error("rollback_last_event requires undoing the current tail event");
     }
@@ -400,9 +371,8 @@ class ExecutionGraphT {
     next_event_index_by_thread_[thread_index] = previous_next_index;
   }
 
-  void rollback_reads_from(
-      EventId receive_id,
-      const std::optional<ReadsFromSource>& previous_source) {
+  void rollback_reads_from(EventId receive_id,
+                           const std::optional<ReadsFromSource>& previous_source) {
     if (previous_source.has_value()) {
       reads_from_.set(receive_id, *previous_source);
       return;
@@ -459,7 +429,8 @@ class ExecutionGraphT {
         const auto current = event_ids[i];
         if (events_[previous].index == events_[current].index) {
           throw std::invalid_argument(
-              "two events in the same thread have the same event index; program order is ambiguous");
+              "two events in the same thread have the same event index; program order is "
+              "ambiguous");
         }
       }
 
@@ -469,10 +440,10 @@ class ExecutionGraphT {
     return thread_sequences;
   }
 
-  std::vector<Event> events_{};
-  ReadsFromRelation reads_from_{};
-  std::vector<EventIndex> next_event_index_by_thread_{};
-  std::vector<std::unordered_set<EventIndex>> used_event_indices_by_thread_{};
+  std::vector<Event> events_;
+  ReadsFromRelation reads_from_;
+  std::vector<EventIndex> next_event_index_by_thread_;
+  std::vector<std::unordered_set<EventIndex>> used_event_indices_by_thread_;
 };
 
 using ExecutionGraph = ExecutionGraphT<Value>;

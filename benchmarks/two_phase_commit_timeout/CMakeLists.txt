@@ -7,3 +7,4 @@ target_include_directories(
     ${PROJECT_SOURCE_DIR}/examples/two_phase_commit_timeout
     ${PROJECT_SOURCE_DIR}/tests
 )
+dpor_apply_static_analysis(dpor_two_phase_commit_timeout_benchmark)

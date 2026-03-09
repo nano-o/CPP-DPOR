@@ -64,8 +64,7 @@ TEST_CASE("thread_trace includes ND choice values", "[model][exploration_graph]"
   REQUIRE(trace[1] == "choice_b");
 }
 
-TEST_CASE("thread_trace includes bottom for non-blocking receives",
-    "[model][exploration_graph]") {
+TEST_CASE("thread_trace includes bottom for non-blocking receives", "[model][exploration_graph]") {
   ExplorationGraph g;
   const auto r = g.add_event(2, make_nonblocking_receive_label<Value>());
   g.set_reads_from_bottom(r);
@@ -118,7 +117,7 @@ TEST_CASE("restrict preserves rf edges between kept events", "[model][exploratio
 }
 
 TEST_CASE("restrict preserves bottom rf assignments for kept receives",
-    "[model][exploration_graph]") {
+          "[model][exploration_graph]") {
   ExplorationGraph g;
   const auto r = g.add_event(2, make_nonblocking_receive_label<Value>());
   static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "x"}));
@@ -191,7 +190,7 @@ TEST_CASE("with_bottom_rf returns copy with changed rf", "[model][exploration_gr
 }
 
 TEST_CASE("reads_from iteration preserves assigned receive ids and skips gaps",
-    "[model][exploration_graph]") {
+          "[model][exploration_graph]") {
   ExplorationGraph g;
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r1 = g.add_event(2, make_receive_label<Value>());
@@ -213,7 +212,7 @@ TEST_CASE("reads_from iteration preserves assigned receive ids and skips gaps",
 }
 
 TEST_CASE("reads_from iterator dereference stays stable across increment",
-    "[model][exploration_graph]") {
+          "[model][exploration_graph]") {
   ExplorationGraph g;
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r1 = g.add_event(2, make_receive_label<Value>());
@@ -238,8 +237,8 @@ TEST_CASE("reads_from iterator dereference stays stable across increment",
 
 TEST_CASE("with_nd_value returns copy with changed ND value", "[model][exploration_graph]") {
   ExplorationGraph g;
-  const auto nd = g.add_event(
-      1, NondeterministicChoiceLabel{.value = "old", .choices = {"old", "new"}});
+  const auto nd =
+      g.add_event(1, NondeterministicChoiceLabel{.value = "old", .choices = {"old", "new"}});
 
   const auto g2 = g.with_nd_value(nd, "new");
 
@@ -273,7 +272,7 @@ TEST_CASE("rollback removes an appended event", "[model][exploration_graph][roll
 }
 
 TEST_CASE("rollback removes appended receive and rf assignment",
-    "[model][exploration_graph][rollback]") {
+          "[model][exploration_graph][rollback]") {
   ExplorationGraph g;
   const auto send = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto checkpoint = g.checkpoint();
@@ -292,7 +291,7 @@ TEST_CASE("rollback removes appended receive and rf assignment",
 }
 
 TEST_CASE("rollback restores overwritten rf assignment and thread-local metadata",
-    "[model][exploration_graph][rollback]") {
+          "[model][exploration_graph][rollback]") {
   ExplorationGraph g;
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
@@ -329,7 +328,7 @@ TEST_CASE("rollback restores overwritten rf assignment and thread-local metadata
 }
 
 TEST_CASE("nested checkpoints roll back to their own frontier",
-    "[model][exploration_graph][rollback]") {
+          "[model][exploration_graph][rollback]") {
   ExplorationGraph g;
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
 
@@ -352,7 +351,7 @@ TEST_CASE("nested checkpoints roll back to their own frontier",
 }
 
 TEST_CASE("rollback restores known acyclicity for the next mutation",
-    "[model][exploration_graph][rollback][known_acyclic]") {
+          "[model][exploration_graph][rollback][known_acyclic]") {
   ExplorationGraph g;
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
@@ -372,7 +371,7 @@ TEST_CASE("rollback restores known acyclicity for the next mutation",
 }
 
 TEST_CASE("rollback drops a warm porf cache but preserves logical behavior",
-    "[model][exploration_graph][rollback][porf_cache]") {
+          "[model][exploration_graph][rollback][porf_cache]") {
   ExplorationGraph g;
   const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r = g.add_event(2, make_receive_label<Value>());
@@ -393,7 +392,7 @@ TEST_CASE("rollback drops a warm porf cache but preserves logical behavior",
 }
 
 TEST_CASE("copies and materialized graphs start with empty rollback history",
-    "[model][exploration_graph][rollback]") {
+          "[model][exploration_graph][rollback]") {
   ExplorationGraph g;
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r = g.add_event(2, make_nonblocking_receive_label<Value>());
@@ -423,7 +422,7 @@ TEST_CASE("copies and materialized graphs start with empty rollback history",
 // --- known acyclic metadata ---
 
 TEST_CASE("known acyclicity is preserved on safe forward appends",
-    "[model][exploration_graph][known_acyclic]") {
+          "[model][exploration_graph][known_acyclic]") {
   ExplorationGraph g;
   REQUIRE(g.is_known_acyclic());
 
@@ -442,10 +441,10 @@ TEST_CASE("known acyclicity is preserved on safe forward appends",
 }
 
 TEST_CASE("with_nd_value preserves known acyclicity metadata",
-    "[model][exploration_graph][known_acyclic]") {
+          "[model][exploration_graph][known_acyclic]") {
   ExplorationGraph g;
-  const auto nd = g.add_event(
-      1, NondeterministicChoiceLabel{.value = "old", .choices = {"old", "new"}});
+  const auto nd =
+      g.add_event(1, NondeterministicChoiceLabel{.value = "old", .choices = {"old", "new"}});
 
   REQUIRE(g.is_known_acyclic());
   const auto g2 = g.with_nd_value(nd, "new");
@@ -453,7 +452,7 @@ TEST_CASE("with_nd_value preserves known acyclicity metadata",
 }
 
 TEST_CASE("older fresh receives lose the append-only fast path once they stop being leaves",
-    "[model][exploration_graph][known_acyclic]") {
+          "[model][exploration_graph][known_acyclic]") {
   ExplorationGraph g;
   const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r = g.add_event(2, make_receive_label<Value>());
@@ -468,7 +467,7 @@ TEST_CASE("older fresh receives lose the append-only fast path once they stop be
 }
 
 TEST_CASE("rewriting rf on a pre-existing receive clears known acyclicity",
-    "[model][exploration_graph][known_acyclic]") {
+          "[model][exploration_graph][known_acyclic]") {
   ExplorationGraph g;
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r = g.add_event(2, make_receive_label<Value>());
@@ -484,7 +483,7 @@ TEST_CASE("rewriting rf on a pre-existing receive clears known acyclicity",
 }
 
 TEST_CASE("malformed rf assignments clear known acyclicity",
-    "[model][exploration_graph][known_acyclic]") {
+          "[model][exploration_graph][known_acyclic]") {
   SECTION("invalid source id") {
     ExplorationGraph g;
     static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "x"}));
@@ -517,7 +516,7 @@ TEST_CASE("malformed rf assignments clear known acyclicity",
 }
 
 TEST_CASE("restrict and rf-copy helpers clear known acyclicity",
-    "[model][exploration_graph][known_acyclic]") {
+          "[model][exploration_graph][known_acyclic]") {
   ExplorationGraph g;
   const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r = g.add_event(2, make_receive_label<Value>());
@@ -571,7 +570,8 @@ TEST_CASE("porf_contains detects transitive po-rf chain", "[model][exploration_g
 
 // --- receives_in_destination ---
 
-TEST_CASE("receives_in_destination returns receives in target thread", "[model][exploration_graph]") {
+TEST_CASE("receives_in_destination returns receives in target thread",
+          "[model][exploration_graph]") {
   ExplorationGraph g;
   const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r1 = g.add_event(2, make_receive_label<Value>());
@@ -617,9 +617,8 @@ TEST_CASE("two-thread cycle detected as causal cycle", "[model][exploration_grap
   REQUIRE(g.has_causal_cycle());
 }
 
-TEST_CASE(
-    "cycle-only causal check avoids populating porf cache",
-    "[model][exploration_graph][porf_cache]") {
+TEST_CASE("cycle-only causal check avoids populating porf cache",
+          "[model][exploration_graph][porf_cache]") {
   ExplorationGraph g;
   const auto r1 = g.add_event(1, make_receive_label<Value>());
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
@@ -708,7 +707,8 @@ TEST_CASE("cache invalidation on set_reads_from", "[model][exploration_graph][po
   REQUIRE(g.porf_contains(s1, r));
 }
 
-TEST_CASE("restrict preserves porf reachability on subset", "[model][exploration_graph][porf_cache]") {
+TEST_CASE("restrict preserves porf reachability on subset",
+          "[model][exploration_graph][porf_cache]") {
   ExplorationGraph g;
   const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r = g.add_event(2, make_receive_label<Value>());
@@ -727,11 +727,12 @@ TEST_CASE("restrict preserves porf reachability on subset", "[model][exploration
   REQUIRE_FALSE(restricted.porf_contains(1, 0));
 }
 
-TEST_CASE("internal masked restrict matches public restrict", "[model][exploration_graph][restrict]") {
+TEST_CASE("internal masked restrict matches public restrict",
+          "[model][exploration_graph][restrict]") {
   ExplorationGraph g;
   const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r = g.add_event(2, make_receive_label<Value>());
-  const auto s2 = g.add_event(2, SendLabel{.destination = 3, .value = "y"});
+  static_cast<void>(g.add_event(2, SendLabel{.destination = 3, .value = "y"}));
   g.set_reads_from(r, s);
 
   std::unordered_set<ExplorationGraph::EventId> keep{s, r};
@@ -757,7 +758,8 @@ TEST_CASE("internal masked restrict matches public restrict", "[model][explorati
   REQUIRE(via_mask.porf_contains(0, 1));
 }
 
-TEST_CASE("with_rf invalidation produces distinct reachability", "[model][exploration_graph][porf_cache]") {
+TEST_CASE("with_rf invalidation produces distinct reachability",
+          "[model][exploration_graph][porf_cache]") {
   ExplorationGraph g;
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
   const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "b"});
@@ -780,9 +782,8 @@ TEST_CASE("with_rf invalidation produces distinct reachability", "[model][explor
 
 // --- Malformed reads-from regression tests ---
 
-TEST_CASE(
-    "porf_contains rejects reads-from edges whose target is not a receive",
-    "[model][exploration_graph][porf_cache][regression]") {
+TEST_CASE("porf_contains rejects reads-from edges whose target is not a receive",
+          "[model][exploration_graph][porf_cache][regression]") {
   ExplorationGraph g;
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
   const auto s2 = g.add_event(2, SendLabel{.destination = 1, .value = "b"});
@@ -796,9 +797,8 @@ TEST_CASE(
   REQUIRE_THROWS_AS(g.porf_contains(s1, s2), std::invalid_argument);
 }
 
-TEST_CASE(
-    "porf_contains rejects reads-from edges with out-of-range endpoints",
-    "[model][exploration_graph][porf_cache][regression]") {
+TEST_CASE("porf_contains rejects reads-from edges with out-of-range endpoints",
+          "[model][exploration_graph][porf_cache][regression]") {
   ExplorationGraph g;
   const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r = g.add_event(2, make_receive_label<Value>());
@@ -813,9 +813,8 @@ TEST_CASE(
   REQUIRE_THROWS_AS(g.porf_contains(s, r), std::invalid_argument);
 }
 
-TEST_CASE(
-    "has_causal_cycle rejects malformed reads-from edges",
-    "[model][exploration_graph][porf_cache][regression]") {
+TEST_CASE("has_causal_cycle rejects malformed reads-from edges",
+          "[model][exploration_graph][porf_cache][regression]") {
   ExplorationGraph g;
   const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
 
@@ -831,9 +830,8 @@ TEST_CASE(
   REQUIRE_THROWS_AS(g.has_causal_cycle(), std::invalid_argument);
 }
 
-TEST_CASE(
-    "porf_contains rejects invalid event ids",
-    "[model][exploration_graph][porf_cache][regression]") {
+TEST_CASE("porf_contains rejects invalid event ids",
+          "[model][exploration_graph][porf_cache][regression]") {
   ExplorationGraph g;
   const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r = g.add_event(2, make_receive_label<Value>());
@@ -845,7 +843,8 @@ TEST_CASE(
 
 // --- thread_event_count ---
 
-TEST_CASE("thread_event_count tracks events per thread", "[model][exploration_graph][thread_state]") {
+TEST_CASE("thread_event_count tracks events per thread",
+          "[model][exploration_graph][thread_state]") {
   ExplorationGraph g;
   REQUIRE(g.thread_event_count(1) == 0);
   REQUIRE(g.thread_event_count(99) == 0);
@@ -891,7 +890,8 @@ TEST_CASE("thread_is_terminated after receives", "[model][exploration_graph][thr
   REQUIRE_FALSE(g.thread_is_terminated(1));
 }
 
-TEST_CASE("thread_is_terminated for nonexistent thread", "[model][exploration_graph][thread_state]") {
+TEST_CASE("thread_is_terminated for nonexistent thread",
+          "[model][exploration_graph][thread_state]") {
   ExplorationGraph g;
   static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "a"}));
   REQUIRE_FALSE(g.thread_is_terminated(99));
@@ -900,7 +900,7 @@ TEST_CASE("thread_is_terminated for nonexistent thread", "[model][exploration_gr
 // --- last_event_id ---
 
 TEST_CASE("last_event_id returns kNoSource for empty/nonexistent thread",
-    "[model][exploration_graph][thread_state]") {
+          "[model][exploration_graph][thread_state]") {
   ExplorationGraph g;
   REQUIRE(g.last_event_id(1) == ExplorationGraph::kNoSource);
   REQUIRE(g.last_event_id(99) == ExplorationGraph::kNoSource);
@@ -921,7 +921,7 @@ TEST_CASE("last_event_id tracks most recent event", "[model][exploration_graph][
 // --- thread_trace after with_rf retargets ---
 
 TEST_CASE("thread_trace after with_rf retargets a receive",
-    "[model][exploration_graph][thread_state]") {
+          "[model][exploration_graph][thread_state]") {
   ExplorationGraph g;
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
@@ -942,7 +942,7 @@ TEST_CASE("thread_trace after with_rf retargets a receive",
 // --- thread_trace after restrict ---
 
 TEST_CASE("thread_trace after restrict remaps correctly",
-    "[model][exploration_graph][thread_state]") {
+          "[model][exploration_graph][thread_state]") {
   ExplorationGraph g;
   const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
@@ -965,8 +965,7 @@ TEST_CASE("thread_trace after restrict remaps correctly",
 
 // --- thread_event_count and thread_is_terminated after restrict ---
 
-TEST_CASE("thread_event_count correct after restrict",
-    "[model][exploration_graph][thread_state]") {
+TEST_CASE("thread_event_count correct after restrict", "[model][exploration_graph][thread_state]") {
   ExplorationGraph g;
   const auto a = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
   static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "b"}));
@@ -978,7 +977,7 @@ TEST_CASE("thread_event_count correct after restrict",
 }
 
 TEST_CASE("thread_is_terminated correct after restrict removes block",
-    "[model][exploration_graph][thread_state]") {
+          "[model][exploration_graph][thread_state]") {
   ExplorationGraph g;
   const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "a"});
   const auto b = g.add_event(1, BlockLabel{});

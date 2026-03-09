@@ -34,6 +34,38 @@ cmake --build --preset debug-fetch-catch2
 ctest --preset debug-fetch-catch2
 ```
 
+## Static analysis
+
+The project includes configuration for four static analysis tools, all off by
+default. The `lint` preset enables clang-tidy and cppcheck with enforcing
+settings (`WarningsAsErrors: '*'`, `--error-exitcode=1`):
+
+```bash
+cmake --preset lint
+cmake --build --preset lint
+```
+
+The lint preset is self-contained (fetches Catch2 automatically). clang-tidy
+requires version 16+ for C++20 structured binding capture support; older
+versions are detected at configure time and skipped with a warning.
+
+Individual tools can be enabled on any preset:
+
+```bash
+cmake --preset debug -DDPOR_ENABLE_CLANG_TIDY=ON
+cmake --preset debug -DDPOR_ENABLE_CPPCHECK=ON
+cmake --preset debug -DDPOR_ENABLE_IWYU=ON
+```
+
+A clang-format check script is also provided. By default it checks only files
+changed relative to `main`:
+
+```bash
+scripts/run_clang_format.sh          # check changed files
+scripts/run_clang_format.sh --fix    # fix changed files
+scripts/run_clang_format.sh --all    # check all project files
+```
+
 ## Editor setup (clangd)
 
 All presets export `compile_commands.json`. Symlink it to the project root so clangd can find it:

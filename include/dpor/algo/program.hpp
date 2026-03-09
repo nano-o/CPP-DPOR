@@ -51,7 +51,7 @@ class ThreadMapT {
       entries_[index].emplace();
       ++size_;
     }
-    return *entries_[index];
+    return *entries_[index];  // NOLINT(bugprone-unchecked-optional-access)
   }
 
   [[nodiscard]] const T& at(model::ThreadId tid) const {
@@ -59,7 +59,7 @@ class ThreadMapT {
     if (index >= entries_.size() || !entries_[index].has_value()) {
       throw std::out_of_range("thread id not found");
     }
-    return *entries_[index];
+    return *entries_[index];  // NOLINT(bugprone-unchecked-optional-access)
   }
 
   [[nodiscard]] bool contains(model::ThreadId tid) const noexcept {
@@ -67,13 +67,9 @@ class ThreadMapT {
     return index < entries_.size() && entries_[index].has_value();
   }
 
-  [[nodiscard]] std::size_t size() const noexcept {
-    return size_;
-  }
+  [[nodiscard]] std::size_t size() const noexcept { return size_; }
 
-  [[nodiscard]] bool empty() const noexcept {
-    return size_ == 0;
-  }
+  [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
 
   // Validate the completed thread set before exploration begins. We do not
   // enforce compactness while callers are still populating the map, because
@@ -100,10 +96,9 @@ class ThreadMapT {
     }
 
     const auto count = size_;
-    const bool zero_based =
-        *min_tid == 0 && static_cast<std::size_t>(max_tid) + 1U == count;
-    const bool one_based =
-        *min_tid == 1 && static_cast<std::size_t>(max_tid) == count;
+    const auto first_tid = *min_tid;  // NOLINT(bugprone-unchecked-optional-access)
+    const bool zero_based = first_tid == 0 && static_cast<std::size_t>(max_tid) + 1U == count;
+    const bool one_based = first_tid == 1 && static_cast<std::size_t>(max_tid) == count;
     if (zero_based || one_based) {
       return;
     }
@@ -111,7 +106,7 @@ class ThreadMapT {
     throw std::invalid_argument(
         "thread ids must form a compact contiguous 0-based or 1-based range; "
         "observed thread ids span [" +
-        std::to_string(*min_tid) + ", " + std::to_string(max_tid) + "] across " +
+        std::to_string(first_tid) + ", " + std::to_string(max_tid) + "] across " +
         std::to_string(count) + " assigned threads");
   }
 
@@ -121,16 +116,17 @@ class ThreadMapT {
   }
 
   template <typename Fn>
-  void for_each_assigned(Fn&& fn) const {
+  void for_each_assigned(const Fn& fn) const {
     for (std::size_t index = 0; index < entries_.size(); ++index) {
       if (entries_[index].has_value()) {
-        fn(static_cast<model::ThreadId>(index), *entries_[index]);
+        fn(static_cast<model::ThreadId>(index),
+           *entries_[index]);  // NOLINT(bugprone-unchecked-optional-access)
       }
     }
   }
 
  private:
-  std::vector<std::optional<T>> entries_{};
+  std::vector<std::optional<T>> entries_;
   std::size_t size_{0};
 };
 
@@ -152,8 +148,8 @@ using ThreadTraceT = std::vector<ThreadTraceEntryT<ValueT>>;
 // BlockLabel. DPOR injects Block events internally when a blocking receive has
 // no currently compatible unread send.
 template <typename ValueT>
-using ThreadFunctionT = std::function<
-    std::optional<model::EventLabelT<ValueT>>(const ThreadTraceT<ValueT>&, std::size_t step)>;
+using ThreadFunctionT = std::function<std::optional<model::EventLabelT<ValueT>>(
+    const ThreadTraceT<ValueT>&, std::size_t step)>;
 
 template <typename ValueT>
 struct ProgramT {

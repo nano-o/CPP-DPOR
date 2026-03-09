@@ -1,0 +1,44 @@
+---
+Language: Cpp
+BasedOnStyle: Google
+ColumnLimit: 100
+
+# Match existing project style
+AccessModifierOffset: -1
+IndentWidth: 2
+ContinuationIndentWidth: 4
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# Include ordering
+IncludeBlocks: Regroup
+IncludeCategories:
+  # Project headers first
+  - Regex: '^"dpor/'
+    Priority: 1
+  # Catch2 / third-party
+  - Regex: '^<catch2/'
+    Priority: 3
+  # Standard library last
+  - Regex: '^<'
+    Priority: 4
+SortIncludes: CaseSensitive
+
+# Pointer/reference alignment
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# Braces
+Cpp11BracedListStyle: true
+
+# Namespace
+FixNamespaceComments: true
+CompactNamespaces: false
+
+# Template
+AlwaysBreakTemplateDeclarations: Yes
+
+# Lambda
+LambdaBodyIndentation: Signature

@@ -1,2 +1,3 @@
 add_executable(dpor_minimal_example main.cpp)
 target_link_libraries(dpor_minimal_example PRIVATE dpor::dpor)
+dpor_apply_static_analysis(dpor_minimal_example)

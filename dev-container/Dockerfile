@@ -39,6 +39,8 @@ RUN set -eux; \
         clang \
         clang-format \
         clang-tidy \
+        cppcheck \
+        iwyu \
         sudo \
         tmux \
         vim \
@@ -86,8 +88,8 @@ RUN install -d -o "${UID}" -g "${GID}" "/home/${USER}/.local/bin" "/home/${USER}
 ENV NPM_CONFIG_PREFIX="/home/${USER}/.npm-global" \
     PATH="/home/${USER}/.local/bin:/home/${USER}/.npm-global/bin:${PATH}"
 
-# Install the Codex CLI globally as the dev user.
-RUN su - "${USER}" -c "NPM_CONFIG_PREFIX=/home/${USER}/.npm-global npm install -g @openai/codex && npm cache clean --force"
+# Install agent CLIs globally as the dev user.
+RUN su - "${USER}" -c "NPM_CONFIG_PREFIX=/home/${USER}/.npm-global npm install -g @anthropic-ai/claude-code @openai/codex && npm cache clean --force"
 
 # Create mount points and user config.
 RUN install -d -o "${UID}" -g "${GID}" "/home/${USER}/project" "/home/${USER}/.claude" "/home/${USER}/.codex"

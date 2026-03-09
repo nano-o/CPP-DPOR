@@ -1,0 +1,79 @@
+---
+# clang-tidy configuration for the dpor project.
+#
+# Run manually:   clang-tidy -p build/debug <file>
+# Or via preset:  cmake --preset lint && cmake --build --preset lint
+#
+# Note: clang-tidy < 16 cannot parse C++20 structured binding captures in
+# lambdas.  The code compiles correctly with GCC 11+ and Clang 16+.
+
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-pro-type-union-access,
+  -cppcoreguidelines-avoid-const-or-ref-data-members,
+  -cppcoreguidelines-special-member-functions,
+  -modernize-use-trailing-return-type,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-function-cognitive-complexity,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
+  -clang-diagnostic-error,
+
+WarningsAsErrors: '*'
+
+HeaderFilterRegex: 'include/dpor/.*'
+
+CheckOptions:
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumCase
+    value: CamelCase
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.ParameterCase
+    value: lower_case
+  - key: readability-identifier-naming.MemberCase
+    value: lower_case
+  - key: readability-identifier-naming.PrivateMemberSuffix
+    value: '_'
+  - key: readability-identifier-naming.NamespaceCase
+    value: lower_case
+  - key: readability-identifier-naming.TemplateParameterCase
+    value: CamelCase
+  - key: readability-identifier-naming.TypeAliasCase
+    value: CamelCase
+  - key: readability-identifier-naming.ConstexprVariableCase
+    value: CamelCase
+  - key: readability-identifier-naming.ConstexprVariablePrefix
+    value: 'k'
+  - key: readability-identifier-naming.StaticConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.StaticConstantPrefix
+    value: 'k'
+  # STL iterator trait aliases (value_type, iterator_category, etc.) must use
+  # snake_case to satisfy std concepts — exempt them from CamelCase rules.
+  - key: readability-identifier-naming.TypeAliasIgnoredRegexp
+    value: 'value_type|reference|pointer|difference_type|iterator_category|size_type'
+  # STL-style nested types (const_iterator, arrow_proxy, etc.)
+  - key: readability-identifier-naming.ClassIgnoredRegexp
+    value: 'const_iterator|arrow_proxy'
+  - key: readability-identifier-naming.StructIgnoredRegexp
+    value: 'const_iterator|arrow_proxy'
+  - key: performance-unnecessary-value-param.AllowedTypes
+    value: 'ThreadId;EventIndex'
+...

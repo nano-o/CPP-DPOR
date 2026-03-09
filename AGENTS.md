@@ -71,13 +71,14 @@ This is required to preserve DPOR soundness/completeness assumptions.
 
 - **Build system**: CMake 3.22+ with Ninja generator, C++20
 - **Test framework**: Catch2 v3
-- **CMake presets**: `debug`, `release`, `asan`, `tsan`, `debug-fetch-catch2`
+- **CMake presets**: `debug`, `release`, `asan`, `tsan`, `debug-fetch-catch2`, `lint`
 - Build: `cmake --preset debug && cmake --build --preset debug`
 - Run tests: `ctest --preset debug`
 - The `debug-fetch-catch2` preset auto-fetches Catch2 if not installed locally
 - The `asan` preset enables AddressSanitizer and UndefinedBehaviorSanitizer
 - The `tsan` preset enables ThreadSanitizer; use `scripts/run_tsan.sh` to build and run (handles ASLR)
 - **After big changes**, run ASAN tests (`cmake --preset asan && cmake --build --preset asan && ctest --preset asan`) and TSAN tests (`scripts/run_tsan.sh`)
+- The `lint` preset runs clang-tidy (>= 16) and cppcheck with enforcing settings; use `scripts/run_clang_format.sh` for format checks
 
 ## Performance Smoke Tests
 

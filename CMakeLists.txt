@@ -20,6 +20,8 @@ if(DPOR_ENABLE_WARNINGS)
   include(cmake/CompilerWarnings.cmake)
 endif()
 
+include(cmake/StaticAnalysis.cmake)
+
 add_library(dpor)
 add_library(dpor::dpor ALIAS dpor)
 
@@ -49,6 +51,8 @@ target_include_directories(
 if(DPOR_ENABLE_WARNINGS)
   dpor_set_project_warnings(dpor)
 endif()
+
+dpor_apply_static_analysis(dpor)
 
 install(
   TARGETS dpor

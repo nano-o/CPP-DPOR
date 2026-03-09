@@ -31,7 +31,7 @@ using ThreadId = std::uint32_t;
 using EventIndex = std::uint32_t;
 using Value = std::string;
 
-enum class ReceiveMode { Blocking, NonBlocking };
+enum class ReceiveMode : std::uint8_t { Blocking, NonBlocking };
 
 struct BottomValue {
   bool operator==(const BottomValue&) const = default;
@@ -51,9 +51,7 @@ struct ObservedValueT {
     return std::holds_alternative<BottomValue>(data);
   }
 
-  [[nodiscard]] const ValueT* as_value() const noexcept {
-    return std::get_if<ValueT>(&data);
-  }
+  [[nodiscard]] const ValueT* as_value() const noexcept { return std::get_if<ValueT>(&data); }
 
   [[nodiscard]] const ValueT& value() const {
     const auto* observed = as_value();
@@ -63,9 +61,7 @@ struct ObservedValueT {
     return *observed;
   }
 
-  [[nodiscard]] static ObservedValueT bottom() {
-    return ObservedValueT{BottomValue{}};
-  }
+  [[nodiscard]] static ObservedValueT bottom() { return ObservedValueT{BottomValue{}}; }
 
   [[nodiscard]] bool operator==(const ObservedValueT&) const = default;
 
@@ -100,17 +96,11 @@ struct ReceiveLabelT {
   // Predicate deciding whether this receive may consume a candidate payload.
   ReceiveMatchFnT<ValueT> matches{[](const ValueT&) { return true; }};
 
-  [[nodiscard]] bool is_blocking() const noexcept {
-    return mode == ReceiveMode::Blocking;
-  }
+  [[nodiscard]] bool is_blocking() const noexcept { return mode == ReceiveMode::Blocking; }
 
-  [[nodiscard]] bool is_nonblocking() const noexcept {
-    return mode == ReceiveMode::NonBlocking;
-  }
+  [[nodiscard]] bool is_nonblocking() const noexcept { return mode == ReceiveMode::NonBlocking; }
 
-  [[nodiscard]] bool accepts(const ValueT& value) const {
-    return matches(value);
-  }
+  [[nodiscard]] bool accepts(const ValueT& value) const { return matches(value); }
 };
 
 template <typename ValueT>
@@ -125,7 +115,7 @@ struct SendLabelT {
 template <typename ValueT>
 struct NondeterministicChoiceLabelT {
   ValueT value;
-  std::vector<ValueT> choices{};  // The set S of possible values for this choice.
+  std::vector<ValueT> choices;  // The set S of possible values for this choice.
 };
 
 struct BlockLabel {};
@@ -133,12 +123,8 @@ struct BlockLabel {};
 struct ErrorLabel {};
 
 template <typename ValueT>
-using EventLabelT = std::variant<
-    ReceiveLabelT<ValueT>,
-    SendLabelT<ValueT>,
-    NondeterministicChoiceLabelT<ValueT>,
-    BlockLabel,
-    ErrorLabel>;
+using EventLabelT = std::variant<ReceiveLabelT<ValueT>, SendLabelT<ValueT>,
+                                 NondeterministicChoiceLabelT<ValueT>, BlockLabel, ErrorLabel>;
 
 template <typename ValueT>
 struct EventT {
@@ -179,8 +165,7 @@ template <typename ValueT>
 template <typename ValueT>
   requires std::equality_comparable<ValueT>
 [[nodiscard]] inline ReceiveLabelT<ValueT> make_receive_label_from_values(
-    std::vector<ValueT> accepted_values,
-    ReceiveMode mode = ReceiveMode::Blocking) {
+    std::vector<ValueT> accepted_values, ReceiveMode mode = ReceiveMode::Blocking) {
   return make_receive_label<ValueT>(
       [accepted_values = std::move(accepted_values)](const ValueT& candidate) {
         return std::find(accepted_values.begin(), accepted_values.end(), candidate) !=

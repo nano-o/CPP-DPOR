@@ -24,6 +24,7 @@
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -32,11 +33,11 @@
 
 namespace dpor::algo {
 
-enum class VerifyResultKind { AllExecutionsExplored, ErrorFound, DepthLimitReached };
+enum class VerifyResultKind : std::uint8_t { AllExecutionsExplored, ErrorFound, DepthLimitReached };
 
 struct VerifyResult {
   VerifyResultKind kind{VerifyResultKind::AllExecutionsExplored};
-  std::string message{};
+  std::string message;
   std::size_t executions_explored{0};
 };
 
@@ -81,26 +82,20 @@ template <typename ValueT>
   program.threads.validate_compact_thread_ids();
   std::vector<model::ThreadId> thread_ids;
   thread_ids.reserve(program.threads.size());
-  program.threads.for_each_assigned([&](const model::ThreadId tid, const auto&) {
-    thread_ids.push_back(tid);
-  });
+  program.threads.for_each_assigned(
+      [&](const model::ThreadId tid, const auto&) { thread_ids.push_back(tid); });
   return thread_ids;
 }
 
 template <typename ValueT>
-[[nodiscard]] inline bool has_compatible_unread_send(
-    const model::ExplorationGraphT<ValueT>& graph,
-    model::ThreadId tid,
-    const model::ReceiveLabelT<ValueT>& receive) {
-  for (const auto send_id : graph.unread_send_event_ids()) {
+[[nodiscard]] inline bool has_compatible_unread_send(const model::ExplorationGraphT<ValueT>& graph,
+                                                     model::ThreadId tid,
+                                                     const model::ReceiveLabelT<ValueT>& receive) {
+  const auto unread_sends = graph.unread_send_event_ids();
+  return std::ranges::any_of(unread_sends, [&](const auto send_id) {
     const auto* send = model::as_send(graph.event(send_id));
-    if (send != nullptr &&
-        send->destination == tid &&
-        receive.accepts(send->value)) {
-      return true;
-    }
-  }
-  return false;
+    return send != nullptr && send->destination == tid && receive.accepts(send->value);
+  });
 }
 
 // Compute the next event to add to the graph, following Algorithm 1's next_P(G).
@@ -109,10 +104,8 @@ template <typename ValueT>
 // receives into internal Block events.
 template <typename ValueT>
 [[nodiscard]] inline std::optional<std::pair<model::ThreadId, model::EventLabelT<ValueT>>>
-compute_next_event(
-    const ProgramT<ValueT>& program,
-    const model::ExplorationGraphT<ValueT>& graph,
-    const std::vector<model::ThreadId>& thread_ids) {
+compute_next_event(const ProgramT<ValueT>& program, const model::ExplorationGraphT<ValueT>& graph,
+                   const std::vector<model::ThreadId>& thread_ids) {
   for (const auto tid : thread_ids) {
     // Skip threads that have terminated (block or error).
     if (graph.thread_is_terminated(tid)) {
@@ -137,8 +130,7 @@ compute_next_event(
 
     // If it's a receive, check if there's at least one compatible unread send.
     if (const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&label)) {
-      if (recv->is_blocking() &&
-          !has_compatible_unread_send(graph, tid, *recv)) {
+      if (recv->is_blocking() && !has_compatible_unread_send(graph, tid, *recv)) {
         // Must-style behavior: represent an unsatisfied blocking receive as a
         // Block event and continue with other threads.
         return std::pair{
@@ -156,8 +148,7 @@ compute_next_event(
 
 // Compute the "Previous" set: {e' ∈ G.E | e' ≤_G e ∨ ⟨e', s⟩ ∈ G.porf}.
 template <typename ValueT>
-[[nodiscard]] inline std::vector<std::uint8_t>
-compute_previous_set(
+[[nodiscard]] inline std::vector<std::uint8_t> compute_previous_set(
     const model::ExplorationGraphT<ValueT>& graph,
     typename model::ExplorationGraphT<ValueT>::EventId e,
     typename model::ExplorationGraphT<ValueT>::EventId s) {
@@ -183,8 +174,7 @@ compute_previous_set(
 // GETCONSTIEBREAKER: for async, the tid-minimal send that is consistent
 // (no cycle when assigned as rf source for recv).
 template <typename ValueT>
-[[nodiscard]] inline typename model::ExplorationGraphT<ValueT>::EventId
-get_cons_tiebreaker(
+[[nodiscard]] inline typename model::ExplorationGraphT<ValueT>::EventId get_cons_tiebreaker(
     const model::ExplorationGraphT<ValueT>& graph,
     typename model::ExplorationGraphT<ValueT>::EventId recv) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
@@ -237,20 +227,18 @@ get_cons_tiebreaker(
   // Also include the send that recv currently reads from (consumed by recv itself).
   const auto& send_evt = graph.event(current_rf_source);
   const auto* send_label = model::as_send(send_evt);
-  if (send_label != nullptr &&
-      send_label->destination == recv_evt.thread &&
+  if (send_label != nullptr && send_label->destination == recv_evt.thread &&
       recv_label->accepts(send_label->value)) {
     candidates.push_back(Candidate{current_rf_source, send_evt.thread});
   }
 
   // Sort by sender thread ID (tid-minimal), then by event ID for stability.
-  std::sort(candidates.begin(), candidates.end(),
-      [](const Candidate& a, const Candidate& b) {
-        if (a.sender_thread != b.sender_thread) {
-          return a.sender_thread < b.sender_thread;
-        }
-        return a.send_id < b.send_id;
-      });
+  std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+    if (a.sender_thread != b.sender_thread) {
+      return a.sender_thread < b.sender_thread;
+    }
+    return a.send_id < b.send_id;
+  });
 
   // Return the first candidate that doesn't create a cycle.
   for (const auto& candidate : candidates) {
@@ -260,8 +248,7 @@ get_cons_tiebreaker(
     }
   }
 
-  throw std::logic_error(
-      "get_cons_tiebreaker invariant violated: no consistent source found");
+  throw std::logic_error("get_cons_tiebreaker invariant violated: no consistent source found");
 }
 
 // REVISITCONDITION(G, e, s):
@@ -269,10 +256,9 @@ get_cons_tiebreaker(
 // - non-receive → no receive in Previous reads from e
 // - receive → rf(e) == get_cons_tiebreaker(G|Previous, e)
 template <typename ValueT>
-[[nodiscard]] inline bool revisit_condition(
-    const model::ExplorationGraphT<ValueT>& graph,
-    typename model::ExplorationGraphT<ValueT>::EventId e,
-    typename model::ExplorationGraphT<ValueT>::EventId s) {
+[[nodiscard]] inline bool revisit_condition(const model::ExplorationGraphT<ValueT>& graph,
+                                            typename model::ExplorationGraphT<ValueT>::EventId e,
+                                            typename model::ExplorationGraphT<ValueT>::EventId s) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
   constexpr auto kNoSource = model::ExplorationGraphT<ValueT>::kNoSource;
 
@@ -309,9 +295,7 @@ template <typename ValueT>
       }
       if (model::is_receive(graph.event(ep))) {
         auto it = graph.reads_from().find(ep);
-        if (it != graph.reads_from().end() &&
-            it->second.is_send() &&
-            it->second.send_id() == e) {
+        if (it != graph.reads_from().end() && it->second.is_send() && it->second.send_id() == e) {
           return false;  // A receive in Previous reads from e.
         }
       }
@@ -367,7 +351,7 @@ template <typename ValueT>
   return remapped_rf == tiebreaker;
 }
 
-enum class ExplorationTaskMode { Visit, VisitIfConsistent };
+enum class ExplorationTaskMode : std::uint8_t { Visit, VisitIfConsistent };
 
 template <typename ValueT>
 struct ExplorationTask {
@@ -377,22 +361,15 @@ struct ExplorationTask {
 };
 
 template <typename ValueT, typename ExecutorT>
-inline void visit_impl(
-    const ProgramT<ValueT>& program,
-    model::ExplorationGraphT<ValueT>& graph,
-    ExecutorT& executor,
-    const DporConfigT<ValueT>& config,
-    std::size_t depth,
-    const std::vector<model::ThreadId>& thread_ids);
+inline void visit_impl(const ProgramT<ValueT>& program, model::ExplorationGraphT<ValueT>& graph,
+                       ExecutorT& executor, const DporConfigT<ValueT>& config, std::size_t depth,
+                       const std::vector<model::ThreadId>& thread_ids);
 
 template <typename ValueT, typename ExecutorT>
-inline void visit_if_consistent_impl(
-    const ProgramT<ValueT>& program,
-    model::ExplorationGraphT<ValueT>& graph,
-    ExecutorT& executor,
-    const DporConfigT<ValueT>& config,
-    std::size_t depth,
-    const std::vector<model::ThreadId>& thread_ids);
+inline void visit_if_consistent_impl(const ProgramT<ValueT>& program,
+                                     model::ExplorationGraphT<ValueT>& graph, ExecutorT& executor,
+                                     const DporConfigT<ValueT>& config, std::size_t depth,
+                                     const std::vector<model::ThreadId>& thread_ids);
 
 template <typename ValueT>
 class SequentialExecutor {
@@ -410,16 +387,13 @@ class SequentialExecutor {
     }
   }
 
-  [[nodiscard]] bool can_spawn(std::size_t, std::size_t) const noexcept {
+  [[nodiscard]] bool can_spawn(std::size_t /*depth*/, std::size_t /*fanout*/) const noexcept {
     return false;
   }
 
-  [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT>&) const noexcept {
-    return false;
-  }
+  [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT>& /*task*/) const noexcept { return false; }
 
-  [[nodiscard]] bool publish_complete_execution(
-      const model::ExplorationGraphT<ValueT>& graph) {
+  [[nodiscard]] bool publish_complete_execution(const model::ExplorationGraphT<ValueT>& graph) {
     ++result_.executions_explored;
     if (config_.on_execution) {
       config_.on_execution(graph);
@@ -427,9 +401,8 @@ class SequentialExecutor {
     return true;
   }
 
-  [[nodiscard]] bool publish_error_execution(
-      const model::ExplorationGraphT<ValueT>& graph,
-      const model::ThreadId tid) {
+  [[nodiscard]] bool publish_error_execution(const model::ExplorationGraphT<ValueT>& graph,
+                                             const model::ThreadId tid) {
     ++result_.executions_explored;
     result_.kind = VerifyResultKind::ErrorFound;
     result_.message = "error event reached in thread " + std::to_string(tid);
@@ -447,10 +420,8 @@ class SequentialExecutor {
 template <typename ValueT>
 class ParallelExecutor {
  public:
-  ParallelExecutor(
-      const DporConfigT<ValueT>& config,
-      ParallelVerifyOptions options,
-      std::vector<model::ThreadId> thread_ids)
+  ParallelExecutor(const DporConfigT<ValueT>& config, ParallelVerifyOptions options,
+                   std::vector<model::ThreadId> thread_ids)
       : config_(config),
         options_(options),
         thread_ids_(std::move(thread_ids)),
@@ -472,9 +443,7 @@ class ParallelExecutor {
     std::vector<std::thread> workers;
     workers.reserve(max_workers_ > 0 ? max_workers_ - 1U : 0U);
     for (std::size_t worker_index = 1; worker_index < max_workers_; ++worker_index) {
-      workers.emplace_back([this]() {
-        worker_loop();
-      });
+      workers.emplace_back([this]() { worker_loop(); });
     }
 
     worker_loop();
@@ -511,21 +480,16 @@ class ParallelExecutor {
     return state.cached_stop;
   }
 
-  void note_depth_limit() noexcept {
-    depth_limit_reached_.store(true, std::memory_order_relaxed);
-  }
+  void note_depth_limit() noexcept { depth_limit_reached_.store(true, std::memory_order_relaxed); }
 
-  [[nodiscard]] bool can_spawn(
-      const std::size_t child_depth,
-      const std::size_t fanout) noexcept {
+  [[nodiscard]] bool can_spawn(const std::size_t child_depth, const std::size_t fanout) noexcept {
     if (max_workers_ <= 1 || stop_requested()) {
       return false;
     }
     if (fanout < min_fanout_) {
       return false;
     }
-    if (options_.spawn_depth_cutoff != 0 &&
-        child_depth > options_.spawn_depth_cutoff) {
+    if (options_.spawn_depth_cutoff != 0 && child_depth > options_.spawn_depth_cutoff) {
       return false;
     }
     return true;
@@ -539,8 +503,7 @@ class ParallelExecutor {
     bool enqueued = false;
     {
       std::lock_guard lock(queue_mutex_);
-      if (!stop_requested_.load(std::memory_order_relaxed) &&
-          !search_complete_ &&
+      if (!stop_requested_.load(std::memory_order_relaxed) && !search_complete_ &&
           task_queue_.size() < max_queued_tasks_) {
         task_queue_.push(std::move(task));
         enqueued = true;
@@ -553,8 +516,7 @@ class ParallelExecutor {
     return enqueued;
   }
 
-  [[nodiscard]] bool publish_complete_execution(
-      const model::ExplorationGraphT<ValueT>& graph) {
+  [[nodiscard]] bool publish_complete_execution(const model::ExplorationGraphT<ValueT>& graph) {
     if (sync_steps_ == 0) {
       // Serialise with publish_error_execution so that no complete execution
       // is counted or observed after an error has been committed.
@@ -576,9 +538,8 @@ class ParallelExecutor {
     return true;
   }
 
-  [[nodiscard]] bool publish_error_execution(
-      const model::ExplorationGraphT<ValueT>& graph,
-      const model::ThreadId tid) {
+  [[nodiscard]] bool publish_error_execution(const model::ExplorationGraphT<ValueT>& graph,
+                                             const model::ThreadId tid) {
     bool published = false;
     {
       std::lock_guard lock(publication_mutex_);
@@ -588,8 +549,7 @@ class ParallelExecutor {
           return false;
         }
         ++worker_state().local_executions;
-        first_error_message_ =
-            "error event reached in thread " + std::to_string(tid);
+        first_error_message_ = "error event reached in thread " + std::to_string(tid);
         stop_requested_.store(true, std::memory_order_release);
         published = true;
       } else {
@@ -597,8 +557,7 @@ class ParallelExecutor {
         // is counted and observed; only the first message is kept.
         ++worker_state().local_executions;
         if (!first_error_message_.has_value()) {
-          first_error_message_ =
-              "error event reached in thread " + std::to_string(tid);
+          first_error_message_ = "error event reached in thread " + std::to_string(tid);
         }
         stop_requested_.store(true, std::memory_order_release);
         published = true;
@@ -621,9 +580,8 @@ class ParallelExecutor {
     return concurrency == 0 ? 1U : static_cast<std::size_t>(concurrency);
   }
 
-  [[nodiscard]] static std::size_t resolve_max_queued_tasks(
-      const std::size_t requested,
-      const std::size_t max_workers) {
+  [[nodiscard]] static std::size_t resolve_max_queued_tasks(const std::size_t requested,
+                                                            const std::size_t max_workers) {
     if (requested != 0) {
       return requested;
     }
@@ -636,9 +594,8 @@ class ParallelExecutor {
       {
         std::unique_lock lock(queue_mutex_);
         queue_cv_.wait(lock, [this]() {
-          return stop_requested_.load(std::memory_order_acquire) ||
-              search_complete_ ||
-              !task_queue_.empty();
+          return stop_requested_.load(std::memory_order_acquire) || search_complete_ ||
+                 !task_queue_.empty();
         });
 
         if (stop_requested_.load(std::memory_order_acquire) || search_complete_) {
@@ -660,8 +617,7 @@ class ParallelExecutor {
       {
         std::lock_guard lock(queue_mutex_);
         --active_workers_;
-        if (!stop_requested_.load(std::memory_order_acquire) &&
-            task_queue_.empty() &&
+        if (!stop_requested_.load(std::memory_order_acquire) && task_queue_.empty() &&
             active_workers_ == 0) {
           search_complete_ = true;
         }
@@ -676,23 +632,12 @@ class ParallelExecutor {
     }
 
     if (task.mode == ExplorationTaskMode::VisitIfConsistent) {
-      visit_if_consistent_impl(
-          config_.program,
-          task.graph,
-          *this,
-          config_,
-          task.depth,
-          thread_ids_);
+      visit_if_consistent_impl(config_.program, task.graph, *this, config_, task.depth,
+                               thread_ids_);
       return;
     }
 
-    visit_impl(
-        config_.program,
-        task.graph,
-        *this,
-        config_,
-        task.depth,
-        thread_ids_);
+    visit_impl(config_.program, task.graph, *this, config_, task.depth, thread_ids_);
   }
 
   struct WorkerState {
@@ -709,8 +654,7 @@ class ParallelExecutor {
   void flush_worker_state() {
     auto& state = worker_state();
     if (state.local_executions > 0) {
-      executions_explored_.fetch_add(
-          state.local_executions, std::memory_order_relaxed);
+      executions_explored_.fetch_add(state.local_executions, std::memory_order_relaxed);
     }
     state = WorkerState{};
   }
@@ -727,8 +671,8 @@ class ParallelExecutor {
   }
 
   const DporConfigT<ValueT>& config_;
-  ParallelVerifyOptions options_{};
-  std::vector<model::ThreadId> thread_ids_{};
+  ParallelVerifyOptions options_;
+  std::vector<model::ThreadId> thread_ids_;
   std::size_t max_workers_{1};
   std::size_t max_queued_tasks_{1};
   std::size_t min_fanout_{1};
@@ -738,26 +682,22 @@ class ParallelExecutor {
   std::atomic<bool> depth_limit_reached_{false};
   std::atomic<std::size_t> executions_explored_{0};
 
-  mutable std::mutex queue_mutex_{};
-  std::condition_variable queue_cv_{};
-  std::queue<ExplorationTask<ValueT>> task_queue_{};
+  mutable std::mutex queue_mutex_;
+  std::condition_variable queue_cv_;
+  std::queue<ExplorationTask<ValueT>> task_queue_;
   std::size_t active_workers_{0};
   bool search_complete_{false};
 
-  mutable std::mutex publication_mutex_{};
-  std::optional<std::string> first_error_message_{};
-  std::exception_ptr first_exception_{};
+  mutable std::mutex publication_mutex_;
+  std::optional<std::string> first_error_message_;
+  std::exception_ptr first_exception_;
 };
 
 template <typename ValueT, typename ExecutorT>
-inline void recurse_graph(
-    const ProgramT<ValueT>& program,
-    model::ExplorationGraphT<ValueT>& graph,
-    ExecutorT& executor,
-    const DporConfigT<ValueT>& config,
-    const std::size_t depth,
-    const std::vector<model::ThreadId>& thread_ids,
-    const ExplorationTaskMode mode) {
+inline void recurse_graph(const ProgramT<ValueT>& program, model::ExplorationGraphT<ValueT>& graph,
+                          ExecutorT& executor, const DporConfigT<ValueT>& config,
+                          const std::size_t depth, const std::vector<model::ThreadId>& thread_ids,
+                          const ExplorationTaskMode mode) {
   if (mode == ExplorationTaskMode::VisitIfConsistent) {
     visit_if_consistent_impl(program, graph, executor, config, depth, thread_ids);
     return;
@@ -766,23 +706,19 @@ inline void recurse_graph(
 }
 
 template <typename ValueT, typename ExecutorT>
-inline void process_owned_task(
-    const ProgramT<ValueT>& program,
-    model::ExplorationGraphT<ValueT> graph,
-    ExecutorT& executor,
-    const DporConfigT<ValueT>& config,
-    const std::size_t depth,
-    const std::vector<model::ThreadId>& thread_ids,
-    const ExplorationTaskMode mode) {
+inline void process_owned_task(const ProgramT<ValueT>& program,
+                               model::ExplorationGraphT<ValueT> graph, ExecutorT& executor,
+                               const DporConfigT<ValueT>& config, const std::size_t depth,
+                               const std::vector<model::ThreadId>& thread_ids,
+                               const ExplorationTaskMode mode) {
   recurse_graph(program, graph, executor, config, depth, thread_ids, mode);
 }
 
 template <typename ValueT, typename ExecutorT>
-[[nodiscard]] inline bool try_enqueue_owned_task(
-    ExecutorT& executor,
-    model::ExplorationGraphT<ValueT>& graph,
-    const std::size_t depth,
-    const ExplorationTaskMode mode) {
+[[nodiscard]] inline bool try_enqueue_owned_task(ExecutorT& executor,
+                                                 model::ExplorationGraphT<ValueT>& graph,
+                                                 const std::size_t depth,
+                                                 const ExplorationTaskMode mode) {
   ExplorationTask<ValueT> task{
       .graph = std::move(graph),
       .depth = depth,
@@ -798,28 +734,23 @@ template <typename ValueT, typename ExecutorT>
 // Explore a single child of an ND or receive branch locally.  The first child
 // reuses the parent graph via ScopedRollback; subsequent children do the same.
 template <typename ValueT, typename ExecutorT, typename MutateFn>
-inline void explore_branch(
-    const ProgramT<ValueT>& program,
-    model::ExplorationGraphT<ValueT>& parent_graph,
-    ExecutorT& executor,
-    const DporConfigT<ValueT>& config,
-    const std::size_t depth,
-    const std::vector<model::ThreadId>& thread_ids,
-    const ExplorationTaskMode mode,
-    MutateFn&& mutate_branch) {
+inline void explore_branch(const ProgramT<ValueT>& program,
+                           model::ExplorationGraphT<ValueT>& parent_graph, ExecutorT& executor,
+                           const DporConfigT<ValueT>& config, const std::size_t depth,
+                           const std::vector<model::ThreadId>& thread_ids,
+                           const ExplorationTaskMode mode, MutateFn&& mutate_branch) {
   using ScopedRollback = typename model::ExplorationGraphT<ValueT>::ScopedRollback;
 
   ScopedRollback rollback(parent_graph);
-  mutate_branch(parent_graph);
+  std::forward<MutateFn>(mutate_branch)(parent_graph);
   recurse_graph(program, parent_graph, executor, config, depth, thread_ids, mode);
 }
 
 template <typename ValueT, typename StopFn, typename EmitFn>
 inline void for_each_backward_revisit_child(
     const model::ExplorationGraphT<ValueT>& graph,
-    const typename model::ExplorationGraphT<ValueT>::EventId send_id,
-    StopFn&& should_stop,
-    EmitFn&& emit_revisited) {
+    const typename model::ExplorationGraphT<ValueT>::EventId send_id, const StopFn& should_stop,
+    const EmitFn& emit_revisited) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
 
   // Backward revisiting: Algorithm 1 lines 10-13. For each receive in the
@@ -921,11 +852,8 @@ inline void for_each_backward_revisit_child(
 
 template <typename ValueT, typename ExecutorT>
 [[nodiscard]] inline bool reschedule_blocked_receive_if_enabled_impl(
-    const ProgramT<ValueT>& program,
-    const model::ExplorationGraphT<ValueT>& graph,
-    ExecutorT& executor,
-    const DporConfigT<ValueT>& config,
-    const std::size_t depth,
+    const ProgramT<ValueT>& program, const model::ExplorationGraphT<ValueT>& graph,
+    ExecutorT& executor, const DporConfigT<ValueT>& config, const std::size_t depth,
     const std::vector<model::ThreadId>& thread_ids) {
   constexpr auto kNoSource = model::ExplorationGraphT<ValueT>::kNoSource;
 
@@ -959,25 +887,17 @@ template <typename ValueT, typename ExecutorT>
 
     const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&*next_label);
     if (recv == nullptr) {
-      throw std::logic_error(
-          "blocked thread did not produce a receive after unblocking");
+      throw std::logic_error("blocked thread did not produce a receive after unblocking");
     }
     if (recv->is_nonblocking()) {
-      throw std::logic_error(
-          "blocked thread produced a non-blocking receive after unblocking");
+      throw std::logic_error("blocked thread produced a non-blocking receive after unblocking");
     }
     if (!has_compatible_unread_send(unblocked_graph, tid, *recv)) {
       continue;
     }
 
-    process_owned_task(
-        program,
-        std::move(unblocked_graph),
-        executor,
-        config,
-        depth,
-        thread_ids,
-        ExplorationTaskMode::Visit);
+    process_owned_task(program, std::move(unblocked_graph), executor, config, depth, thread_ids,
+                       ExplorationTaskMode::Visit);
     return true;
   }
 
@@ -985,13 +905,10 @@ template <typename ValueT, typename ExecutorT>
 }
 
 template <typename ValueT, typename ExecutorT>
-inline void visit_if_consistent_impl(
-    const ProgramT<ValueT>& program,
-    model::ExplorationGraphT<ValueT>& graph,
-    ExecutorT& executor,
-    const DporConfigT<ValueT>& config,
-    const std::size_t depth,
-    const std::vector<model::ThreadId>& thread_ids) {
+inline void visit_if_consistent_impl(const ProgramT<ValueT>& program,
+                                     model::ExplorationGraphT<ValueT>& graph, ExecutorT& executor,
+                                     const DporConfigT<ValueT>& config, const std::size_t depth,
+                                     const std::vector<model::ThreadId>& thread_ids) {
   if (executor.stop_requested()) {
     return;
   }
@@ -1006,13 +923,9 @@ inline void visit_if_consistent_impl(
 }
 
 template <typename ValueT, typename ExecutorT>
-inline void visit_impl(
-    const ProgramT<ValueT>& program,
-    model::ExplorationGraphT<ValueT>& graph,
-    ExecutorT& executor,
-    const DporConfigT<ValueT>& config,
-    const std::size_t depth,
-    const std::vector<model::ThreadId>& thread_ids) {
+inline void visit_impl(const ProgramT<ValueT>& program, model::ExplorationGraphT<ValueT>& graph,
+                       ExecutorT& executor, const DporConfigT<ValueT>& config,
+                       const std::size_t depth, const std::vector<model::ThreadId>& thread_ids) {
   using ScopedRollback = typename model::ExplorationGraphT<ValueT>::ScopedRollback;
 
   if (executor.stop_requested()) {
@@ -1027,13 +940,8 @@ inline void visit_impl(
   const auto next = compute_next_event(program, graph, thread_ids);
 
   if (!next.has_value()) {
-    if (reschedule_blocked_receive_if_enabled_impl(
-            program,
-            graph,
-            executor,
-            config,
-            depth,
-            thread_ids)) {
+    if (reschedule_blocked_receive_if_enabled_impl(program, graph, executor, config, depth,
+                                                   thread_ids)) {
       return;
     }
     static_cast<void>(executor.publish_complete_execution(graph));
@@ -1064,17 +972,9 @@ inline void visit_impl(
       auto nd_label = *nd;
       nd_label.value = choice;
       explore_branch(
-          program,
-          graph,
-          executor,
-          config,
-          depth + 1,
-          thread_ids,
-          ExplorationTaskMode::Visit,
+          program, graph, executor, config, depth + 1, thread_ids, ExplorationTaskMode::Visit,
           [tid, nd_label = std::move(nd_label)](auto& branch_graph) {
-            static_cast<void>(branch_graph.add_event(
-                tid,
-                model::EventLabelT<ValueT>{nd_label}));
+            static_cast<void>(branch_graph.add_event(tid, model::EventLabelT<ValueT>{nd_label}));
           });
     }
     return;
@@ -1084,9 +984,7 @@ inline void visit_impl(
     std::vector<typename model::ExplorationGraphT<ValueT>::EventId> compatible_sends;
     for (const auto send_id : graph.unread_send_event_ids()) {
       const auto* send = model::as_send(graph.event(send_id));
-      if (send != nullptr &&
-          send->destination == tid &&
-          recv->accepts(send->value)) {
+      if (send != nullptr && send->destination == tid && recv->accepts(send->value)) {
         compatible_sends.push_back(send_id);
       }
     }
@@ -1095,33 +993,21 @@ inline void visit_impl(
       if (executor.stop_requested()) {
         return;
       }
-      explore_branch(
-          program,
-          graph,
-          executor,
-          config,
-          depth + 1,
-          thread_ids,
-          ExplorationTaskMode::VisitIfConsistent,
-          [tid, &label, send_id](auto& branch_graph) {
-            const auto recv_id = branch_graph.add_event(tid, label);
-            branch_graph.set_reads_from(recv_id, send_id);
-          });
+      explore_branch(program, graph, executor, config, depth + 1, thread_ids,
+                     ExplorationTaskMode::VisitIfConsistent,
+                     [tid, &label, send_id](auto& branch_graph) {
+                       const auto recv_id = branch_graph.add_event(tid, label);
+                       branch_graph.set_reads_from(recv_id, send_id);
+                     });
     }
 
     if (recv->is_nonblocking() && !executor.stop_requested()) {
-      explore_branch(
-          program,
-          graph,
-          executor,
-          config,
-          depth + 1,
-          thread_ids,
-          ExplorationTaskMode::VisitIfConsistent,
-          [tid, &label](auto& branch_graph) {
-            const auto recv_id = branch_graph.add_event(tid, label);
-            branch_graph.set_reads_from_bottom(recv_id);
-          });
+      explore_branch(program, graph, executor, config, depth + 1, thread_ids,
+                     ExplorationTaskMode::VisitIfConsistent, [tid, &label](auto& branch_graph) {
+                       const auto recv_id = branch_graph.add_event(
+                           tid, label);  // NOLINT(clang-analyzer-core.NullDereference)
+                       branch_graph.set_reads_from_bottom(recv_id);
+                     });
     }
     return;
   }
@@ -1132,29 +1018,16 @@ inline void visit_impl(
     const auto allow_enqueue = executor.can_spawn(depth + 1, 2);
 
     for_each_backward_revisit_child(
-        graph,
-        send_id,
-        [&executor]() {
-          return executor.stop_requested();
-        },
+        graph, send_id, [&executor]() { return executor.stop_requested(); },
         [&](model::ExplorationGraphT<ValueT> revisited) {
           if (allow_enqueue &&
-              try_enqueue_owned_task<ValueT>(
-                  executor,
-                  revisited,
-                  depth + 1,
-                  ExplorationTaskMode::VisitIfConsistent)) {
+              try_enqueue_owned_task<ValueT>(executor, revisited, depth + 1,
+                                             ExplorationTaskMode::VisitIfConsistent)) {
             return true;
           }
 
-          process_owned_task(
-              program,
-              std::move(revisited),
-              executor,
-              config,
-              depth + 1,
-              thread_ids,
-              ExplorationTaskMode::VisitIfConsistent);
+          process_owned_task(program, std::move(revisited), executor, config, depth + 1, thread_ids,
+                             ExplorationTaskMode::VisitIfConsistent);
           return !executor.stop_requested();
         });
 
@@ -1173,54 +1046,34 @@ inline void visit_impl(
 }
 
 template <typename ValueT>
-inline void visit_if_consistent(
-    const ProgramT<ValueT>& program,
-    model::ExplorationGraphT<ValueT>& graph,
-    VerifyResult& result,
-    const DporConfigT<ValueT>& config,
-    std::size_t depth,
-    const std::vector<model::ThreadId>& thread_ids) {
+inline void visit_if_consistent(const ProgramT<ValueT>& program,
+                                model::ExplorationGraphT<ValueT>& graph, VerifyResult& result,
+                                const DporConfigT<ValueT>& config, std::size_t depth,
+                                const std::vector<model::ThreadId>& thread_ids) {
   SequentialExecutor<ValueT> executor(result, config);
   visit_if_consistent_impl(program, graph, executor, config, depth, thread_ids);
 }
 
 template <typename ValueT>
-inline void backward_revisit(
-    const ProgramT<ValueT>& program,
-    const model::ExplorationGraphT<ValueT>& graph,
-    typename model::ExplorationGraphT<ValueT>::EventId send_id,
-    VerifyResult& result,
-    const DporConfigT<ValueT>& config,
-    std::size_t depth,
-    const std::vector<model::ThreadId>& thread_ids) {
+inline void backward_revisit(const ProgramT<ValueT>& program,
+                             const model::ExplorationGraphT<ValueT>& graph,
+                             typename model::ExplorationGraphT<ValueT>::EventId send_id,
+                             VerifyResult& result, const DporConfigT<ValueT>& config,
+                             std::size_t depth, const std::vector<model::ThreadId>& thread_ids) {
   SequentialExecutor<ValueT> executor(result, config);
   for_each_backward_revisit_child(
-      graph,
-      send_id,
-      [&executor]() {
-        return executor.stop_requested();
-      },
+      graph, send_id, [&executor]() { return executor.stop_requested(); },
       [&](model::ExplorationGraphT<ValueT> revisited) {
-        process_owned_task(
-            program,
-            std::move(revisited),
-            executor,
-            config,
-            depth,
-            thread_ids,
-            ExplorationTaskMode::VisitIfConsistent);
+        process_owned_task(program, std::move(revisited), executor, config, depth, thread_ids,
+                           ExplorationTaskMode::VisitIfConsistent);
         return !executor.stop_requested();
       });
 }
 
 template <typename ValueT>
-inline void visit(
-    const ProgramT<ValueT>& program,
-    model::ExplorationGraphT<ValueT>& graph,
-    VerifyResult& result,
-    const DporConfigT<ValueT>& config,
-    std::size_t depth,
-    const std::vector<model::ThreadId>& thread_ids) {
+inline void visit(const ProgramT<ValueT>& program, model::ExplorationGraphT<ValueT>& graph,
+                  VerifyResult& result, const DporConfigT<ValueT>& config, std::size_t depth,
+                  const std::vector<model::ThreadId>& thread_ids) {
   SequentialExecutor<ValueT> executor(result, config);
   visit_impl(program, graph, executor, config, depth, thread_ids);
 }
@@ -1238,9 +1091,8 @@ template <typename ValueT>
 }
 
 template <typename ValueT>
-[[nodiscard]] inline VerifyResult verify_parallel(
-    const DporConfigT<ValueT>& config,
-    ParallelVerifyOptions options = {}) {
+[[nodiscard]] inline VerifyResult verify_parallel(const DporConfigT<ValueT>& config,
+                                                  ParallelVerifyOptions options = {}) {
   // Experimental.  With sync_steps=0 (default), exactly one error terminal is
   // counted and observed; callback order among successful executions is
   // unspecified.  With sync_steps>0, multiple workers may independently reach

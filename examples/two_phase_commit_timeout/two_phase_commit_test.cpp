@@ -1,23 +1,22 @@
-#include "simulation.hpp"
-#include "udp_network.hpp"
-
 #include "dpor/algo/dpor.hpp"
 #include "dpor/model/event.hpp"
 #include "dpor/model/exploration_graph.hpp"
 
+#include "simulation.hpp"
+#include "udp_network.hpp"
 #include <catch2/catch_test_macros.hpp>
 
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <algorithm>
+#include <arpa/inet.h>
 #include <cstdint>
 #include <iostream>
 #include <optional>
+#include <ranges>
 #include <set>
 #include <string>
+#include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -29,11 +28,9 @@ using namespace tpc_sim;
 // Trace helpers
 // ---------------------------------------------------------------------------
 
-static std::vector<ExplorationGraph::EventId>
-thread_event_ids_in_program_order(const ExplorationGraph& graph,
-                                  model::ThreadId tid) {
-  std::vector<std::pair<model::EventIndex, ExplorationGraph::EventId>>
-      indexed_events;
+static std::vector<ExplorationGraph::EventId> thread_event_ids_in_program_order(
+    const ExplorationGraph& graph, model::ThreadId tid) {
+  std::vector<std::pair<model::EventIndex, ExplorationGraph::EventId>> indexed_events;
   for (ExplorationGraph::EventId id = 0; id < graph.event_count(); ++id) {
     const auto& evt = graph.event(id);
     if (evt.thread == tid) {
@@ -50,11 +47,9 @@ thread_event_ids_in_program_order(const ExplorationGraph& graph,
   return result;
 }
 
-static std::optional<tpc::Vote> get_participant_vote(
-    const ExplorationGraph& graph,
-    tpc::ParticipantId pid) {
-  for (const auto id :
-       thread_event_ids_in_program_order(graph, participant_to_thread(pid))) {
+static std::optional<tpc::Vote> get_participant_vote(const ExplorationGraph& graph,
+                                                     tpc::ParticipantId pid) {
+  for (const auto id : thread_event_ids_in_program_order(graph, participant_to_thread(pid))) {
     const auto* nd = model::as_nondeterministic_choice(graph.event(id));
     if (nd != nullptr) {
       return decode_vote_choice(nd->value);
@@ -63,11 +58,9 @@ static std::optional<tpc::Vote> get_participant_vote(
   return std::nullopt;
 }
 
-static std::optional<tpc::Decision> get_participant_decision(
-    const ExplorationGraph& graph,
-    tpc::ParticipantId pid) {
-  for (const auto id :
-       thread_event_ids_in_program_order(graph, participant_to_thread(pid))) {
+static std::optional<tpc::Decision> get_participant_decision(const ExplorationGraph& graph,
+                                                             tpc::ParticipantId pid) {
+  for (const auto id : thread_event_ids_in_program_order(graph, participant_to_thread(pid))) {
     const auto* recv = model::as_receive(graph.event(id));
     if (recv == nullptr) {
       continue;
@@ -88,32 +81,25 @@ static std::optional<tpc::Decision> get_participant_decision(
   return std::nullopt;
 }
 
-static bool participant_timed_out_locally(
-    const ExplorationGraph& graph,
-    tpc::ParticipantId pid) {
-  for (const auto id :
-       thread_event_ids_in_program_order(graph, participant_to_thread(pid))) {
+static bool participant_timed_out_locally(const ExplorationGraph& graph, tpc::ParticipantId pid) {
+  const auto events = thread_event_ids_in_program_order(graph, participant_to_thread(pid));
+  return std::ranges::any_of(events, [&](const auto id) {
     if (model::as_receive(graph.event(id)) == nullptr) {
-      continue;
+      return false;
     }
     auto rf_it = graph.reads_from().find(id);
-    if (rf_it != graph.reads_from().end() && rf_it->second.is_bottom()) {
-      return true;
-    }
-  }
-  return false;
+    return rf_it != graph.reads_from().end() && rf_it->second.is_bottom();
+  });
 }
 
-static bool coordinator_crashed(const ExplorationGraph& graph,
-                                std::size_t /*num_participants*/) {
-  for (const auto id : thread_event_ids_in_program_order(
-           graph, participant_to_thread(tpc::kCoordinator))) {
+static bool coordinator_crashed(const ExplorationGraph& graph, std::size_t /*num_participants*/) {
+  for (const auto id :
+       thread_event_ids_in_program_order(graph, participant_to_thread(tpc::kCoordinator))) {
     const auto* nd = model::as_nondeterministic_choice(graph.event(id));
     if (nd == nullptr) {
       continue;
     }
-    if (nd->choices ==
-        std::vector<SimValue>{crash_choice(false), crash_choice(true)}) {
+    if (nd->choices == std::vector<SimValue>{crash_choice(false), crash_choice(true)}) {
       return nd->value == crash_choice(true);
     }
   }
@@ -124,12 +110,9 @@ static bool coordinator_crashed(const ExplorationGraph& graph,
 static void dump_global_trace(const ExplorationGraph& graph) {
   for (auto id : graph.insertion_order()) {
     const auto& evt = graph.event(id);
-    std::cerr << "  event " << id
-              << " thread=" << evt.thread
-              << " index=" << evt.index;
+    std::cerr << "  event " << id << " thread=" << evt.thread << " index=" << evt.index;
     if (const auto* send = model::as_send(evt)) {
-      std::cerr << " send(dest=" << send->destination
-                << ", val=" << send->value << ")";
+      std::cerr << " send(dest=" << send->destination << ", val=" << send->value << ")";
     } else if (model::as_receive(evt) != nullptr) {
       // Show which send was matched via reads-from.
       auto it = graph.reads_from().find(id);
@@ -195,8 +178,7 @@ struct RecordingEnv : tpc::Environment {
   }
 };
 
-static std::size_t count_decision_sends(const RecordingEnv& env,
-                                        tpc::Decision decision) {
+std::size_t count_decision_sends(const RecordingEnv& env, tpc::Decision decision) {
   std::size_t count = 0;
   for (const auto& entry : env.sent) {
     const auto& msg = entry.second;
@@ -210,9 +192,8 @@ static std::size_t count_decision_sends(const RecordingEnv& env,
 
 }  // namespace
 
-TEST_CASE(
-    "Coordinator ignores invalid and duplicate votes while collecting votes",
-    "[two_phase_commit][protocol]") {
+TEST_CASE("Coordinator ignores invalid and duplicate votes while collecting votes",
+          "[two_phase_commit][protocol]") {
   tpc::Coordinator coord(2);
   RecordingEnv env;
 
@@ -240,8 +221,7 @@ TEST_CASE(
   REQUIRE(count_decision_sends(env, tpc::Decision::Commit) == 2);
 }
 
-TEST_CASE("Coordinator ignores out-of-phase and duplicate acks",
-          "[two_phase_commit][protocol]") {
+TEST_CASE("Coordinator ignores out-of-phase and duplicate acks", "[two_phase_commit][protocol]") {
   tpc::Coordinator coord(2);
   RecordingEnv env;
 
@@ -284,7 +264,7 @@ TEST_CASE("Coordinator timeout aborts when not all votes arrive",
   // Timer fires: coordinator must abort and broadcast decision.
   auto keep_running = env.fire_single_timer();
   REQUIRE(keep_running.has_value());
-  REQUIRE(*keep_running);
+  REQUIRE(*keep_running);  // NOLINT(bugprone-unchecked-optional-access)
   REQUIRE(coord.decision() == tpc::Decision::Abort);
   REQUIRE(count_decision_sends(env, tpc::Decision::Abort) == 2);
 
@@ -331,8 +311,7 @@ TEST_CASE("Participant arms decision timeout after voting and cancels it on deci
   REQUIRE(vote->from == 1);
   REQUIRE(vote->vote == tpc::Vote::Yes);
 
-  REQUIRE_FALSE(
-      participant.receive(env, tpc::DecisionMsg{tpc::Decision::Commit}));
+  REQUIRE_FALSE(participant.receive(env, tpc::DecisionMsg{tpc::Decision::Commit}));
   REQUIRE(participant.outcome() == tpc::Decision::Commit);
   REQUIRE(env.cancel_timer_calls == 1);
   REQUIRE_FALSE(env.fire_single_timer().has_value());
@@ -363,7 +342,7 @@ TEST_CASE("Coordinator ack timeout completes protocol when participant never ack
   // Ack timer fires — coordinator gives up waiting and completes.
   auto keep_running = env.fire_single_timer();
   REQUIRE(keep_running.has_value());
-  REQUIRE_FALSE(*keep_running);
+  REQUIRE_FALSE(*keep_running);  // NOLINT(bugprone-unchecked-optional-access)
   // Coordinator is done despite missing ack from participant 2.
   REQUIRE_FALSE(coord.receive(env, tpc::Ack{2}));
   REQUIRE(coord.decision() == tpc::Decision::Commit);
@@ -398,13 +377,12 @@ TEST_CASE("Participant timeout causes local abort while waiting for decision",
 
   auto keep_running = env.fire_single_timer();
   REQUIRE(keep_running.has_value());
-  REQUIRE_FALSE(*keep_running);
+  REQUIRE_FALSE(*keep_running);  // NOLINT(bugprone-unchecked-optional-access)
   REQUIRE(participant.outcome() == tpc::Decision::Abort);
 
   // Once the timeout fires, the participant stays aborted even if a late
   // decision is delivered.
-  REQUIRE_FALSE(
-      participant.receive(env, tpc::DecisionMsg{tpc::Decision::Commit}));
+  REQUIRE_FALSE(participant.receive(env, tpc::DecisionMsg{tpc::Decision::Commit}));
   REQUIRE(participant.outcome() == tpc::Decision::Abort);
 }
 
@@ -415,10 +393,8 @@ TEST_CASE("Participant timeout causes local abort while waiting for decision",
 TEST_CASE("SimEnvironment captures timer-free waits as blocking receives",
           "[two_phase_commit][simulation][timer]") {
   struct WaitForMessage {
-    bool start(tpc::Environment& /*env*/) { return true; }
-    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
-      return false;
-    }
+    static bool start(tpc::Environment& /*env*/) { return true; }
+    static bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) { return false; }
   };
 
   WaitForMessage protocol;
@@ -428,7 +404,8 @@ TEST_CASE("SimEnvironment captures timer-free waits as blocking receives",
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(label.has_value());
-  const auto* recv = std::get_if<ReceiveLabel>(&*label);
+  const auto* recv =
+      std::get_if<ReceiveLabel>(&*label);  // NOLINT(bugprone-unchecked-optional-access)
   REQUIRE(recv != nullptr);
   REQUIRE(recv->is_blocking());
 }
@@ -436,15 +413,11 @@ TEST_CASE("SimEnvironment captures timer-free waits as blocking receives",
 TEST_CASE("SimEnvironment captures timer-armed waits as non-blocking receives",
           "[two_phase_commit][simulation][timer]") {
   struct WaitWithTimer {
-    bool start(tpc::Environment& env) {
-      env.set_timer(1, 10, [](tpc::Environment& /*timer_env*/) {
-        return false;
-      });
+    static bool start(tpc::Environment& env) {
+      env.set_timer(1, 10, [](tpc::Environment& /*timer_env*/) { return false; });
       return true;
     }
-    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
-      return false;
-    }
+    static bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) { return false; }
   };
 
   WaitWithTimer protocol;
@@ -454,7 +427,8 @@ TEST_CASE("SimEnvironment captures timer-armed waits as non-blocking receives",
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(label.has_value());
-  const auto* recv = std::get_if<ReceiveLabel>(&*label);
+  const auto* recv =
+      std::get_if<ReceiveLabel>(&*label);  // NOLINT(bugprone-unchecked-optional-access)
   REQUIRE(recv != nullptr);
   REQUIRE(recv->is_nonblocking());
 }
@@ -462,16 +436,12 @@ TEST_CASE("SimEnvironment captures timer-armed waits as non-blocking receives",
 TEST_CASE("SimEnvironment returns to blocking receive after timer cancellation",
           "[two_phase_commit][simulation][timer]") {
   struct WaitWithCanceledTimer {
-    bool start(tpc::Environment& env) {
-      env.set_timer(1, 10, [](tpc::Environment& /*timer_env*/) {
-        return false;
-      });
+    static bool start(tpc::Environment& env) {
+      env.set_timer(1, 10, [](tpc::Environment& /*timer_env*/) { return false; });
       env.cancel_timer(1);
       return true;
     }
-    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
-      return false;
-    }
+    static bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) { return false; }
   };
 
   WaitWithCanceledTimer protocol;
@@ -481,7 +451,8 @@ TEST_CASE("SimEnvironment returns to blocking receive after timer cancellation",
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(label.has_value());
-  const auto* recv = std::get_if<ReceiveLabel>(&*label);
+  const auto* recv =
+      std::get_if<ReceiveLabel>(&*label);  // NOLINT(bugprone-unchecked-optional-access)
   REQUIRE(recv != nullptr);
   REQUIRE(recv->is_blocking());
 }
@@ -500,9 +471,7 @@ TEST_CASE("SimEnvironment replays bottom as timer firing",
       return true;
     }
 
-    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
-      return false;
-    }
+    static bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) { return false; }
   };
 
   TimerThenSend protocol;
@@ -513,7 +482,7 @@ TEST_CASE("SimEnvironment replays bottom as timer firing",
   const auto label = run_and_capture(protocol, env);
   REQUIRE(protocol.timer_fired);
   REQUIRE(label.has_value());
-  const auto* send = std::get_if<SendLabel>(&*label);
+  const auto* send = std::get_if<SendLabel>(&*label);  // NOLINT(bugprone-unchecked-optional-access)
   REQUIRE(send != nullptr);
   REQUIRE(send->destination == participant_to_thread(1));
   REQUIRE(send->value == prepare_message());
@@ -533,9 +502,7 @@ TEST_CASE("SimEnvironment replays timer-callback sends before later target steps
       return true;
     }
 
-    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
-      return false;
-    }
+    static bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) { return false; }
   };
 
   TimerSendThenWait protocol;
@@ -546,7 +513,8 @@ TEST_CASE("SimEnvironment replays timer-callback sends before later target steps
   const auto label = run_and_capture(protocol, env);
   REQUIRE(protocol.timer_fired);
   REQUIRE(label.has_value());
-  const auto* recv = std::get_if<ReceiveLabel>(&*label);
+  const auto* recv =
+      std::get_if<ReceiveLabel>(&*label);  // NOLINT(bugprone-unchecked-optional-access)
   REQUIRE(recv != nullptr);
   REQUIRE(recv->is_blocking());
 }
@@ -571,9 +539,7 @@ TEST_CASE("SimEnvironment refreshes the active timer when the id is reused",
       return true;
     }
 
-    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
-      return false;
-    }
+    static bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) { return false; }
   };
 
   ReplaceTimer protocol;
@@ -585,7 +551,7 @@ TEST_CASE("SimEnvironment refreshes the active timer when the id is reused",
   REQUIRE_FALSE(protocol.old_timer_fired);
   REQUIRE(protocol.new_timer_fired);
   REQUIRE(label.has_value());
-  const auto* send = std::get_if<SendLabel>(&*label);
+  const auto* send = std::get_if<SendLabel>(&*label);  // NOLINT(bugprone-unchecked-optional-access)
   REQUIRE(send != nullptr);
   REQUIRE(send->destination == participant_to_thread(1));
   REQUIRE(send->value == ack_message(1));
@@ -594,19 +560,13 @@ TEST_CASE("SimEnvironment refreshes the active timer when the id is reused",
 TEST_CASE("SimEnvironment rejects multiple simultaneous active timers",
           "[two_phase_commit][simulation][timer]") {
   struct WaitWithTwoTimers {
-    bool start(tpc::Environment& env) {
-      env.set_timer(1, 10, [](tpc::Environment& /*timer_env*/) {
-        return true;
-      });
-      env.set_timer(2, 10, [](tpc::Environment& /*timer_env*/) {
-        return false;
-      });
+    static bool start(tpc::Environment& env) {
+      env.set_timer(1, 10, [](tpc::Environment& /*timer_env*/) { return true; });
+      env.set_timer(2, 10, [](tpc::Environment& /*timer_env*/) { return false; });
       return true;
     }
 
-    bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
-      return false;
-    }
+    static bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) { return false; }
   };
 
   WaitWithTwoTimers protocol;
@@ -621,8 +581,7 @@ TEST_CASE("SimEnvironment rejects multiple simultaneous active timers",
 // DPOR tests
 // ---------------------------------------------------------------------------
 
-TEST_CASE("2PC basic exploration with 2 participants",
-          "[two_phase_commit]") {
+TEST_CASE("2PC basic exploration with 2 participants", "[two_phase_commit]") {
   auto prog = make_two_phase_commit_program(2);
 
   algo::DporConfigT<SimValue> config;
@@ -637,8 +596,7 @@ TEST_CASE("2PC basic exploration with 2 participants",
   REQUIRE(result.executions_explored == 896);
 }
 
-TEST_CASE("2PC DPOR explores participant local timeout executions",
-          "[two_phase_commit]") {
+TEST_CASE("2PC DPOR explores participant local timeout executions", "[two_phase_commit]") {
   constexpr std::size_t kNumParticipants = 2;
   auto prog = make_two_phase_commit_program(kNumParticipants,
                                             /*inject_crash=*/false);
@@ -660,8 +618,7 @@ TEST_CASE("2PC DPOR explores participant local timeout executions",
   REQUIRE(saw_local_timeout);
 }
 
-TEST_CASE("2PC agreement invariant: all decided participants agree",
-          "[two_phase_commit]") {
+TEST_CASE("2PC agreement invariant: all decided participants agree", "[two_phase_commit]") {
   constexpr std::size_t kNumParticipants = 2;
   auto prog = make_two_phase_commit_program(kNumParticipants);
 
@@ -694,8 +651,7 @@ TEST_CASE("2PC agreement invariant: all decided participants agree",
   REQUIRE_FALSE(invariant_violated);
 }
 
-TEST_CASE("2PC validity invariant: Commit implies all voted Yes",
-          "[two_phase_commit]") {
+TEST_CASE("2PC validity invariant: Commit implies all voted Yes", "[two_phase_commit]") {
   constexpr std::size_t kNumParticipants = 2;
   auto prog = make_two_phase_commit_program(kNumParticipants);
 
@@ -791,8 +747,7 @@ TEST_CASE("2PC scales to 3 participants", "[two_phase_commit]") {
   REQUIRE(result.executions_explored > 0);
 }
 
-TEST_CASE("2PC protocol bug surfaces as exception, not silent success",
-          "[two_phase_commit]") {
+TEST_CASE("2PC protocol bug surfaces as exception, not silent success", "[two_phase_commit]") {
   auto prog = make_two_phase_commit_program(2, /*inject_crash=*/false,
                                             /*bug_on_p1_no=*/true);
 
@@ -804,8 +759,7 @@ TEST_CASE("2PC protocol bug surfaces as exception, not silent success",
   REQUIRE_THROWS_AS(algo::verify(config), std::logic_error);
 }
 
-TEST_CASE("2PC false invariant is detected: Abort implies some voted No",
-          "[two_phase_commit]") {
+TEST_CASE("2PC false invariant is detected: Abort implies some voted No", "[two_phase_commit]") {
   constexpr std::size_t kNumParticipants = 2;
   auto prog = make_two_phase_commit_program(kNumParticipants,
                                             /*inject_crash=*/false);
@@ -852,17 +806,20 @@ static uint16_t allocate_ephemeral_port() {
   addr.sin_family = AF_INET;
   addr.sin_port = 0;
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  REQUIRE(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+  REQUIRE(::bind(fd, reinterpret_cast<sockaddr*>(&addr),
+                 sizeof(addr)) ==  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+          0);
 
   socklen_t len = sizeof(addr);
-  REQUIRE(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+  REQUIRE(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr),
+                        &len) ==  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+          0);
   auto port = ntohs(addr.sin_port);
   ::close(fd);
   return port;
 }
 
-using PortMap =
-    std::unordered_map<tpc::ParticipantId, std::pair<std::string, uint16_t>>;
+using PortMap = std::unordered_map<tpc::ParticipantId, std::pair<std::string, uint16_t>>;
 
 // Build a port map for coordinator + N participants on localhost.
 static PortMap make_localhost_port_map(std::size_t num_participants) {
@@ -873,8 +830,7 @@ static PortMap make_localhost_port_map(std::size_t num_participants) {
   return pm;
 }
 
-TEST_CASE("UDP: serialize/deserialize roundtrip for all message types",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: serialize/deserialize roundtrip for all message types", "[two_phase_commit][udp]") {
   auto check = [](const tpc::Message& original) {
     std::string data = tpc::serialize(original);
     tpc::Message recovered = tpc::deserialize(data);
@@ -889,8 +845,7 @@ TEST_CASE("UDP: serialize/deserialize roundtrip for all message types",
   check(tpc::Ack{3});
 }
 
-TEST_CASE("UDP: send and receive a single message over localhost",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: send and receive a single message over localhost", "[two_phase_commit][udp]") {
   auto pm = make_localhost_port_map(1);
 
   tpc::UdpEnvironment sender(tpc::kCoordinator, pm);
@@ -899,7 +854,7 @@ TEST_CASE("UDP: send and receive a single message over localhost",
   // Use a trivial one-message protocol to test send/receive.
   struct OneReceiver {
     tpc::Message received;
-    bool start(tpc::Environment& /*env*/) { return true; }
+    static bool start(tpc::Environment& /*env*/) { return true; }
     bool receive(tpc::Environment& /*env*/, const tpc::Message& msg) {
       received = msg;
       return false;
@@ -914,19 +869,17 @@ TEST_CASE("UDP: send and receive a single message over localhost",
   REQUIRE(std::holds_alternative<tpc::Prepare>(proto.received));
 }
 
-TEST_CASE("UDP: send and receive VoteMsg preserves fields",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: send and receive VoteMsg preserves fields", "[two_phase_commit][udp]") {
   auto pm = make_localhost_port_map(1);
 
   tpc::UdpEnvironment participant_env(1, pm, tpc::Vote::Yes);
   tpc::UdpEnvironment coordinator_env(tpc::kCoordinator, pm);
 
-  participant_env.send(tpc::kCoordinator,
-                       tpc::VoteMsg{1, tpc::Vote::Yes});
+  participant_env.send(tpc::kCoordinator, tpc::VoteMsg{1, tpc::Vote::Yes});
 
   struct OneReceiver {
     tpc::Message received;
-    bool start(tpc::Environment& /*env*/) { return true; }
+    static bool start(tpc::Environment& /*env*/) { return true; }
     bool receive(tpc::Environment& /*env*/, const tpc::Message& msg) {
       received = msg;
       return false;
@@ -941,8 +894,7 @@ TEST_CASE("UDP: send and receive VoteMsg preserves fields",
   REQUIRE(vote->vote == tpc::Vote::Yes);
 }
 
-TEST_CASE("UDP: full 2PC protocol run with all-Yes votes commits",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: full 2PC protocol run with all-Yes votes commits", "[two_phase_commit][udp]") {
   constexpr std::size_t kN = 2;
   auto pm = make_localhost_port_map(kN);
 
@@ -969,8 +921,7 @@ TEST_CASE("UDP: full 2PC protocol run with all-Yes votes commits",
   REQUIRE(p2.outcome() == tpc::Decision::Commit);
 }
 
-TEST_CASE("UDP: full 2PC protocol run with a No vote aborts",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: full 2PC protocol run with a No vote aborts", "[two_phase_commit][udp]") {
   constexpr std::size_t kN = 2;
   auto pm = make_localhost_port_map(kN);
 
@@ -995,8 +946,7 @@ TEST_CASE("UDP: full 2PC protocol run with a No vote aborts",
   REQUIRE(p2.outcome() == tpc::Decision::Abort);
 }
 
-TEST_CASE("UDP: repeated random-vote runs satisfy agreement",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: repeated random-vote runs satisfy agreement", "[two_phase_commit][udp]") {
   constexpr std::size_t kN = 2;
   constexpr int kRuns = 20;
 
@@ -1031,8 +981,7 @@ TEST_CASE("UDP: repeated random-vote runs satisfy agreement",
   }
 }
 
-TEST_CASE("UDP: run() is single-use per environment",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: run() is single-use per environment", "[two_phase_commit][udp]") {
   constexpr std::size_t kN = 1;
   auto pm = make_localhost_port_map(kN);
 
@@ -1052,8 +1001,7 @@ TEST_CASE("UDP: run() is single-use per environment",
   REQUIRE_THROWS_AS(env_coord.run(coord2), std::logic_error);
 }
 
-TEST_CASE("UDP: malformed datagrams are skipped without crashing",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: malformed datagrams are skipped without crashing", "[two_phase_commit][udp]") {
   constexpr std::size_t kN = 1;
   auto pm = make_localhost_port_map(kN);
 
@@ -1073,9 +1021,11 @@ TEST_CASE("UDP: malformed datagrams are skipped without crashing",
   ::inet_pton(AF_INET, "127.0.0.1", &coord_addr.sin_addr);
 
   const char* junk = "NOT_A_VALID_MESSAGE !!!";
-  auto sent = ::sendto(raw_fd, junk, std::strlen(junk), 0,
-                       reinterpret_cast<sockaddr*>(&coord_addr),
-                       sizeof(coord_addr));
+  auto sent =
+      ::sendto(raw_fd, junk, std::strlen(junk), 0,
+               reinterpret_cast<sockaddr*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                   &coord_addr),
+               sizeof(coord_addr));
   ::close(raw_fd);
   REQUIRE(sent == static_cast<ssize_t>(std::strlen(junk)));
 
@@ -1094,8 +1044,7 @@ TEST_CASE("UDP: malformed datagrams are skipped without crashing",
 // Timer tests
 // ---------------------------------------------------------------------------
 
-TEST_CASE("UDP: timer fires without incoming UDP",
-          "[two_phase_commit][udp][timer]") {
+TEST_CASE("UDP: timer fires without incoming UDP", "[two_phase_commit][udp][timer]") {
   auto pm = make_localhost_port_map(1);
 
   // Protocol that sets a timer on start and finishes when the timer fires.
@@ -1108,7 +1057,7 @@ TEST_CASE("UDP: timer fires without incoming UDP",
       });
       return true;
     }
-    bool receive(tpc::Environment&, const tpc::Message&) { return false; }
+    static bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) { return false; }
   };
 
   tpc::UdpEnvironment env(tpc::kCoordinator, pm);
@@ -1117,8 +1066,7 @@ TEST_CASE("UDP: timer fires without incoming UDP",
   REQUIRE(proto.fired);
 }
 
-TEST_CASE("UDP: canceled timer does not fire",
-          "[two_phase_commit][udp][timer]") {
+TEST_CASE("UDP: canceled timer does not fire", "[two_phase_commit][udp][timer]") {
   auto pm = make_localhost_port_map(1);
 
   struct CancelProto {
@@ -1131,12 +1079,10 @@ TEST_CASE("UDP: canceled timer does not fire",
       });
       env.cancel_timer(1);
       // Set a second timer to end the protocol.
-      env.set_timer(2, 30, [this](tpc::Environment&) {
-        return false;
-      });
+      env.set_timer(2, 30, [this](tpc::Environment&) { return false; });
       return true;
     }
-    bool receive(tpc::Environment&, const tpc::Message&) { return false; }
+    static bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) { return false; }
   };
 
   tpc::UdpEnvironment env(tpc::kCoordinator, pm);
@@ -1145,8 +1091,7 @@ TEST_CASE("UDP: canceled timer does not fire",
   REQUIRE_FALSE(proto.timer_fired);
 }
 
-TEST_CASE("UDP: replace same id fires only newest callback",
-          "[two_phase_commit][udp][timer]") {
+TEST_CASE("UDP: replace same id fires only newest callback", "[two_phase_commit][udp][timer]") {
   auto pm = make_localhost_port_map(1);
 
   struct ReplaceProto {
@@ -1164,7 +1109,7 @@ TEST_CASE("UDP: replace same id fires only newest callback",
       });
       return true;
     }
-    bool receive(tpc::Environment&, const tpc::Message&) { return false; }
+    static bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) { return false; }
   };
 
   tpc::UdpEnvironment env(tpc::kCoordinator, pm);
@@ -1173,17 +1118,16 @@ TEST_CASE("UDP: replace same id fires only newest callback",
   REQUIRE(proto.which_fired == 2);
 }
 
-TEST_CASE("UDP: shutdown with pending timers exits cleanly",
-          "[two_phase_commit][udp][timer]") {
+TEST_CASE("UDP: shutdown with pending timers exits cleanly", "[two_phase_commit][udp][timer]") {
   auto pm = make_localhost_port_map(1);
 
   struct ShutdownProto {
-    bool start(tpc::Environment& env) {
+    static bool start(tpc::Environment& env) {
       // Set a long timer that should never fire.
       env.set_timer(1, 60000, [](tpc::Environment&) { return true; });
       return false;
     }
-    bool receive(tpc::Environment&, const tpc::Message&) { return false; }
+    static bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) { return false; }
   };
 
   tpc::UdpEnvironment env(tpc::kCoordinator, pm);

@@ -37,25 +37,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Agent credentials — mount whichever are available.
-claude_creds="${HOME}/.claude/.credentials.json"
-codex_auth="${HOME}/.codex/auth.json"
-has_claude=false
-has_codex=false
-
-if [[ -f "${claude_creds}" ]]; then
-  has_claude=true
-fi
-if [[ -f "${codex_auth}" ]]; then
-  has_codex=true
-fi
-if [[ "${has_claude}" == false && "${has_codex}" == false ]]; then
-  echo "No agent credentials found. Provide at least one of:" >&2
-  echo "  ${claude_creds}  (claude login)" >&2
-  echo "  ${codex_auth}    (codex auth)" >&2
-  exit 1
-fi
-
 project_name="${PROJECT_NAME:-$(basename "${PWD}")}"
 if [[ -z "${container_name}" ]]; then
   container_name="$(printf 'dev-%s' "${project_name}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_.-' '-')"
@@ -65,6 +46,7 @@ docker_args=(
   --rm -it
   --name "${container_name}"
   -e PROJECT_NAME="${project_name}"
+  -e COLORTERM=truecolor
   -v "${PWD}:/home/dev/project"
 
   # --- hardening (transparent to normal use) ---
@@ -73,13 +55,6 @@ docker_args=(
   --pids-limit=512                      # cap forked processes
   --memory=32g                           # cap memory usage
 )
-
-if [[ "${has_claude}" == true ]]; then
-  docker_args+=(-v "${claude_creds}:/home/dev/.claude/.credentials.json:ro")
-fi
-if [[ "${has_codex}" == true ]]; then
-  docker_args+=(-v "${codex_auth}:/home/dev/.codex/auth.json:ro")
-fi
 
 if [[ "${debug_mode}" == "debug" ]]; then
   # Re-add ptrace on top of the hardened baseline.
@@ -94,9 +69,18 @@ elif [[ "${debug_mode}" == "full" ]]; then
     --privileged
     --security-opt=seccomp=unconfined
     --security-opt=apparmor=unconfined
-    --sysctl kernel.randomize_va_space=0
-    --sysctl kernel.yama.ptrace_scope=0
   )
 fi
 
-docker run "${docker_args[@]}" "${tag}" "$@"
+if [[ "${debug_mode}" == "full" ]]; then
+  # Set non-namespaced sysctls inside the container (Docker only
+  # allows network-namespace sysctls via --sysctl).
+  sysctl_init="sudo sysctl -w kernel.randomize_va_space=0 kernel.yama.ptrace_scope=0 >/dev/null;"
+  if [[ $# -gt 0 ]]; then
+    docker run "${docker_args[@]}" "${tag}" bash -c "${sysctl_init} exec \"\$@\"" -- "$@"
+  else
+    docker run "${docker_args[@]}" "${tag}" bash -c "${sysctl_init} exec bash -l"
+  fi
+else
+  docker run "${docker_args[@]}" "${tag}" "$@"
+fi

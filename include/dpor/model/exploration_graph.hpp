@@ -46,9 +46,8 @@ class ExplorationGraphT;
 namespace detail {
 
 template <typename ValueT>
-[[nodiscard]] ExplorationGraphT<ValueT> restrict_masked(
-    const ExplorationGraphT<ValueT>& graph,
-    const std::vector<std::uint8_t>& keep_mask);
+[[nodiscard]] ExplorationGraphT<ValueT> restrict_masked(const ExplorationGraphT<ValueT>& graph,
+                                                        const std::vector<std::uint8_t>& keep_mask);
 
 }  // namespace detail
 
@@ -121,14 +120,14 @@ class ExplorationGraphT {
     ScopedRollback& operator=(const ScopedRollback&) = delete;
 
     ScopedRollback(ScopedRollback&& other) noexcept
-        : graph_(std::exchange(other.graph_, nullptr)),
-          checkpoint_(other.checkpoint_) {}
+        : graph_(std::exchange(other.graph_, nullptr)), checkpoint_(other.checkpoint_) {}
 
     ScopedRollback& operator=(ScopedRollback&& other) noexcept {
       if (this == &other) {
         return *this;
       }
       if (graph_ != nullptr) {
+        // cppcheck-suppress throwInNoexceptFunction
         graph_->rollback(checkpoint_);
       }
       graph_ = std::exchange(other.graph_, nullptr);
@@ -136,15 +135,14 @@ class ExplorationGraphT {
       return *this;
     }
 
-    ~ScopedRollback() {
+    ~ScopedRollback() {  // NOLINT(bugprone-exception-escape)
       if (graph_ != nullptr) {
+        // cppcheck-suppress throwInNoexceptFunction
         graph_->rollback(checkpoint_);
       }
     }
 
-    void release() noexcept {
-      graph_ = nullptr;
-    }
+    void release() noexcept { graph_ = nullptr; }
 
    private:
     ExplorationGraphT* graph_{nullptr};
@@ -183,10 +181,9 @@ class ExplorationGraphT {
     const auto thread_index = static_cast<std::size_t>(thread);
     const auto previous_thread_state =
         thread_index < thread_state_.size() ? thread_state_[thread_index] : ThreadState{};
-    const auto previous_next_event_index =
-        thread_index < graph_.next_event_index_by_thread_.size()
-        ? graph_.next_event_index_by_thread_[thread_index]
-        : 0;
+    const auto previous_next_event_index = thread_index < graph_.next_event_index_by_thread_.size()
+                                               ? graph_.next_event_index_by_thread_[thread_index]
+                                               : 0;
     const auto id = graph_.add_event(thread, std::move(label));
     event_undo_log_.push_back(EventUndo{
         .event_id = id,
@@ -231,23 +228,18 @@ class ExplorationGraphT {
     set_reads_from_source(receive_id, ReadsFromSource::bottom());
   }
 
-  [[nodiscard]] const Event& event(EventId id) const {
-    return graph_.event(id);
-  }
+  [[nodiscard]] const Event& event(EventId id) const { return graph_.event(id); }
 
-  [[nodiscard]] const std::vector<Event>& events() const noexcept {
-    return graph_.events();
-  }
+  [[nodiscard]] const std::vector<Event>& events() const noexcept { return graph_.events(); }
 
-  [[nodiscard]] std::size_t event_count() const noexcept {
-    return graph_.events().size();
-  }
+  [[nodiscard]] std::size_t event_count() const noexcept { return graph_.events().size(); }
 
   [[nodiscard]] bool is_valid_event_id(EventId id) const noexcept {
     return graph_.is_valid_event_id(id);
   }
 
-  [[nodiscard]] const typename ExecutionGraphT<ValueT>::ReadsFromRelation& reads_from() const noexcept {
+  [[nodiscard]] const typename ExecutionGraphT<ValueT>::ReadsFromRelation& reads_from()
+      const noexcept {
     return graph_.reads_from();
   }
 
@@ -263,21 +255,15 @@ class ExplorationGraphT {
     return insertion_position_[a] <= insertion_position_[b];
   }
 
-  [[nodiscard]] ProgramOrderRelation po_relation() const {
-    return graph_.po_relation();
-  }
+  [[nodiscard]] ProgramOrderRelation po_relation() const { return graph_.po_relation(); }
 
-  [[nodiscard]] ExplicitRelation rf_relation() const {
-    return graph_.rf_relation();
-  }
+  [[nodiscard]] ExplicitRelation rf_relation() const { return graph_.rf_relation(); }
 
   [[nodiscard]] std::vector<EventId> receive_event_ids() const {
     return graph_.receive_event_ids();
   }
 
-  [[nodiscard]] std::vector<EventId> send_event_ids() const {
-    return graph_.send_event_ids();
-  }
+  [[nodiscard]] std::vector<EventId> send_event_ids() const { return graph_.send_event_ids(); }
 
   [[nodiscard]] std::vector<EventId> unread_send_event_ids() const {
     return graph_.unread_send_event_ids();
@@ -288,8 +274,7 @@ class ExplorationGraphT {
   // may later be rescheduled by the algorithm.
   [[nodiscard]] bool thread_is_terminated(ThreadId tid) const {
     const auto thread_index = static_cast<std::size_t>(tid);
-    if (thread_index >= thread_state_.size() ||
-        thread_state_[thread_index].event_count == 0) {
+    if (thread_index >= thread_state_.size() || thread_state_[thread_index].event_count == 0) {
       return false;  // No events for this thread yet.
     }
     const auto& last_evt = event(thread_state_[thread_index].last_event_id);
@@ -308,8 +293,7 @@ class ExplorationGraphT {
   // Returns the last event ID for the given thread, or kNoSource if no events.
   [[nodiscard]] EventId last_event_id(ThreadId tid) const {
     const auto thread_index = static_cast<std::size_t>(tid);
-    if (thread_index >= thread_state_.size() ||
-        thread_state_[thread_index].event_count == 0) {
+    if (thread_index >= thread_state_.size() || thread_state_[thread_index].event_count == 0) {
       return kNoSource;
     }
     return thread_state_[thread_index].last_event_id;
@@ -421,15 +405,11 @@ class ExplorationGraphT {
     return cache.clocks[to][ci] >= cache.position_in_thread[from] + 1;
   }
 
-  [[nodiscard]] bool has_porf_cache() const noexcept {
-    return static_cast<bool>(porf_cache_);
-  }
+  [[nodiscard]] bool has_porf_cache() const noexcept { return static_cast<bool>(porf_cache_); }
 
   // This tracks only the narrow append-only fast path. The checker still runs
   // full endpoint/RF validation before using it.
-  [[nodiscard]] bool is_known_acyclic() const noexcept {
-    return known_acyclic_;
-  }
+  [[nodiscard]] bool is_known_acyclic() const noexcept { return known_acyclic_; }
 
   // Returns receive event IDs in the destination thread of the given send.
   [[nodiscard]] std::vector<EventId> receives_in_destination(EventId send_id) const {
@@ -452,8 +432,7 @@ class ExplorationGraphT {
   // Cycle-only check on (po ∪ rf) without materializing vector clocks.
   [[nodiscard]] bool has_causal_cycle_without_cache() const {
     const auto porf_graph = build_porf_graph_structure();
-    const auto topo_order =
-        compute_topological_order(porf_graph.successors, porf_graph.in_degree);
+    const auto topo_order = compute_topological_order(porf_graph.successors, porf_graph.in_degree);
     return topo_order.size() < event_count();
   }
 
@@ -464,23 +443,20 @@ class ExplorationGraphT {
   }
 
   // Access to underlying execution graph (for consistency checker etc.)
-  [[nodiscard]] const ExecutionGraphT<ValueT>& execution_graph() const noexcept {
-    return graph_;
-  }
+  [[nodiscard]] const ExecutionGraphT<ValueT>& execution_graph() const noexcept { return graph_; }
 
  private:
   template <typename U>
-  friend ExplorationGraphT<U> detail::restrict_masked(
-      const ExplorationGraphT<U>& graph,
-      const std::vector<std::uint8_t>& keep_mask);
+  friend ExplorationGraphT<U> detail::restrict_masked(const ExplorationGraphT<U>& graph,
+                                                      const std::vector<std::uint8_t>& keep_mask);
 
-  ExecutionGraphT<ValueT> graph_{};
-  std::vector<EventId> insertion_order_{};
-  std::vector<std::size_t> insertion_position_{};
-  std::vector<ThreadState> thread_state_{};
+  ExecutionGraphT<ValueT> graph_;
+  std::vector<EventId> insertion_order_;
+  std::vector<std::size_t> insertion_position_;
+  std::vector<ThreadState> thread_state_;
   bool known_acyclic_{true};
-  std::optional<EventId> pending_fresh_receive_id_{};
-  mutable std::shared_ptr<PorfCache> porf_cache_{};
+  std::optional<EventId> pending_fresh_receive_id_;
+  mutable std::shared_ptr<PorfCache> porf_cache_;
 
   struct EventUndo {
     EventId event_id{kNoSource};
@@ -495,13 +471,13 @@ class ExplorationGraphT {
     std::optional<ReadsFromSource> previous_source{};
   };
 
-  std::vector<EventUndo> event_undo_log_{};
-  std::vector<ReadsFromUndo> rf_undo_log_{};
+  std::vector<EventUndo> event_undo_log_;
+  std::vector<ReadsFromUndo> rf_undo_log_;
 
   struct PorfGraphStructure {
-    std::vector<std::vector<EventId>> thread_events{};
-    std::vector<std::vector<EventId>> successors{};
-    std::vector<std::size_t> in_degree{};
+    std::vector<std::vector<EventId>> thread_events;
+    std::vector<std::vector<EventId>> successors;
+    std::vector<std::size_t> in_degree;
   };
 
   void invalidate_known_acyclicity() {
@@ -602,11 +578,8 @@ class ExplorationGraphT {
       throw std::logic_error("event undo log does not match insertion-position state");
     }
 
-    graph_.rollback_last_event(
-        undo.event_id,
-        undo.thread,
-        undo.event_index,
-        undo.previous_next_event_index);
+    graph_.rollback_last_event(undo.event_id, undo.thread, undo.event_index,
+                               undo.previous_next_event_index);
     insertion_order_.pop_back();
     insertion_position_.pop_back();
 
@@ -625,13 +598,9 @@ class ExplorationGraphT {
     }
   }
 
-  void update_acyclicity_after_rf_assignment(
-      EventId receive_id,
-      const ReadsFromSource& source) {
-    if (!known_acyclic_ ||
-        !pending_fresh_receive_id_.has_value() ||
-        *pending_fresh_receive_id_ != receive_id ||
-        !is_valid_event_id(receive_id) ||
+  void update_acyclicity_after_rf_assignment(EventId receive_id, const ReadsFromSource& source) {
+    if (!known_acyclic_ || !pending_fresh_receive_id_.has_value() ||
+        *pending_fresh_receive_id_ != receive_id || !is_valid_event_id(receive_id) ||
         !is_receive(event(receive_id))) {
       invalidate_known_acyclicity();
       return;
@@ -666,10 +635,9 @@ class ExplorationGraphT {
     return thread_events;
   }
 
-  static void add_po_edges(
-      const std::vector<std::vector<EventId>>& thread_events,
-      std::vector<std::vector<EventId>>& successors,
-      std::vector<std::size_t>& in_degree) {
+  static void add_po_edges(const std::vector<std::vector<EventId>>& thread_events,
+                           std::vector<std::vector<EventId>>& successors,
+                           std::vector<std::size_t>& in_degree) {
     for (const auto& events : thread_events) {
       for (std::size_t i = 1; i < events.size(); ++i) {
         const auto pred = events[i - 1];
@@ -680,9 +648,8 @@ class ExplorationGraphT {
     }
   }
 
-  void add_rf_edges(
-      std::vector<std::vector<EventId>>& successors,
-      std::vector<std::size_t>& in_degree) const {
+  void add_rf_edges(std::vector<std::vector<EventId>>& successors,
+                    std::vector<std::size_t>& in_degree) const {
     graph_.for_each_validated_rf_edge([&](const EventId source_id, const EventId recv_id) {
       successors[source_id].push_back(recv_id);
       ++in_degree[recv_id];
@@ -697,9 +664,8 @@ class ExplorationGraphT {
         ++out_degree[events[i - 1]];
       }
     }
-    graph_.for_each_validated_rf_edge([&](const EventId source_id, const EventId /*recv_id*/) {
-      ++out_degree[source_id];
-    });
+    graph_.for_each_validated_rf_edge(
+        [&](const EventId source_id, const EventId /*recv_id*/) { ++out_degree[source_id]; });
     return out_degree;
   }
 
@@ -719,7 +685,8 @@ class ExplorationGraphT {
 
   [[nodiscard]] static std::vector<EventId> compute_topological_order(
       const std::vector<std::vector<EventId>>& successors,
-      std::vector<std::size_t> in_degree) {
+      const std::vector<std::size_t>& in_degree_input) {
+    auto in_degree = in_degree_input;
     std::queue<EventId> ready;
     for (EventId id = 0; id < successors.size(); ++id) {
       if (in_degree[id] == 0) {
@@ -775,8 +742,7 @@ class ExplorationGraphT {
       }
     }
 
-    const auto topo_order =
-        compute_topological_order(porf_graph.successors, porf_graph.in_degree);
+    const auto topo_order = compute_topological_order(porf_graph.successors, porf_graph.in_degree);
 
     if (topo_order.size() < n) {
       cache->has_cycle = true;
@@ -835,8 +801,7 @@ namespace detail {
 
 template <typename ValueT>
 [[nodiscard]] ExplorationGraphT<ValueT> restrict_masked(
-    const ExplorationGraphT<ValueT>& graph,
-    const std::vector<std::uint8_t>& keep_mask) {
+    const ExplorationGraphT<ValueT>& graph, const std::vector<std::uint8_t>& keep_mask) {
   return graph.restrict_from_keep_mask(keep_mask);
 }
 

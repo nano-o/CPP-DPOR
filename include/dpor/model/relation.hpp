@@ -33,13 +33,9 @@ class ExplicitRelation {
  public:
   explicit ExplicitRelation(std::size_t node_count = 0) : successors_(node_count) {}
 
-  [[nodiscard]] std::size_t node_count() const noexcept {
-    return successors_.size();
-  }
+  [[nodiscard]] std::size_t node_count() const noexcept { return successors_.size(); }
 
-  void set_node_count(std::size_t node_count) {
-    successors_.assign(node_count, {});
-  }
+  void set_node_count(std::size_t node_count) { successors_.assign(node_count, {}); }
 
   void add_edge(NodeId from, NodeId to) {
     validate_node(from);
@@ -59,7 +55,7 @@ class ExplicitRelation {
   }
 
   template <typename Func>
-  void for_each_successor(NodeId from, Func&& func) const {
+  void for_each_successor(NodeId from, const Func& func) const {
     validate_node(from);
     for (const auto successor : successors_[from]) {
       func(successor);
@@ -67,9 +63,7 @@ class ExplicitRelation {
   }
 
  private:
-  [[nodiscard]] bool is_valid_node(NodeId node) const noexcept {
-    return node < successors_.size();
-  }
+  [[nodiscard]] bool is_valid_node(NodeId node) const noexcept { return node < successors_.size(); }
 
   void validate_node(NodeId node) const {
     if (!is_valid_node(node)) {
@@ -77,7 +71,7 @@ class ExplicitRelation {
     }
   }
 
-  std::vector<std::vector<NodeId>> successors_{};
+  std::vector<std::vector<NodeId>> successors_;
 };
 
 // Program-order relation derived from per-thread event sequences.
@@ -95,9 +89,7 @@ class ProgramOrderRelation {
     set_thread_events(std::move(thread_events));
   }
 
-  [[nodiscard]] std::size_t node_count() const noexcept {
-    return node_count_;
-  }
+  [[nodiscard]] std::size_t node_count() const noexcept { return node_count_; }
 
   void set_node_count(std::size_t node_count) {
     node_count_ = node_count;
@@ -123,7 +115,7 @@ class ProgramOrderRelation {
   }
 
   template <typename Func>
-  void for_each_successor(NodeId from, Func&& func) const {
+  void for_each_successor(NodeId from, const Func& func) const {
     validate_node(from);
     const auto thread = thread_of_[from];
     if (thread == kNoThread) {
@@ -140,9 +132,7 @@ class ProgramOrderRelation {
  private:
   static constexpr std::size_t kNoThread = std::numeric_limits<std::size_t>::max();
 
-  [[nodiscard]] bool is_valid_node(NodeId node) const noexcept {
-    return node < node_count_;
-  }
+  [[nodiscard]] bool is_valid_node(NodeId node) const noexcept { return node < node_count_; }
 
   void validate_node(NodeId node) const {
     if (!is_valid_node(node)) {
@@ -169,9 +159,9 @@ class ProgramOrderRelation {
   }
 
   std::size_t node_count_{0};
-  std::vector<std::vector<NodeId>> thread_events_{};
-  std::vector<std::size_t> thread_of_{};
-  std::vector<std::size_t> position_in_thread_{};
+  std::vector<std::vector<NodeId>> thread_events_;
+  std::vector<std::size_t> thread_of_;
+  std::vector<std::size_t> position_in_thread_;
 };
 
 // Relational composition view: (left ; right).
@@ -186,9 +176,7 @@ class ComposeRelation {
     }
   }
 
-  [[nodiscard]] std::size_t node_count() const noexcept {
-    return left_.node_count();
-  }
+  [[nodiscard]] std::size_t node_count() const noexcept { return left_.node_count(); }
 
   [[nodiscard]] bool contains(NodeId from, NodeId to) const {
     validate_node(from);
@@ -204,7 +192,7 @@ class ComposeRelation {
   }
 
   template <typename Func>
-  void for_each_successor(NodeId from, Func&& func) const {
+  void for_each_successor(NodeId from, const Func& func) const {
     validate_node(from);
 
     std::vector<bool> emitted(node_count(), false);
@@ -241,9 +229,7 @@ class TransitiveClosureRelation {
  public:
   explicit TransitiveClosureRelation(const BaseRelation& relation) : relation_(relation) {}
 
-  [[nodiscard]] std::size_t node_count() const noexcept {
-    return relation_.node_count();
-  }
+  [[nodiscard]] std::size_t node_count() const noexcept { return relation_.node_count(); }
 
   [[nodiscard]] bool contains(NodeId from, NodeId to) const {
     validate_node(from);
@@ -259,15 +245,14 @@ class TransitiveClosureRelation {
   }
 
   template <typename Func>
-  void for_each_successor(NodeId from, Func&& func) const {
+  void for_each_successor(NodeId from, const Func& func) const {
     validate_node(from);
 
     std::vector<bool> visited(node_count(), false);
     std::vector<NodeId> pending{};
 
-    relation_.for_each_successor(from, [&](const NodeId successor) {
-      pending.push_back(successor);
-    });
+    relation_.for_each_successor(from,
+                                 [&](const NodeId successor) { pending.push_back(successor); });
 
     std::size_t cursor = 0;
     while (cursor < pending.size()) {
@@ -306,16 +291,13 @@ template <Relation BaseRelation>
 template <Relation LeftRelation, Relation RightRelation>
 class UnionRelation {
  public:
-  UnionRelation(const LeftRelation& left, const RightRelation& right)
-      : left_(left), right_(right) {
+  UnionRelation(const LeftRelation& left, const RightRelation& right) : left_(left), right_(right) {
     if (left_.node_count() != right_.node_count()) {
       throw std::invalid_argument("cannot union relations with different node counts");
     }
   }
 
-  [[nodiscard]] std::size_t node_count() const noexcept {
-    return left_.node_count();
-  }
+  [[nodiscard]] std::size_t node_count() const noexcept { return left_.node_count(); }
 
   [[nodiscard]] bool contains(NodeId from, NodeId to) const {
     validate_node(from);
@@ -324,7 +306,7 @@ class UnionRelation {
   }
 
   template <typename Func>
-  void for_each_successor(NodeId from, Func&& func) const {
+  void for_each_successor(NodeId from, const Func& func) const {
     validate_node(from);
 
     std::vector<bool> emitted(node_count(), false);

@@ -1,7 +1,8 @@
 #include "dpor/algo/dpor.hpp"
-#include "dpor/model/consistency.hpp"
-#include "support/oracle.hpp"
 
+#include "dpor/model/consistency.hpp"
+
+#include "support/oracle.hpp"
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -49,8 +50,8 @@ std::string graph_signature(const ExplorationGraph& graph) {
       rf_edges.push_back("BOTTOM->" + event_signature(graph.event(recv_id)));
       continue;
     }
-    rf_edges.push_back(
-        event_signature(graph.event(source.send_id())) + "->" + event_signature(graph.event(recv_id)));
+    rf_edges.push_back(event_signature(graph.event(source.send_id())) + "->" +
+                       event_signature(graph.event(recv_id)));
   }
   std::sort(rf_edges.begin(), rf_edges.end());
 
@@ -65,10 +66,9 @@ std::string graph_signature(const ExplorationGraph& graph) {
   return oss.str();
 }
 
-ExplorationGraph::EventId find_event_id_by_thread_index(
-    const ExplorationGraph& graph,
-    const ThreadId thread,
-    const EventIndex index) {
+ExplorationGraph::EventId find_event_id_by_thread_index(const ExplorationGraph& graph,
+                                                        const ThreadId thread,
+                                                        const EventIndex index) {
   for (ExplorationGraph::EventId id = 0; id < graph.event_count(); ++id) {
     const auto& event = graph.event(id);
     if (event.thread == thread && event.index == index) {
@@ -80,14 +80,12 @@ ExplorationGraph::EventId find_event_id_by_thread_index(
 
 struct ObservedRun {
   VerifyResult result{};
-  std::vector<std::string> observed{};
-  std::set<std::string> unique{};
+  std::vector<std::string> observed;
+  std::set<std::string> unique;
 };
 
 template <typename RunFn>
-ObservedRun collect_observed_executions(
-    const Program& program,
-    RunFn&& run) {
+ObservedRun collect_observed_executions(const Program& program, const RunFn& run) {
   ObservedRun observed_run;
   std::mutex observed_mutex;
 
@@ -145,7 +143,8 @@ Program make_parallel_mixed_program() {
 
 struct RejectingEnqueueExecutor {
   template <typename ValueT>
-  [[nodiscard]] bool try_enqueue(dpor::algo::detail::ExplorationTask<ValueT>&) const noexcept {
+  [[nodiscard]] bool try_enqueue(
+      dpor::algo::detail::ExplorationTask<ValueT>& /*task*/) const noexcept {
     return false;
   }
 };
@@ -160,9 +159,7 @@ TEST_CASE("empty program explores 1 execution", "[algo][dpor]") {
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
-  require_dpor_matches_oracle(
-      config.program,
-      "empty program");
+  require_dpor_matches_oracle(config.program, "empty program");
 }
 
 TEST_CASE("verify rejects sparse program thread ids", "[algo][dpor]") {
@@ -179,7 +176,8 @@ TEST_CASE("verify rejects sparse program thread ids", "[algo][dpor]") {
 
 TEST_CASE("verify accepts compact zero-based thread ids", "[algo][dpor]") {
   DporConfig config;
-  config.program.threads[0] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[0] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "hello"};
     }
@@ -196,7 +194,8 @@ TEST_CASE("verify accepts compact zero-based thread ids", "[algo][dpor]") {
 
 TEST_CASE("single thread with one send explores 1 execution", "[algo][dpor]") {
   DporConfig config;
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 2, .value = "hello"};
     }
@@ -210,7 +209,8 @@ TEST_CASE("single thread with one send explores 1 execution", "[algo][dpor]") {
 
 TEST_CASE("single thread with multiple sends explores 1 execution", "[algo][dpor]") {
   DporConfig config;
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step < 3) {
       return SendLabel{.destination = 2, .value = "msg"};
     }
@@ -228,7 +228,8 @@ TEST_CASE("two threads, one send-receive pair explores 1 execution", "[algo][dpo
   DporConfig config;
 
   // Thread 1: send to thread 2.
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 2, .value = "x"};
     }
@@ -236,7 +237,8 @@ TEST_CASE("two threads, one send-receive pair explores 1 execution", "[algo][dpo
   };
 
   // Thread 2: receive (match any).
-  config.program.threads[2] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return make_receive_label<Value>();
     }
@@ -253,7 +255,8 @@ TEST_CASE("two threads, one send-receive pair explores 1 execution", "[algo][dpo
 TEST_CASE("error event results in ErrorFound", "[algo][dpor]") {
   DporConfig config;
 
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return ErrorLabel{};
     }
@@ -270,7 +273,8 @@ TEST_CASE("error event results in ErrorFound", "[algo][dpor]") {
 TEST_CASE("ND choice with 2 options explores 2 executions", "[algo][dpor]") {
   DporConfig config;
 
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return NondeterministicChoiceLabel{
           .value = "a",
@@ -283,15 +287,14 @@ TEST_CASE("ND choice with 2 options explores 2 executions", "[algo][dpor]") {
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 2);
-  require_dpor_matches_oracle(
-      config.program,
-      "T1=[ND({a,b})]");
+  require_dpor_matches_oracle(config.program, "T1=[ND({a,b})]");
 }
 
 TEST_CASE("ND choice with 3 options explores 3 executions", "[algo][dpor]") {
   DporConfig config;
 
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return NondeterministicChoiceLabel{
           .value = "a",
@@ -312,7 +315,8 @@ TEST_CASE("two sends to same receiver explores 2 executions", "[algo][dpor]") {
   DporConfig config;
 
   // Thread 1: send "a" to thread 3.
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 3, .value = "a"};
     }
@@ -320,7 +324,8 @@ TEST_CASE("two sends to same receiver explores 2 executions", "[algo][dpor]") {
   };
 
   // Thread 2: send "b" to thread 3.
-  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 3, .value = "b"};
     }
@@ -328,7 +333,8 @@ TEST_CASE("two sends to same receiver explores 2 executions", "[algo][dpor]") {
   };
 
   // Thread 3: receive one message (match any).
-  config.program.threads[3] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[3] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return make_receive_label<Value>();
     }
@@ -338,9 +344,7 @@ TEST_CASE("two sends to same receiver explores 2 executions", "[algo][dpor]") {
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 2);
-  require_dpor_matches_oracle(
-      config.program,
-      "T1=[S(3,a)]; T2=[S(3,b)]; T3=[Rb(*)]");
+  require_dpor_matches_oracle(config.program, "T1=[S(3,a)]; T2=[S(3,b)]; T3=[Rb(*)]");
 }
 
 // --- s+s+r example (paper Example 2.3) ---
@@ -349,7 +353,8 @@ TEST_CASE("s+s+r: two sends from one thread, one receive, explores 2 executions"
   DporConfig config;
 
   // Thread 1: send "a" then send "b" to thread 2.
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 2, .value = "a"};
     }
@@ -360,7 +365,8 @@ TEST_CASE("s+s+r: two sends from one thread, one receive, explores 2 executions"
   };
 
   // Thread 2: receive one message (match any).
-  config.program.threads[2] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return make_receive_label<Value>();
     }
@@ -370,18 +376,17 @@ TEST_CASE("s+s+r: two sends from one thread, one receive, explores 2 executions"
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 2);
-  require_dpor_matches_oracle(
-      config.program,
-      "T1=[S(2,a),S(2,b)]; T2=[Rb(*)]");
+  require_dpor_matches_oracle(config.program, "T1=[S(2,a),S(2,b)]; T2=[Rb(*)]");
 }
 
 TEST_CASE("receiver-first schedule still explores both rf choices via backward revisit",
-    "[algo][dpor][regression]") {
+          "[algo][dpor][regression]") {
   DporConfig config;
 
   // T1 has the smallest tid and is considered first by next-event selection.
   // It performs a receive as its first operation.
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
       return make_receive_label<Value>();
     }
@@ -389,14 +394,16 @@ TEST_CASE("receiver-first schedule still explores both rf choices via backward r
   };
 
   // Two independent senders to T1.
-  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "a"};
     }
     return std::nullopt;
   };
 
-  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[3] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "b"};
     }
@@ -407,13 +414,11 @@ TEST_CASE("receiver-first schedule still explores both rf choices via backward r
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   // One execution where T1 reads from T2's send and one from T3's send.
   REQUIRE(result.executions_explored == 2);
-  require_dpor_matches_oracle(
-      config.program,
-      "T1=[Rb(*)]; T2=[S(1,a)]; T3=[S(1,b)]");
+  require_dpor_matches_oracle(config.program, "T1=[Rb(*)]; T2=[S(1,a)]; T3=[S(1,b)]");
 }
 
 TEST_CASE("next-event converts an unsatisfied receive into an internal block",
-    "[algo][dpor][regression]") {
+          "[algo][dpor][regression]") {
   Program program;
   program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
@@ -422,14 +427,16 @@ TEST_CASE("next-event converts an unsatisfied receive into an internal block",
     return std::nullopt;
   };
 
-  const auto next = dpor::algo::detail::compute_next_event(program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program));
+  const auto next = dpor::algo::detail::compute_next_event(
+      program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program));
   REQUIRE(next.has_value());
-  REQUIRE(next->first == 1);
-  REQUIRE(std::holds_alternative<BlockLabel>(next->second));
+  REQUIRE(next->first == 1);  // NOLINT(bugprone-unchecked-optional-access)
+  REQUIRE(std::holds_alternative<BlockLabel>(
+      next->second));  // NOLINT(bugprone-unchecked-optional-access)
 }
 
 TEST_CASE("next-event does not block an unsatisfied non-blocking receive",
-    "[algo][dpor][nonblocking]") {
+          "[algo][dpor][nonblocking]") {
   Program program;
   program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
@@ -438,19 +445,23 @@ TEST_CASE("next-event does not block an unsatisfied non-blocking receive",
     return std::nullopt;
   };
 
-  const auto next = dpor::algo::detail::compute_next_event(program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program));
+  const auto next = dpor::algo::detail::compute_next_event(
+      program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program));
   REQUIRE(next.has_value());
-  REQUIRE(next->first == 1);
-  REQUIRE(std::holds_alternative<ReceiveLabel>(next->second));
-  REQUIRE(std::get<ReceiveLabel>(next->second).is_nonblocking());
+  REQUIRE(next->first == 1);  // NOLINT(bugprone-unchecked-optional-access)
+  REQUIRE(std::holds_alternative<ReceiveLabel>(
+      next->second));                           // NOLINT(bugprone-unchecked-optional-access)
+  REQUIRE(std::get<ReceiveLabel>(next->second)  // NOLINT(bugprone-unchecked-optional-access)
+              .is_nonblocking());
 }
 
 TEST_CASE("non-blocking receive with no sends explores one bottom execution",
-    "[algo][dpor][nonblocking]") {
+          "[algo][dpor][nonblocking]") {
   DporConfig config;
   std::vector<ExplorationGraph> executions;
 
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
       return make_nonblocking_receive_label<Value>();
     }
@@ -474,17 +485,16 @@ TEST_CASE("non-blocking receive with no sends explores one bottom execution",
   const auto rf_it = graph.reads_from().find(0);
   REQUIRE(rf_it != graph.reads_from().end());
   REQUIRE(rf_it->second.is_bottom());
-  require_dpor_matches_oracle(
-      config.program,
-      "T1=[Rnb(*)]");
+  require_dpor_matches_oracle(config.program, "T1=[Rnb(*)]");
 }
 
 TEST_CASE("many non-blocking receives with no sends explore one execution",
-    "[algo][dpor][nonblocking]") {
+          "[algo][dpor][nonblocking]") {
   DporConfig config;
   std::vector<ExplorationGraph> executions;
 
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (trace.size() != step) {
       throw std::logic_error(
           "non-blocking receive regression: bottom observations must remain in thread_trace");
@@ -506,31 +516,30 @@ TEST_CASE("many non-blocking receives with no sends explore one execution",
 
   const auto& graph = executions.front();
   REQUIRE(graph.event_count() == 3);
-  REQUIRE_FALSE(std::any_of(
-      graph.events().begin(),
-      graph.events().end(),
-      [](const Event& event) { return is_block(event); }));
+  REQUIRE_FALSE(std::any_of(graph.events().begin(), graph.events().end(),
+                            [](const Event& event) { return is_block(event); }));
 
   const auto trace = graph.thread_trace(1);
   REQUIRE(trace.size() == 3);
-  REQUIRE(std::all_of(trace.begin(), trace.end(), [](const auto& observed) {
-    return observed.is_bottom();
-  }));
+  REQUIRE(std::all_of(trace.begin(), trace.end(),
+                      [](const auto& observed) { return observed.is_bottom(); }));
 }
 
 TEST_CASE("receiver-first non-blocking receive explores bottom and matched executions",
-    "[algo][dpor][nonblocking]") {
+          "[algo][dpor][nonblocking]") {
   DporConfig config;
   std::vector<ExplorationGraph> executions;
 
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
       return make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking);
     }
     return std::nullopt;
   };
 
-  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "x"};
     }
@@ -550,10 +559,8 @@ TEST_CASE("receiver-first non-blocking receive explores bottom and matched execu
   bool saw_matched = false;
 
   for (const auto& graph : executions) {
-    REQUIRE_FALSE(std::any_of(
-        graph.events().begin(),
-        graph.events().end(),
-        [](const Event& event) { return is_block(event); }));
+    REQUIRE_FALSE(std::any_of(graph.events().begin(), graph.events().end(),
+                              [](const Event& event) { return is_block(event); }));
 
     const auto recv_id = find_event_id_by_thread_index(graph, 1, 0);
     REQUIRE(recv_id != ExplorationGraph::kNoSource);
@@ -577,11 +584,10 @@ TEST_CASE("receiver-first non-blocking receive explores bottom and matched execu
 }
 
 TEST_CASE("backward revisit rewires non-blocking receive from bottom in direct graph test",
-    "[algo][dpor][nonblocking]") {
+          "[algo][dpor][nonblocking]") {
   ExplorationGraph graph;
-  const auto recv = graph.add_event(
-      1,
-      make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking));
+  const auto recv =
+      graph.add_event(1, make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking));
   graph.set_reads_from_bottom(recv);
   const auto send = graph.add_event(2, SendLabel{.destination = 1, .value = "x"});
 
@@ -592,7 +598,8 @@ TEST_CASE("backward revisit rewires non-blocking receive from bottom in direct g
     revisited_graphs.push_back(g);
   };
 
-  dpor::algo::detail::backward_revisit(config.program, graph, send, result, config, 0, dpor::algo::detail::sorted_thread_ids(config.program));
+  dpor::algo::detail::backward_revisit(config.program, graph, send, result, config, 0,
+                                       dpor::algo::detail::sorted_thread_ids(config.program));
 
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
@@ -616,11 +623,10 @@ TEST_CASE("backward revisit rewires non-blocking receive from bottom in direct g
 }
 
 TEST_CASE("revisited graphs materialized under backward revisit start with clean rollback history",
-    "[algo][dpor][rollback]") {
+          "[algo][dpor][rollback]") {
   ExplorationGraph graph;
-  const auto recv = graph.add_event(
-      1,
-      make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking));
+  const auto recv =
+      graph.add_event(1, make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking));
   graph.set_reads_from_bottom(recv);
   const auto send = graph.add_event(2, SendLabel{.destination = 1, .value = "x"});
 
@@ -631,14 +637,8 @@ TEST_CASE("revisited graphs materialized under backward revisit start with clean
     seen_checkpoints.push_back(g.checkpoint());
   };
 
-  dpor::algo::detail::backward_revisit(
-      config.program,
-      graph,
-      send,
-      result,
-      config,
-      0,
-      dpor::algo::detail::sorted_thread_ids(config.program));
+  dpor::algo::detail::backward_revisit(config.program, graph, send, result, config, 0,
+                                       dpor::algo::detail::sorted_thread_ids(config.program));
 
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
@@ -648,7 +648,7 @@ TEST_CASE("revisited graphs materialized under backward revisit start with clean
 }
 
 TEST_CASE("send-branch revisit sees the temporary send and leaves the caller graph rolled back",
-    "[algo][dpor][rollback][nonblocking]") {
+          "[algo][dpor][rollback][nonblocking]") {
   Program program;
   program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
@@ -688,13 +688,8 @@ TEST_CASE("send-branch revisit sees the temporary send and leaves the caller gra
 
   VerifyResult result;
   ExplorationGraph graph;
-  dpor::algo::detail::visit(
-      program,
-      graph,
-      result,
-      config,
-      0,
-      dpor::algo::detail::sorted_thread_ids(program));
+  dpor::algo::detail::visit(program, graph, result, config, 0,
+                            dpor::algo::detail::sorted_thread_ids(program));
 
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 2);
@@ -705,11 +700,12 @@ TEST_CASE("send-branch revisit sees the temporary send and leaves the caller gra
 }
 
 TEST_CASE("non-blocking receive exposes bottom in trace for later control flow",
-    "[algo][dpor][nonblocking]") {
+          "[algo][dpor][nonblocking]") {
   DporConfig config;
   std::set<std::string> observed_pairs;
 
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
       return make_nonblocking_receive_label<Value>();
     }
@@ -722,14 +718,16 @@ TEST_CASE("non-blocking receive exposes bottom in trace for later control flow",
     return std::nullopt;
   };
 
-  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "x"};
     }
     return std::nullopt;
   };
 
-  config.program.threads[3] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[3] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return make_receive_label_from_values<Value>({"timeout", "x"});
     }
@@ -759,33 +757,37 @@ TEST_CASE("non-blocking receive exposes bottom in trace for later control flow",
 }
 
 TEST_CASE("backward-revisit-heavy exploration does not produce duplicate execution graphs",
-    "[algo][dpor][regression]") {
+          "[algo][dpor][regression]") {
   DporConfig config;
   std::vector<std::string> signatures;
 
   // Receiver thread (smallest tid) performs two receives.
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step < 2 && trace.size() == step) {
       return make_receive_label<Value>();
     }
     return std::nullopt;
   };
 
-  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "a"};
     }
     return std::nullopt;
   };
 
-  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[3] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "b"};
     }
     return std::nullopt;
   };
 
-  config.program.threads[4] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[4] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "c"};
     }
@@ -827,11 +829,10 @@ TEST_CASE("execution observer is called for each complete execution", "[algo][dp
   DporConfig config;
   std::size_t observed_count = 0;
 
-  config.on_execution = [&observed_count](const ExplorationGraph&) {
-    ++observed_count;
-  };
+  config.on_execution = [&observed_count](const ExplorationGraph&) { ++observed_count; };
 
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return NondeterministicChoiceLabel{
           .value = "a",
@@ -847,7 +848,7 @@ TEST_CASE("execution observer is called for each complete execution", "[algo][dp
 }
 
 TEST_CASE("detail visit shows a complete execution to the observer before rollback",
-    "[algo][dpor][rollback]") {
+          "[algo][dpor][rollback]") {
   Program program;
   program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
@@ -868,13 +869,8 @@ TEST_CASE("detail visit shows a complete execution to the observer before rollba
 
   VerifyResult result;
   ExplorationGraph graph;
-  dpor::algo::detail::visit(
-      program,
-      graph,
-      result,
-      config,
-      0,
-      dpor::algo::detail::sorted_thread_ids(program));
+  dpor::algo::detail::visit(program, graph, result, config, 0,
+                            dpor::algo::detail::sorted_thread_ids(program));
 
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
@@ -884,7 +880,7 @@ TEST_CASE("detail visit shows a complete execution to the observer before rollba
 }
 
 TEST_CASE("detail visit shows the terminal error event to the observer before rollback",
-    "[algo][dpor][rollback]") {
+          "[algo][dpor][rollback]") {
   Program program;
   program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
@@ -905,13 +901,8 @@ TEST_CASE("detail visit shows the terminal error event to the observer before ro
 
   VerifyResult result;
   ExplorationGraph graph;
-  dpor::algo::detail::visit(
-      program,
-      graph,
-      result,
-      config,
-      0,
-      dpor::algo::detail::sorted_thread_ids(program));
+  dpor::algo::detail::visit(program, graph, result, config, 0,
+                            dpor::algo::detail::sorted_thread_ids(program));
 
   REQUIRE(result.kind == VerifyResultKind::ErrorFound);
   REQUIRE(result.executions_explored == 1);
@@ -926,7 +917,8 @@ TEST_CASE("cycle-inducing rf assignment is pruned by consistency check", "[algo]
   DporConfig config;
 
   // Thread 1: send to thread 2, then receive from thread 2.
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 2, .value = "a"};
     }
@@ -937,7 +929,8 @@ TEST_CASE("cycle-inducing rf assignment is pruned by consistency check", "[algo]
   };
 
   // Thread 2: send to thread 1, then receive from thread 1.
-  config.program.threads[2] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "b"};
     }
@@ -959,7 +952,8 @@ TEST_CASE("three-thread chain: thread 1 sends to 2, thread 2 forwards to 3", "[a
   DporConfig config;
 
   // Thread 1: send to thread 2.
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 2, .value = "x"};
     }
@@ -967,7 +961,8 @@ TEST_CASE("three-thread chain: thread 1 sends to 2, thread 2 forwards to 3", "[a
   };
 
   // Thread 2: receive then send to thread 3.
-  config.program.threads[2] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return make_receive_label<Value>();
     }
@@ -978,7 +973,8 @@ TEST_CASE("three-thread chain: thread 1 sends to 2, thread 2 forwards to 3", "[a
   };
 
   // Thread 3: receive.
-  config.program.threads[3] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[3] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return make_receive_label<Value>();
     }
@@ -994,7 +990,8 @@ TEST_CASE("three-thread chain: thread 1 sends to 2, thread 2 forwards to 3", "[a
 
 TEST_CASE("program thread function returning BlockLabel is rejected", "[algo][dpor]") {
   DporConfig config;
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return BlockLabel{};
     }
@@ -1004,7 +1001,8 @@ TEST_CASE("program thread function returning BlockLabel is rejected", "[algo][dp
   REQUIRE_THROWS_AS(verify(config), std::logic_error);
 }
 
-TEST_CASE("internal block suspends thread progress until receive is rescheduled", "[algo][dpor][regression]") {
+TEST_CASE("internal block suspends thread progress until receive is rescheduled",
+          "[algo][dpor][regression]") {
   Program program;
 
   // T1: blocking receive, then send to T3.
@@ -1035,10 +1033,12 @@ TEST_CASE("internal block suspends thread progress until receive is rescheduled"
   };
 
   // At the empty graph, T1 has no compatible send and must be internally blocked.
-  const auto first = dpor::algo::detail::compute_next_event(program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program));
+  const auto first = dpor::algo::detail::compute_next_event(
+      program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program));
   REQUIRE(first.has_value());
-  REQUIRE(first->first == 1);
-  REQUIRE(std::holds_alternative<BlockLabel>(first->second));
+  REQUIRE(first->first == 1);  // NOLINT(bugprone-unchecked-optional-access)
+  REQUIRE(std::holds_alternative<BlockLabel>(
+      first->second));  // NOLINT(bugprone-unchecked-optional-access)
 
   DporConfig config;
   config.program = program;
@@ -1056,8 +1056,7 @@ TEST_CASE("internal block suspends thread progress until receive is rescheduled"
 
     const auto t1_e0 = find_event_id_by_thread_index(graph, 1, 0);
     const auto t1_e1 = find_event_id_by_thread_index(graph, 1, 1);
-    if (t1_e0 == ExplorationGraph::kNoSource ||
-        t1_e1 == ExplorationGraph::kNoSource ||
+    if (t1_e0 == ExplorationGraph::kNoSource || t1_e1 == ExplorationGraph::kNoSource ||
         !is_receive(graph.event(t1_e0))) {
       saw_bad_t1_prefix = true;
       return;
@@ -1081,7 +1080,8 @@ TEST_CASE("internal block suspends thread progress until receive is rescheduled"
     }
 
     const auto* src = as_send(graph.event(rf_it->second.send_id()));
-    if (src == nullptr || src->value != "done" || graph.event(rf_it->second.send_id()).thread != 1) {
+    if (src == nullptr || src->value != "done" ||
+        graph.event(rf_it->second.send_id()).thread != 1) {
       saw_bad_t3_receive = true;
       return;
     }
@@ -1093,13 +1093,12 @@ TEST_CASE("internal block suspends thread progress until receive is rescheduled"
   REQUIRE_FALSE(saw_completed_graph_with_block);
   REQUIRE_FALSE(saw_bad_t1_prefix);
   REQUIRE_FALSE(saw_bad_t3_receive);
-  require_dpor_matches_oracle(
-      config.program,
-      "T1=[Rb(*),S(3,done)]; T2=[S(1,msg)]; T3=[Rb({done})]");
+  require_dpor_matches_oracle(config.program,
+                              "T1=[Rb(*),S(3,done)]; T2=[S(1,msg)]; T3=[Rb({done})]");
 }
 
 TEST_CASE("multiple blocked receives are both rescheduled when matching sends appear",
-    "[algo][dpor][regression]") {
+          "[algo][dpor][regression]") {
   Program program;
 
   // Two receiver threads that start blocked until sends arrive.
@@ -1138,16 +1137,21 @@ TEST_CASE("multiple blocked receives are both rescheduled when matching sends ap
 
   // At the beginning, both receiver threads should become internally blocked.
   ExplorationGraph partial;
-  const auto first = dpor::algo::detail::compute_next_event(program, partial, dpor::algo::detail::sorted_thread_ids(program));
+  const auto first = dpor::algo::detail::compute_next_event(
+      program, partial, dpor::algo::detail::sorted_thread_ids(program));
   REQUIRE(first.has_value());
-  REQUIRE(first->first == 1);
-  REQUIRE(std::holds_alternative<BlockLabel>(first->second));
-  static_cast<void>(partial.add_event(first->first, first->second));
+  REQUIRE(first->first == 1);  // NOLINT(bugprone-unchecked-optional-access)
+  REQUIRE(std::holds_alternative<BlockLabel>(
+      first->second));  // NOLINT(bugprone-unchecked-optional-access)
+  static_cast<void>(partial.add_event(
+      first->first, first->second));  // NOLINT(bugprone-unchecked-optional-access)
 
-  const auto second = dpor::algo::detail::compute_next_event(program, partial, dpor::algo::detail::sorted_thread_ids(program));
+  const auto second = dpor::algo::detail::compute_next_event(
+      program, partial, dpor::algo::detail::sorted_thread_ids(program));
   REQUIRE(second.has_value());
-  REQUIRE(second->first == 2);
-  REQUIRE(std::holds_alternative<BlockLabel>(second->second));
+  REQUIRE(second->first == 2);  // NOLINT(bugprone-unchecked-optional-access)
+  REQUIRE(std::holds_alternative<BlockLabel>(
+      second->second));  // NOLINT(bugprone-unchecked-optional-access)
 
   DporConfig config;
   config.program = program;
@@ -1166,10 +1170,8 @@ TEST_CASE("multiple blocked receives are both rescheduled when matching sends ap
 
     const auto t1_recv = find_event_id_by_thread_index(graph, 1, 0);
     const auto t2_recv = find_event_id_by_thread_index(graph, 2, 0);
-    if (t1_recv == ExplorationGraph::kNoSource ||
-        t2_recv == ExplorationGraph::kNoSource ||
-        !is_receive(graph.event(t1_recv)) ||
-        !is_receive(graph.event(t2_recv))) {
+    if (t1_recv == ExplorationGraph::kNoSource || t2_recv == ExplorationGraph::kNoSource ||
+        !is_receive(graph.event(t1_recv)) || !is_receive(graph.event(t2_recv))) {
       missing_receiver_event = true;
       return;
     }
@@ -1200,8 +1202,7 @@ TEST_CASE("multiple blocked receives are both rescheduled when matching sends ap
   REQUIRE(t1_received_values == std::set<std::string>{"a", "a2"});
   REQUIRE(t2_received_values == std::set<std::string>{"b", "b2"});
   require_dpor_matches_oracle(
-      config.program,
-      "T1=[Rb({a,a2})]; T2=[Rb({b,b2})]; T3=[S(1,a),S(2,b)]; T4=[S(1,a2),S(2,b2)]");
+      config.program, "T1=[Rb({a,a2})]; T2=[Rb({b,b2})]; T3=[S(1,a),S(2,b)]; T4=[S(1,a2),S(2,b2)]");
 }
 
 // --- ND choice affects subsequent behavior ---
@@ -1219,7 +1220,8 @@ TEST_CASE("ND choice value visible in subsequent trace", "[algo][dpor]") {
     }
   };
 
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return NondeterministicChoiceLabel{
           .value = "a",
@@ -1248,7 +1250,8 @@ TEST_CASE("all explored executions should satisfy async consistency", "[algo][dp
   DporConfig config;
 
   // T1: R
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return make_receive_label<Value>();
     }
@@ -1256,7 +1259,8 @@ TEST_CASE("all explored executions should satisfy async consistency", "[algo][dp
   };
 
   // T2: S(3,c); S(1,a)
-  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 3, .value = "c"};
     }
@@ -1267,7 +1271,8 @@ TEST_CASE("all explored executions should satisfy async consistency", "[algo][dp
   };
 
   // T3: R; S(1,b)
-  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[3] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return make_receive_label<Value>();
     }
@@ -1278,7 +1283,8 @@ TEST_CASE("all explored executions should satisfy async consistency", "[algo][dp
   };
 
   // T4: ND{b,a}; S(3,b)
-  config.program.threads[4] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[4] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return NondeterministicChoiceLabel{
           .value = "a",
@@ -1306,7 +1312,7 @@ TEST_CASE("all explored executions should satisfy async consistency", "[algo][dp
 }
 
 TEST_CASE("backward revisit must reject candidates when a deleted event violates revisit condition",
-    "[algo][dpor][regression]") {
+          "[algo][dpor][regression]") {
   ExplorationGraph graph;
 
   // 0: T2 send -> T3
@@ -1318,12 +1324,10 @@ TEST_CASE("backward revisit must reject candidates when a deleted event violates
   // 3: T3 receive
   const auto r30 = graph.add_event(3, make_receive_label<Value>());
   // 4: T4 ND
-  static_cast<void>(graph.add_event(
-      4,
-      NondeterministicChoiceLabel{
-          .value = "b",
-          .choices = {"b", "a"},
-      }));
+  static_cast<void>(graph.add_event(4, NondeterministicChoiceLabel{
+                                           .value = "b",
+                                           .choices = {"b", "a"},
+                                       }));
   // 5: T4 send -> T3 (candidate revisiting send)
   const auto s41 = graph.add_event(4, SendLabel{.destination = 3, .value = "b"});
   // 6: T3 send -> T1
@@ -1340,15 +1344,15 @@ TEST_CASE("backward revisit must reject candidates when a deleted event violates
 
   VerifyResult result;
   DporConfig config;
-  dpor::algo::detail::backward_revisit(
-      config.program, graph, s41, result, config, 0, dpor::algo::detail::sorted_thread_ids(config.program));
+  dpor::algo::detail::backward_revisit(config.program, graph, s41, result, config, 0,
+                                       dpor::algo::detail::sorted_thread_ids(config.program));
 
   // With the Deleted-set guard from Algorithm 1, this revisit should be blocked.
   REQUIRE(result.executions_explored == 0);
 }
 
 TEST_CASE("line-10 revisit filter blocks revisits when receive already reaches the new send",
-    "[algo][dpor][regression]") {
+          "[algo][dpor][regression]") {
   ExplorationGraph graph;
 
   const auto source = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
@@ -1360,12 +1364,13 @@ TEST_CASE("line-10 revisit filter blocks revisits when receive already reaches t
 
   VerifyResult result;
   DporConfig config;
-  dpor::algo::detail::backward_revisit(config.program, graph, send, result, config, 0, dpor::algo::detail::sorted_thread_ids(config.program));
+  dpor::algo::detail::backward_revisit(config.program, graph, send, result, config, 0,
+                                       dpor::algo::detail::sorted_thread_ids(config.program));
   REQUIRE(result.executions_explored == 0);
 }
 
 TEST_CASE("deleted-set check rejects revisit when any deleted event fails (mixed event kinds)",
-    "[algo][dpor][regression]") {
+          "[algo][dpor][regression]") {
   ExplorationGraph graph;
 
   const auto s20 = graph.add_event(2, SendLabel{.destination = 3, .value = "c"});
@@ -1373,12 +1378,10 @@ TEST_CASE("deleted-set check rejects revisit when any deleted event fails (mixed
   const auto r10 = graph.add_event(1, make_receive_label<Value>());
   const auto r30 = graph.add_event(3, make_receive_label<Value>());
   const auto r70 = graph.add_event(7, make_receive_label<Value>());
-  const auto nd_bad = graph.add_event(
-      6,
-      NondeterministicChoiceLabel{
-          .value = "b",
-          .choices = {"a", "b"},
-      });
+  const auto nd_bad = graph.add_event(6, NondeterministicChoiceLabel{
+                                             .value = "b",
+                                             .choices = {"a", "b"},
+                                         });
   static_cast<void>(graph.add_event(5, SendLabel{.destination = 1, .value = "z"}));
   const auto s41 = graph.add_event(4, SendLabel{.destination = 3, .value = "b"});
   const auto s31 = graph.add_event(3, SendLabel{.destination = 1, .value = "b"});
@@ -1393,12 +1396,13 @@ TEST_CASE("deleted-set check rejects revisit when any deleted event fails (mixed
 
   VerifyResult result;
   DporConfig config;
-  dpor::algo::detail::backward_revisit(config.program, graph, s41, result, config, 0, dpor::algo::detail::sorted_thread_ids(config.program));
+  dpor::algo::detail::backward_revisit(config.program, graph, s41, result, config, 0,
+                                       dpor::algo::detail::sorted_thread_ids(config.program));
   REQUIRE(result.executions_explored == 0);
 }
 
 TEST_CASE("backward revisit preserves intended rf endpoint after restrict/remap",
-    "[algo][dpor][regression]") {
+          "[algo][dpor][regression]") {
   ExplorationGraph graph;
 
   const auto s_old = graph.add_event(1, SendLabel{.destination = 4, .value = "old"});
@@ -1415,7 +1419,8 @@ TEST_CASE("backward revisit preserves intended rf endpoint after restrict/remap"
     revisited_graphs.push_back(g);
   };
 
-  dpor::algo::detail::backward_revisit(config.program, graph, s_new, result, config, 0, dpor::algo::detail::sorted_thread_ids(config.program));
+  dpor::algo::detail::backward_revisit(config.program, graph, s_new, result, config, 0,
+                                       dpor::algo::detail::sorted_thread_ids(config.program));
 
   REQUIRE(result.executions_explored == 1);
   REQUIRE(revisited_graphs.size() == 1);
@@ -1437,7 +1442,7 @@ TEST_CASE("backward revisit preserves intended rf endpoint after restrict/remap"
 }
 
 TEST_CASE("only compatible receives in destination thread are revisited",
-    "[algo][dpor][regression]") {
+          "[algo][dpor][regression]") {
   ExplorationGraph graph;
 
   const auto s_b = graph.add_event(2, SendLabel{.destination = 4, .value = "b"});
@@ -1456,7 +1461,8 @@ TEST_CASE("only compatible receives in destination thread are revisited",
     revisited_graphs.push_back(g);
   };
 
-  dpor::algo::detail::backward_revisit(config.program, graph, s_new, result, config, 0, dpor::algo::detail::sorted_thread_ids(config.program));
+  dpor::algo::detail::backward_revisit(config.program, graph, s_new, result, config, 0,
+                                       dpor::algo::detail::sorted_thread_ids(config.program));
 
   REQUIRE(result.executions_explored == 1);
   REQUIRE(revisited_graphs.size() == 1);
@@ -1499,14 +1505,13 @@ TEST_CASE("tiebreaker should not pick an already-consumed send", "[algo][dpor][r
   REQUIRE(chosen == s2);
 }
 
-TEST_CASE("receive revisit condition should use tiebreaker from G|Previous", "[algo][dpor][regression]") {
+TEST_CASE("receive revisit condition should use tiebreaker from G|Previous",
+          "[algo][dpor][regression]") {
   ExplorationGraph graph;
 
   // Current source for the receive.
   const auto send_current = graph.add_event(2, SendLabel{.destination = 1, .value = "x"});
-  const auto receive = graph.add_event(
-      1,
-      make_receive_label_from_values<Value>({"x"}));
+  const auto receive = graph.add_event(1, make_receive_label_from_values<Value>({"x"}));
   graph.set_reads_from(receive, send_current);
 
   // Compatible send added after the receive, but unrelated to the revisiting send.
@@ -1524,7 +1529,8 @@ TEST_CASE("receive revisit condition should use tiebreaker from G|Previous", "[a
   REQUIRE(recv_in_previous != ExplorationGraph::kNoSource);
 
   // Paper condition: receive should compare against GetConsTiebreaker(G|Previous, e).
-  const auto expected_tiebreaker = dpor::algo::detail::get_cons_tiebreaker(restricted, recv_in_previous);
+  const auto expected_tiebreaker =
+      dpor::algo::detail::get_cons_tiebreaker(restricted, recv_in_previous);
   const auto rf_it = restricted.reads_from().find(recv_in_previous);
   REQUIRE(rf_it != restricted.reads_from().end());
   REQUIRE(rf_it->second == expected_tiebreaker);
@@ -1533,19 +1539,15 @@ TEST_CASE("receive revisit condition should use tiebreaker from G|Previous", "[a
   REQUIRE(dpor::algo::detail::revisit_condition(graph, receive, revisiting_send));
 }
 
-TEST_CASE("receive revisit condition rejects rf source outside G|Previous", "[algo][dpor][regression]") {
+TEST_CASE("receive revisit condition rejects rf source outside G|Previous",
+          "[algo][dpor][regression]") {
   ExplorationGraph graph;
 
   // Receive is inserted before its source send.
-  const auto receive = graph.add_event(
-      1,
-      make_receive_label_from_values<Value>({"x"}));
-  const auto source_outside_previous = graph.add_event(
-      2,
-      SendLabel{.destination = 1, .value = "x"});
-  const auto revisiting_send = graph.add_event(
-      3,
-      SendLabel{.destination = 9, .value = "y"});
+  const auto receive = graph.add_event(1, make_receive_label_from_values<Value>({"x"}));
+  const auto source_outside_previous =
+      graph.add_event(2, SendLabel{.destination = 1, .value = "x"});
+  const auto revisiting_send = graph.add_event(3, SendLabel{.destination = 9, .value = "y"});
 
   graph.set_reads_from(receive, source_outside_previous);
 
@@ -1560,14 +1562,10 @@ TEST_CASE("receive revisit condition rejects rf source outside G|Previous", "[al
 }
 
 TEST_CASE("non-blocking receive revisit condition requires bottom source",
-    "[algo][dpor][nonblocking]") {
+          "[algo][dpor][nonblocking]") {
   ExplorationGraph graph;
-  const auto receive = graph.add_event(
-      1,
-      make_nonblocking_receive_label<Value>());
-  const auto send = graph.add_event(
-      2,
-      SendLabel{.destination = 1, .value = "x"});
+  const auto receive = graph.add_event(1, make_nonblocking_receive_label<Value>());
+  const auto send = graph.add_event(2, SendLabel{.destination = 1, .value = "x"});
 
   graph.set_reads_from_bottom(receive);
   REQUIRE(dpor::algo::detail::revisit_condition(graph, receive, send));
@@ -1576,14 +1574,13 @@ TEST_CASE("non-blocking receive revisit condition requires bottom source",
   REQUIRE_FALSE(dpor::algo::detail::revisit_condition(graph, receive, send));
 }
 
-TEST_CASE("ND revisit condition should use min(S), not insertion order", "[algo][dpor][regression]") {
+TEST_CASE("ND revisit condition should use min(S), not insertion order",
+          "[algo][dpor][regression]") {
   ExplorationGraph graph;
-  const auto nd = graph.add_event(
-      1,
-      NondeterministicChoiceLabel{
-          .value = "a",
-          .choices = {"b", "a"},
-      });
+  const auto nd = graph.add_event(1, NondeterministicChoiceLabel{
+                                         .value = "a",
+                                         .choices = {"b", "a"},
+                                     });
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
 
   // Under the paper's condition val(e) = min(S), this should hold.
@@ -1592,12 +1589,14 @@ TEST_CASE("ND revisit condition should use min(S), not insertion order", "[algo]
 
 // --- Paper examples (Must, OOPSLA'24) within current async + ND scope ---
 
-TEST_CASE("paper ex 2.4: nondet failure target yields one execution per choice", "[algo][dpor][paper]") {
+TEST_CASE("paper ex 2.4: nondet failure target yields one execution per choice",
+          "[algo][dpor][paper]") {
   DporConfig config;
   std::set<std::string> received_failures;
 
   // T1 (environment): who := nondet({node1,node2}); send(T2, Fail(who))
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return NondeterministicChoiceLabel{
           .value = "node1",
@@ -1614,7 +1613,8 @@ TEST_CASE("paper ex 2.4: nondet failure target yields one execution per choice",
   };
 
   // T2 (coordinator): receive one failure notification.
-  config.program.threads[2] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return make_receive_label<Value>();
     }
@@ -1632,22 +1632,23 @@ TEST_CASE("paper ex 2.4: nondet failure target yields one execution per choice",
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 2);
   REQUIRE(received_failures == std::set<std::string>{"Fail(node1)", "Fail(node2)"});
-  require_dpor_matches_oracle(
-      config.program,
-      "T1=[ND({node1,node2}),S(2,Fail(trace[0]))]; T2=[Rb(*)]");
+  require_dpor_matches_oracle(config.program,
+                              "T1=[ND({node1,node2}),S(2,Fail(trace[0]))]; T2=[Rb(*)]");
 }
 
 TEST_CASE("paper ex 2.6: selective receive filters stale value", "[algo][dpor][paper]") {
   DporConfig config;
 
   // Two messages to T3: one stale, one fresh.
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 3, .value = "stale"};
     }
     return std::nullopt;
   };
-  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 3, .value = "fresh"};
     }
@@ -1655,7 +1656,8 @@ TEST_CASE("paper ex 2.6: selective receive filters stale value", "[algo][dpor][p
   };
 
   // T3 only accepts "fresh".
-  config.program.threads[3] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[3] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return make_receive_label_from_values<Value>({"fresh"});
     }
@@ -1665,29 +1667,30 @@ TEST_CASE("paper ex 2.6: selective receive filters stale value", "[algo][dpor][p
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
-  require_dpor_matches_oracle(
-      config.program,
-      "T1=[S(3,stale)]; T2=[S(3,fresh)]; T3=[Rb({fresh})]");
+  require_dpor_matches_oracle(config.program, "T1=[S(3,stale)]; T2=[S(3,fresh)]; T3=[Rb({fresh})]");
 }
 
 TEST_CASE("paper ex 2.7: ordered selective receives collapse ns+rn-sel to one execution",
-    "[algo][dpor][paper]") {
+          "[algo][dpor][paper]") {
   DporConfig config;
 
   // T1..T3 send 1..3 to T4.
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 4, .value = "1"};
     }
     return std::nullopt;
   };
-  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 4, .value = "2"};
     }
     return std::nullopt;
   };
-  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[3] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 4, .value = "3"};
     }
@@ -1695,7 +1698,8 @@ TEST_CASE("paper ex 2.7: ordered selective receives collapse ns+rn-sel to one ex
   };
 
   // T4 receives exactly 1, then 2, then 3.
-  config.program.threads[4] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[4] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
       return make_receive_label_from_values<Value>({"1"});
     }
@@ -1712,16 +1716,16 @@ TEST_CASE("paper ex 2.7: ordered selective receives collapse ns+rn-sel to one ex
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
   require_dpor_matches_oracle(
-      config.program,
-      "T1=[S(4,1)]; T2=[S(4,2)]; T3=[S(4,3)]; T4=[Rb({1}),Rb({2}),Rb({3})]");
+      config.program, "T1=[S(4,1)]; T2=[S(4,2)]; T3=[S(4,3)]; T4=[Rb({1}),Rb({2}),Rb({3})]");
 }
 
 TEST_CASE("paper ex 2.8: receives can consume messages out of sender order with predicates",
-    "[algo][dpor][paper]") {
+          "[algo][dpor][paper]") {
   DporConfig config;
 
   // T1: send(T2,1); send(T2,2)
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 2, .value = "1"};
     }
@@ -1732,7 +1736,8 @@ TEST_CASE("paper ex 2.8: receives can consume messages out of sender order with 
   };
 
   // T2: recv(x==2); recv(x==1)
-  config.program.threads[2] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
       return make_receive_label_from_values<Value>({"2"});
     }
@@ -1745,40 +1750,43 @@ TEST_CASE("paper ex 2.8: receives can consume messages out of sender order with 
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
-  require_dpor_matches_oracle(
-      config.program,
-      "T1=[S(2,1),S(2,2)]; T2=[Rb({2}),Rb({1})]");
+  require_dpor_matches_oracle(config.program, "T1=[S(2,1),S(2,2)]; T2=[Rb({2}),Rb({1})]");
 }
 
 TEST_CASE("paper ex 2.9: ns+r explores N executions (lazy ordering)", "[algo][dpor][paper]") {
   DporConfig config;
   std::set<std::string> first_receive_values;
 
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 5, .value = "1"};
     }
     return std::nullopt;
   };
-  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 5, .value = "2"};
     }
     return std::nullopt;
   };
-  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[3] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 5, .value = "3"};
     }
     return std::nullopt;
   };
-  config.program.threads[4] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[4] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 5, .value = "4"};
     }
     return std::nullopt;
   };
-  config.program.threads[5] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[5] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return make_receive_label<Value>();
     }
@@ -1796,19 +1804,18 @@ TEST_CASE("paper ex 2.9: ns+r explores N executions (lazy ordering)", "[algo][dp
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 4);
   REQUIRE(first_receive_values == std::set<std::string>{"1", "2", "3", "4"});
-  require_dpor_matches_oracle(
-      config.program,
-      "T1=[S(5,1)]; T2=[S(5,2)]; T3=[S(5,3)]; T4=[S(5,4)]; T5=[Rb(*)]");
+  require_dpor_matches_oracle(config.program,
+                              "T1=[S(5,1)]; T2=[S(5,2)]; T3=[S(5,3)]; T4=[S(5,4)]; T5=[Rb(*)]");
 }
 
-TEST_CASE("paper ex 4.1: blocked receive is rescheduled when sends appear",
-    "[algo][dpor][paper]") {
+TEST_CASE("paper ex 4.1: blocked receive is rescheduled when sends appear", "[algo][dpor][paper]") {
   DporConfig config;
   std::set<std::string> observed_receive_values;
   bool completed_graph_has_block = false;
 
   // T3 (smallest tid) is scheduled first and tries to receive.
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
       return make_receive_label<Value>();
     }
@@ -1816,20 +1823,23 @@ TEST_CASE("paper ex 4.1: blocked receive is rescheduled when sends appear",
   };
 
   // Two sends to T3.
-  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "1"};
     }
     return std::nullopt;
   };
-  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[3] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "2"};
     }
     return std::nullopt;
   };
 
-  config.on_execution = [&observed_receive_values, &completed_graph_has_block](const ExplorationGraph& graph) {
+  config.on_execution = [&observed_receive_values,
+                         &completed_graph_has_block](const ExplorationGraph& graph) {
     for (const auto& evt : graph.events()) {
       if (is_block(evt)) {
         completed_graph_has_block = true;
@@ -1846,9 +1856,7 @@ TEST_CASE("paper ex 4.1: blocked receive is rescheduled when sends appear",
   REQUIRE(result.executions_explored == 2);
   REQUIRE(observed_receive_values == std::set<std::string>{"1", "2"});
   REQUIRE_FALSE(completed_graph_has_block);
-  require_dpor_matches_oracle(
-      config.program,
-      "T1=[Rb(*)]; T2=[S(1,1)]; T3=[S(1,2)]");
+  require_dpor_matches_oracle(config.program, "T1=[Rb(*)]; T2=[S(1,1)]; T3=[S(1,2)]");
 }
 
 TEST_CASE("paper ex 4.2: backward revisit recovers missed rf option", "[algo][dpor][paper]") {
@@ -1858,21 +1866,24 @@ TEST_CASE("paper ex 4.2: backward revisit recovers missed rf option", "[algo][dp
   // Thread IDs arranged to force the paper's schedule shape:
   // T1 then T3(recv) then T2.
   // T1: send(T3,1)
-  config.program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 2, .value = "1"};
     }
     return std::nullopt;
   };
   // T3: recv()
-  config.program.threads[2] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return make_receive_label<Value>();
     }
     return std::nullopt;
   };
   // T2: send(T3,2)
-  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[3] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 2, .value = "2"};
     }
@@ -1890,18 +1901,17 @@ TEST_CASE("paper ex 4.2: backward revisit recovers missed rf option", "[algo][dp
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 2);
   REQUIRE(observed_receive_values == std::set<std::string>{"1", "2"});
-  require_dpor_matches_oracle(
-      config.program,
-      "T1=[S(2,1)]; T2=[Rb(*)]; T3=[S(2,2)]");
+  require_dpor_matches_oracle(config.program, "T1=[S(2,1)]; T2=[Rb(*)]; T3=[S(2,2)]");
 }
 
 TEST_CASE("paper ex 4.3: revisiting condition avoids duplicate exploration in s+s+r-br",
-    "[algo][dpor][paper]") {
+          "[algo][dpor][paper]") {
   DporConfig config;
   std::vector<std::string> signatures;
 
   // T1: send(T1,0); recv()
-  config.program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "0"};
     }
@@ -1911,28 +1921,32 @@ TEST_CASE("paper ex 4.3: revisiting condition avoids duplicate exploration in s+
     return std::nullopt;
   };
   // T2: send(T4,1)
-  config.program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 4, .value = "1"};
     }
     return std::nullopt;
   };
   // T3: send(T4,2)
-  config.program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[3] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 4, .value = "2"};
     }
     return std::nullopt;
   };
   // T4: recv()
-  config.program.threads[4] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[4] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return make_receive_label<Value>();
     }
     return std::nullopt;
   };
   // T5: send(T1,42)
-  config.program.threads[5] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+  config.program.threads[5] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "42"};
     }
@@ -1951,28 +1965,22 @@ TEST_CASE("paper ex 4.3: revisiting condition avoids duplicate exploration in s+
   const std::set<std::string> unique_signatures(signatures.begin(), signatures.end());
   REQUIRE(unique_signatures.size() == signatures.size());
   require_dpor_matches_oracle(
-      config.program,
-      "T1=[S(1,0),Rb(*)]; T2=[S(4,1)]; T3=[S(4,2)]; T4=[Rb(*)]; T5=[S(1,42)]");
+      config.program, "T1=[S(1,0),Rb(*)]; T2=[S(4,1)]; T3=[S(4,2)]; T4=[Rb(*)]; T5=[S(1,42)]");
 }
 
 TEST_CASE("verify_parallel with one worker matches sequential execution order exactly",
-    "[algo][dpor][parallel]") {
+          "[algo][dpor][parallel]") {
   const auto program = make_parallel_mixed_program();
 
-  const auto sequential = collect_observed_executions(
-      program,
-      [](const DporConfig& config) {
-        return verify(config);
-      });
+  const auto sequential =
+      collect_observed_executions(program, [](const DporConfig& config) { return verify(config); });
 
-  const auto parallel = collect_observed_executions(
-      program,
-      [](const DporConfig& config) {
-        ParallelVerifyOptions options;
-        options.max_workers = 1;
-        options.max_queued_tasks = 4;
-        return verify_parallel(config, options);
-      });
+  const auto parallel = collect_observed_executions(program, [](const DporConfig& config) {
+    ParallelVerifyOptions options;
+    options.max_workers = 1;
+    options.max_queued_tasks = 4;
+    return verify_parallel(config, options);
+  });
 
   REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
@@ -1982,43 +1990,34 @@ TEST_CASE("verify_parallel with one worker matches sequential execution order ex
 }
 
 TEST_CASE("try_enqueue_owned_task restores the graph after enqueue rejection",
-    "[algo][dpor][parallel]") {
+          "[algo][dpor][parallel]") {
   ExplorationGraph graph;
   const auto send_id = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
-  const auto recv_id = graph.add_event(
-      2,
-      make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking));
+  const auto recv_id =
+      graph.add_event(2, make_receive_label_from_values<Value>({"x"}, ReceiveMode::NonBlocking));
   graph.set_reads_from(recv_id, send_id);
   const auto before = graph_signature(graph);
 
   RejectingEnqueueExecutor executor;
   REQUIRE_FALSE(dpor::algo::detail::try_enqueue_owned_task<Value>(
-      executor,
-      graph,
-      1,
-      dpor::algo::detail::ExplorationTaskMode::VisitIfConsistent));
+      executor, graph, 1, dpor::algo::detail::ExplorationTaskMode::VisitIfConsistent));
   REQUIRE(graph_signature(graph) == before);
 }
 
 TEST_CASE("verify_parallel matches sequential and oracle execution sets on mixed branching",
-    "[algo][dpor][parallel]") {
+          "[algo][dpor][parallel]") {
   const auto program = make_parallel_mixed_program();
   const auto oracle = dpor::test_support::collect_oracle_stats(program);
 
-  const auto sequential = collect_observed_executions(
-      program,
-      [](const DporConfig& config) {
-        return verify(config);
-      });
+  const auto sequential =
+      collect_observed_executions(program, [](const DporConfig& config) { return verify(config); });
 
-  const auto parallel = collect_observed_executions(
-      program,
-      [](const DporConfig& config) {
-        ParallelVerifyOptions options;
-        options.max_workers = 4;
-        options.max_queued_tasks = 16;
-        return verify_parallel(config, options);
-      });
+  const auto parallel = collect_observed_executions(program, [](const DporConfig& config) {
+    ParallelVerifyOptions options;
+    options.max_workers = 4;
+    options.max_queued_tasks = 16;
+    return verify_parallel(config, options);
+  });
 
   REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
@@ -2029,7 +2028,7 @@ TEST_CASE("verify_parallel matches sequential and oracle execution sets on mixed
 }
 
 TEST_CASE("verify_parallel stops cleanly when sibling branches race to error",
-    "[algo][dpor][parallel]") {
+          "[algo][dpor][parallel]") {
   Program program;
   program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
@@ -2053,8 +2052,7 @@ TEST_CASE("verify_parallel stops cleanly when sibling branches race to error",
   config.on_execution = [&](const ExplorationGraph& graph) {
     std::lock_guard lock(observed_mutex);
     ++observed_count;
-    if (graph.event_count() != 2 ||
-        !is_error(graph.event(1))) {
+    if (graph.event_count() != 2 || !is_error(graph.event(1))) {
       saw_bad_error_graph = true;
     }
   };
@@ -2071,7 +2069,7 @@ TEST_CASE("verify_parallel stops cleanly when sibling branches race to error",
 }
 
 TEST_CASE("verify_parallel reports depth limit when one branch exceeds max_depth",
-    "[algo][dpor][parallel]") {
+          "[algo][dpor][parallel]") {
   Program program;
   program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
@@ -2111,7 +2109,7 @@ TEST_CASE("verify_parallel reports depth limit when one branch exceeds max_depth
 }
 
 TEST_CASE("verify_parallel matches sequential under tiny queue budget and high fanout",
-    "[algo][dpor][parallel]") {
+          "[algo][dpor][parallel]") {
   Program program;
   program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0 && trace.empty()) {
@@ -2130,20 +2128,15 @@ TEST_CASE("verify_parallel matches sequential under tiny queue budget and high f
   };
 
   const auto oracle = dpor::test_support::collect_oracle_stats(program);
-  const auto sequential = collect_observed_executions(
-      program,
-      [](const DporConfig& config) {
-        return verify(config);
-      });
+  const auto sequential =
+      collect_observed_executions(program, [](const DporConfig& config) { return verify(config); });
 
-  const auto parallel = collect_observed_executions(
-      program,
-      [](const DporConfig& config) {
-        ParallelVerifyOptions options;
-        options.max_workers = 2;
-        options.max_queued_tasks = 1;
-        return verify_parallel(config, options);
-      });
+  const auto parallel = collect_observed_executions(program, [](const DporConfig& config) {
+    ParallelVerifyOptions options;
+    options.max_workers = 2;
+    options.max_queued_tasks = 1;
+    return verify_parallel(config, options);
+  });
 
   REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);

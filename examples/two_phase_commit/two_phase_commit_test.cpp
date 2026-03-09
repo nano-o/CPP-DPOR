@@ -1,23 +1,21 @@
-#include "simulation.hpp"
-#include "udp_network.hpp"
-
 #include "dpor/algo/dpor.hpp"
 #include "dpor/model/event.hpp"
 #include "dpor/model/exploration_graph.hpp"
 
+#include "simulation.hpp"
+#include "udp_network.hpp"
 #include <catch2/catch_test_macros.hpp>
 
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <algorithm>
+#include <arpa/inet.h>
 #include <cstdint>
 #include <iostream>
 #include <optional>
 #include <set>
 #include <string>
+#include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -33,9 +31,8 @@ using namespace tpc_sim;
 //   [0] = received Prepare (serialized)
 //   [1] = vote ND choice ("YES" / "NO")
 //   [2] = received DecisionMsg (serialized) -- only if coordinator didn't crash
-static std::string get_participant_vote(
-    const model::ExplorationGraph& graph,
-    tpc::ParticipantId pid) {
+static std::string get_participant_vote(const model::ExplorationGraph& graph,
+                                        tpc::ParticipantId pid) {
   auto trace = graph.thread_trace(participant_to_thread(pid));
   if (trace.size() >= 2) {
     return trace[1].value();
@@ -43,9 +40,8 @@ static std::string get_participant_vote(
   return {};
 }
 
-static std::optional<std::string> get_participant_decision(
-    const model::ExplorationGraph& graph,
-    tpc::ParticipantId pid) {
+static std::optional<std::string> get_participant_decision(const model::ExplorationGraph& graph,
+                                                           tpc::ParticipantId pid) {
   auto trace = graph.thread_trace(participant_to_thread(pid));
   if (trace.size() >= 3) {
     return trace[2].value();
@@ -58,8 +54,7 @@ static std::optional<std::string> get_participant_decision(
 //   [N]      = crash ND choice ("no_crash" / "crash")
 static bool coordinator_crashed(const model::ExplorationGraph& graph,
                                 std::size_t num_participants) {
-  auto trace =
-      graph.thread_trace(participant_to_thread(tpc::kCoordinator));
+  auto trace = graph.thread_trace(participant_to_thread(tpc::kCoordinator));
   if (trace.size() > num_participants) {
     return trace[num_participants] == "crash";
   }
@@ -70,12 +65,9 @@ static bool coordinator_crashed(const model::ExplorationGraph& graph,
 static void dump_global_trace(const model::ExplorationGraph& graph) {
   for (auto id : graph.insertion_order()) {
     const auto& evt = graph.event(id);
-    std::cerr << "  event " << id
-              << " thread=" << evt.thread
-              << " index=" << evt.index;
+    std::cerr << "  event " << id << " thread=" << evt.thread << " index=" << evt.index;
     if (const auto* send = model::as_send(evt)) {
-      std::cerr << " send(dest=" << send->destination
-                << ", val=" << send->value << ")";
+      std::cerr << " send(dest=" << send->destination << ", val=" << send->value << ")";
     } else if (model::as_receive(evt) != nullptr) {
       // Show which send was matched via reads-from.
       auto it = graph.reads_from().find(id);
@@ -104,8 +96,7 @@ static void dump_global_trace(const model::ExplorationGraph& graph) {
 // DPOR tests
 // ---------------------------------------------------------------------------
 
-TEST_CASE("2PC basic exploration with 2 participants",
-          "[two_phase_commit]") {
+TEST_CASE("2PC basic exploration with 2 participants", "[two_phase_commit]") {
   auto prog = make_two_phase_commit_program(2);
 
   algo::DporConfig config;
@@ -119,8 +110,7 @@ TEST_CASE("2PC basic exploration with 2 participants",
   REQUIRE(result.executions_explored == 24);
 }
 
-TEST_CASE("2PC agreement invariant: all decided participants agree",
-          "[two_phase_commit]") {
+TEST_CASE("2PC agreement invariant: all decided participants agree", "[two_phase_commit]") {
   constexpr std::size_t kNumParticipants = 2;
   auto prog = make_two_phase_commit_program(kNumParticipants);
 
@@ -153,8 +143,7 @@ TEST_CASE("2PC agreement invariant: all decided participants agree",
   REQUIRE_FALSE(invariant_violated);
 }
 
-TEST_CASE("2PC validity invariant: Commit implies all voted Yes",
-          "[two_phase_commit]") {
+TEST_CASE("2PC validity invariant: Commit implies all voted Yes", "[two_phase_commit]") {
   constexpr std::size_t kNumParticipants = 2;
   auto prog = make_two_phase_commit_program(kNumParticipants);
 
@@ -226,8 +215,7 @@ TEST_CASE("2PC crash behavior: no participant decides after coordinator crash",
   REQUIRE_FALSE(invariant_violated);
 }
 
-TEST_CASE("2PC without crashes explores 16 executions for 2 participants",
-          "[two_phase_commit]") {
+TEST_CASE("2PC without crashes explores 16 executions for 2 participants", "[two_phase_commit]") {
   auto prog = make_two_phase_commit_program(2, /*inject_crash=*/false);
 
   algo::DporConfig config;
@@ -250,8 +238,7 @@ TEST_CASE("2PC scales to 3 participants", "[two_phase_commit]") {
   REQUIRE(result.executions_explored > 0);
 }
 
-TEST_CASE("2PC protocol bug surfaces as exception, not silent success",
-          "[two_phase_commit]") {
+TEST_CASE("2PC protocol bug surfaces as exception, not silent success", "[two_phase_commit]") {
   auto prog = make_two_phase_commit_program(2, /*inject_crash=*/false,
                                             /*bug_on_p1_no=*/true);
 
@@ -263,8 +250,7 @@ TEST_CASE("2PC protocol bug surfaces as exception, not silent success",
   REQUIRE_THROWS_AS(algo::verify(config), std::logic_error);
 }
 
-TEST_CASE("2PC false invariant is detected: Abort implies some voted No",
-          "[two_phase_commit]") {
+TEST_CASE("2PC false invariant is detected: Abort implies some voted No", "[two_phase_commit]") {
   constexpr std::size_t kNumParticipants = 2;
   auto prog = make_two_phase_commit_program(kNumParticipants,
                                             /*inject_crash=*/false);
@@ -311,17 +297,20 @@ static uint16_t allocate_ephemeral_port() {
   addr.sin_family = AF_INET;
   addr.sin_port = 0;
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  REQUIRE(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+  REQUIRE(::bind(fd, reinterpret_cast<sockaddr*>(&addr),
+                 sizeof(addr)) ==  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+          0);
 
   socklen_t len = sizeof(addr);
-  REQUIRE(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+  REQUIRE(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr),
+                        &len) ==  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+          0);
   auto port = ntohs(addr.sin_port);
   ::close(fd);
   return port;
 }
 
-using PortMap =
-    std::unordered_map<tpc::ParticipantId, std::pair<std::string, uint16_t>>;
+using PortMap = std::unordered_map<tpc::ParticipantId, std::pair<std::string, uint16_t>>;
 
 // Build a port map for coordinator + N participants on localhost.
 static PortMap make_localhost_port_map(std::size_t num_participants) {
@@ -332,8 +321,7 @@ static PortMap make_localhost_port_map(std::size_t num_participants) {
   return pm;
 }
 
-TEST_CASE("UDP: serialize/deserialize roundtrip for all message types",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: serialize/deserialize roundtrip for all message types", "[two_phase_commit][udp]") {
   auto check = [](const tpc::Message& original) {
     std::string data = tpc::serialize(original);
     tpc::Message recovered = tpc::deserialize(data);
@@ -348,8 +336,7 @@ TEST_CASE("UDP: serialize/deserialize roundtrip for all message types",
   check(tpc::Ack{3});
 }
 
-TEST_CASE("UDP: send and receive a single message over localhost",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: send and receive a single message over localhost", "[two_phase_commit][udp]") {
   auto pm = make_localhost_port_map(1);
 
   tpc::UdpEnvironment sender(tpc::kCoordinator, pm);
@@ -358,7 +345,7 @@ TEST_CASE("UDP: send and receive a single message over localhost",
   // Use a trivial one-message protocol to test send/receive.
   struct OneReceiver {
     tpc::Message received;
-    bool start(tpc::Environment& /*env*/) { return true; }
+    static bool start(tpc::Environment& /*env*/) { return true; }
     bool receive(tpc::Environment& /*env*/, const tpc::Message& msg) {
       received = msg;
       return false;
@@ -373,19 +360,17 @@ TEST_CASE("UDP: send and receive a single message over localhost",
   REQUIRE(std::holds_alternative<tpc::Prepare>(proto.received));
 }
 
-TEST_CASE("UDP: send and receive VoteMsg preserves fields",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: send and receive VoteMsg preserves fields", "[two_phase_commit][udp]") {
   auto pm = make_localhost_port_map(1);
 
   tpc::UdpEnvironment participant_env(1, pm, tpc::Vote::Yes);
   tpc::UdpEnvironment coordinator_env(tpc::kCoordinator, pm);
 
-  participant_env.send(tpc::kCoordinator,
-                       tpc::VoteMsg{1, tpc::Vote::Yes});
+  participant_env.send(tpc::kCoordinator, tpc::VoteMsg{1, tpc::Vote::Yes});
 
   struct OneReceiver {
     tpc::Message received;
-    bool start(tpc::Environment& /*env*/) { return true; }
+    static bool start(tpc::Environment& /*env*/) { return true; }
     bool receive(tpc::Environment& /*env*/, const tpc::Message& msg) {
       received = msg;
       return false;
@@ -400,8 +385,7 @@ TEST_CASE("UDP: send and receive VoteMsg preserves fields",
   REQUIRE(vote->vote == tpc::Vote::Yes);
 }
 
-TEST_CASE("UDP: full 2PC protocol run with all-Yes votes commits",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: full 2PC protocol run with all-Yes votes commits", "[two_phase_commit][udp]") {
   constexpr std::size_t kN = 2;
   auto pm = make_localhost_port_map(kN);
 
@@ -428,8 +412,7 @@ TEST_CASE("UDP: full 2PC protocol run with all-Yes votes commits",
   REQUIRE(p2.outcome() == tpc::Decision::Commit);
 }
 
-TEST_CASE("UDP: full 2PC protocol run with a No vote aborts",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: full 2PC protocol run with a No vote aborts", "[two_phase_commit][udp]") {
   constexpr std::size_t kN = 2;
   auto pm = make_localhost_port_map(kN);
 
@@ -454,8 +437,7 @@ TEST_CASE("UDP: full 2PC protocol run with a No vote aborts",
   REQUIRE(p2.outcome() == tpc::Decision::Abort);
 }
 
-TEST_CASE("UDP: repeated random-vote runs satisfy agreement",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: repeated random-vote runs satisfy agreement", "[two_phase_commit][udp]") {
   constexpr std::size_t kN = 2;
   constexpr int kRuns = 20;
 
@@ -490,8 +472,7 @@ TEST_CASE("UDP: repeated random-vote runs satisfy agreement",
   }
 }
 
-TEST_CASE("UDP: run() is single-use per environment",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: run() is single-use per environment", "[two_phase_commit][udp]") {
   constexpr std::size_t kN = 1;
   auto pm = make_localhost_port_map(kN);
 
@@ -511,8 +492,7 @@ TEST_CASE("UDP: run() is single-use per environment",
   REQUIRE_THROWS_AS(env_coord.run(coord2), std::logic_error);
 }
 
-TEST_CASE("UDP: malformed datagrams are skipped without crashing",
-          "[two_phase_commit][udp]") {
+TEST_CASE("UDP: malformed datagrams are skipped without crashing", "[two_phase_commit][udp]") {
   constexpr std::size_t kN = 1;
   auto pm = make_localhost_port_map(kN);
 
@@ -532,9 +512,11 @@ TEST_CASE("UDP: malformed datagrams are skipped without crashing",
   ::inet_pton(AF_INET, "127.0.0.1", &coord_addr.sin_addr);
 
   const char* junk = "NOT_A_VALID_MESSAGE !!!";
-  auto sent = ::sendto(raw_fd, junk, std::strlen(junk), 0,
-                       reinterpret_cast<sockaddr*>(&coord_addr),
-                       sizeof(coord_addr));
+  auto sent =
+      ::sendto(raw_fd, junk, std::strlen(junk), 0,
+               reinterpret_cast<sockaddr*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                   &coord_addr),
+               sizeof(coord_addr));
   ::close(raw_fd);
   REQUIRE(sent == static_cast<ssize_t>(std::strlen(junk)));
 
