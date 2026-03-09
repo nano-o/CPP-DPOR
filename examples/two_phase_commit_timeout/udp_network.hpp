@@ -58,8 +58,10 @@ class UdpEnvironment : public Environment {
       throw std::invalid_argument("invalid address: " + it->second.first);
     }
 
-    if (::bind(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) <
-        0) {
+    if (::bind(socket_fd_,
+               reinterpret_cast<sockaddr*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                   &addr),
+               sizeof(addr)) < 0) {
       ::close(socket_fd_);
       throw std::runtime_error("bind() failed");
     }
@@ -87,7 +89,8 @@ class UdpEnvironment : public Environment {
 
     std::string data = serialize(msg);
     if (::sendto(socket_fd_, data.data(), data.size(), 0,
-                 reinterpret_cast<sockaddr*>(&dest_addr),
+                 reinterpret_cast<sockaddr*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                     &dest_addr),
                  sizeof(dest_addr)) < 0) {
       throw std::runtime_error("sendto() failed");
     }

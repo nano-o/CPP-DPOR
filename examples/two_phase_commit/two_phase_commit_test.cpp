@@ -297,13 +297,18 @@ static uint16_t allocate_ephemeral_port() {
   addr.sin_family = AF_INET;
   addr.sin_port = 0;
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  REQUIRE(::bind(fd, reinterpret_cast<sockaddr*>(&addr),
-                 sizeof(addr)) ==  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+  REQUIRE(::bind(fd,
+                 reinterpret_cast<sockaddr*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                     &addr),
+                 sizeof(addr)) ==
           0);
 
   socklen_t len = sizeof(addr);
-  REQUIRE(::getsockname(fd, reinterpret_cast<sockaddr*>(&addr),
-                        &len) ==  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+  REQUIRE(::getsockname(
+              fd,
+              reinterpret_cast<sockaddr*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                  &addr),
+              &len) ==
           0);
   auto port = ntohs(addr.sin_port);
   ::close(fd);
