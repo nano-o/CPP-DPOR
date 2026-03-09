@@ -44,6 +44,8 @@ fi
 
 claude_state_dir="${HOME}/.claude"
 codex_state_dir="${HOME}/.codex"
+host_git_user_name="$(git config --global --get user.name 2>/dev/null || true)"
+host_git_user_email="$(git config --global --get user.email 2>/dev/null || true)"
 mkdir -p "${claude_state_dir}" "${codex_state_dir}"
 
 docker_args=(
@@ -61,6 +63,16 @@ docker_args=(
   --pids-limit=512                      # cap forked processes
   --memory=32g                           # cap memory usage
 )
+
+if [[ -n "${host_git_user_name}" ]]; then
+  docker_args+=(-e "HOST_GIT_USER_NAME=${host_git_user_name}")
+fi
+
+if [[ -n "${host_git_user_email}" ]]; then
+  docker_args+=(-e "HOST_GIT_USER_EMAIL=${host_git_user_email}")
+fi
+
+git_init='if [[ -n "${HOST_GIT_USER_NAME:-}" ]]; then git config --global user.name "${HOST_GIT_USER_NAME}"; fi; if [[ -n "${HOST_GIT_USER_EMAIL:-}" ]]; then git config --global user.email "${HOST_GIT_USER_EMAIL}"; fi;'
 
 if [[ "${debug_mode}" == "debug" ]]; then
   # Re-add ptrace on top of the hardened baseline.
@@ -83,10 +95,14 @@ if [[ "${debug_mode}" == "full" ]]; then
   # allows network-namespace sysctls via --sysctl).
   sysctl_init="sudo sysctl -w kernel.randomize_va_space=0 kernel.yama.ptrace_scope=0 >/dev/null;"
   if [[ $# -gt 0 ]]; then
-    docker run "${docker_args[@]}" "${tag}" bash -c "${sysctl_init} exec \"\$@\"" -- "$@"
+    docker run "${docker_args[@]}" "${tag}" bash -lc "${sysctl_init} ${git_init} exec \"\$@\"" -- "$@"
   else
-    docker run "${docker_args[@]}" "${tag}" bash -c "${sysctl_init} exec bash -l"
+    docker run "${docker_args[@]}" "${tag}" bash -lc "${sysctl_init} ${git_init} exec bash -l"
   fi
 else
-  docker run "${docker_args[@]}" "${tag}" "$@"
+  if [[ $# -gt 0 ]]; then
+    docker run "${docker_args[@]}" "${tag}" bash -lc "${git_init} exec \"\$@\"" -- "$@"
+  else
+    docker run "${docker_args[@]}" "${tag}" bash -lc "${git_init} exec bash -l"
+  fi
 fi

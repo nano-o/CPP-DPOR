@@ -46,6 +46,13 @@ cmake --preset debug && cmake --build --preset debug && ctest --preset debug
 The image runs as a non-root `dev` user (UID/GID matched to the host) with
 passwordless `sudo` for installing additional packages on the fly.
 
+## Git identity
+
+On startup, `run-container.sh` reads `user.name` and `user.email` from your
+host global Git config and applies those values inside the container with
+`git config --global`. Only those two fields are imported; signing settings
+and other host Git config are not mounted into the container.
+
 ## Agent login
 
 Agent CLIs are pre-installed but not pre-authenticated. The launcher
