@@ -4,6 +4,7 @@ set -euo pipefail
 tag="dpor-dev"
 container_name=""
 debug_mode=""
+persist=""
 if [[ $# -gt 0 && "$1" != -* ]]; then
   tag="$1"
   shift
@@ -25,6 +26,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --debug-full|--privileged)
       debug_mode="full"
+      shift
+      ;;
+    --persist)
+      persist=1
       shift
       ;;
     --)
@@ -49,7 +54,7 @@ host_git_user_email="$(git config --global --get user.email 2>/dev/null || true)
 mkdir -p "${claude_state_dir}" "${codex_state_dir}"
 
 docker_args=(
-  --rm -it
+  -it
   --name "${container_name}"
   -e PROJECT_NAME="${project_name}"
   -e COLORTERM=truecolor
@@ -63,6 +68,10 @@ docker_args=(
   --pids-limit=512                      # cap forked processes
   --memory=32g                           # cap memory usage
 )
+
+if [[ -z "${persist}" ]]; then
+  docker_args+=(--rm)
+fi
 
 if [[ -n "${host_git_user_name}" ]]; then
   docker_args+=(-e "HOST_GIT_USER_NAME=${host_git_user_name}")
