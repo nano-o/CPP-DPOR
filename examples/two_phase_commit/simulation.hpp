@@ -23,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace tpc_sim {
@@ -43,6 +44,27 @@ using Program = dpor::algo::Program;
 // is injected during fast-forward.
 struct CrashInjected {};
 struct StepBoundaryReached {};
+struct PlainSimulationFailure : std::logic_error {
+  using std::logic_error::logic_error;
+};
+
+template <typename ResultT, typename Fn>
+[[nodiscard]] std::optional<EventLabel> invoke_protocol_step(
+    ResultT& out,
+    Fn&& fn) {
+  try {
+    out = std::forward<Fn>(fn)();
+    return std::nullopt;
+  } catch (const CrashInjected&) {
+    throw;
+  } catch (const StepBoundaryReached&) {
+    throw;
+  } catch (const PlainSimulationFailure&) {
+    throw;
+  } catch (...) {
+    return EventLabel{dpor::model::ErrorLabel{}};
+  }
+}
 
 class SimEnvironment : public tpc::Environment {
  public:
@@ -69,7 +91,7 @@ class SimEnvironment : public tpc::Environment {
       if (current < target_io_) {
         // Fast-forward: read crash choice from trace.
         auto idx = trace_offset_ + trace_consume_count_++;
-        if (trace_.at(idx) == "crash") {
+        if (trace_value(idx) == "crash") {
           throw CrashInjected{};
         }
         // "no_crash": fall through to process the actual send below.
@@ -93,7 +115,7 @@ class SimEnvironment : public tpc::Environment {
     // This is the target I/O operation.
     result_ = SendLabel{
         .destination = id_map_(dest),
-        .value = tpc::serialize(msg),
+        .value = encode_sim_message(msg),
     };
     throw StepBoundaryReached{};
   }
@@ -104,7 +126,7 @@ class SimEnvironment : public tpc::Environment {
     if (current < target_io_) {
       // Fast-forward: past vote choice, replay from trace.
       auto idx = trace_offset_ + trace_consume_count_++;
-      return trace_.at(idx) == "YES" ? tpc::Vote::Yes : tpc::Vote::No;
+      return trace_value(idx) == "YES" ? tpc::Vote::Yes : tpc::Vote::No;
     }
 
     // This is the target I/O operation: produce ND choice label.
@@ -124,7 +146,7 @@ class SimEnvironment : public tpc::Environment {
     if (current < target_io_) {
       // Fast-forward: past receive, replay value from trace.
       auto idx = trace_offset_ + trace_consume_count_++;
-      return tpc::deserialize(trace_.at(idx).value());
+      return decode_sim_message(trace_value(idx));
     }
 
     // This is the target I/O operation.
@@ -137,6 +159,37 @@ class SimEnvironment : public tpc::Environment {
   }
 
  private:
+  [[nodiscard]] const ThreadTrace::value_type& trace_entry(std::size_t idx) const {
+    if (idx >= trace_.size()) {
+      throw PlainSimulationFailure("trace shorter than expected for simulated replay");
+    }
+    return trace_[idx];
+  }
+
+  [[nodiscard]] const dpor::model::Value& trace_value(std::size_t idx) const {
+    const auto& observed = trace_entry(idx);
+    if (observed.is_bottom()) {
+      throw PlainSimulationFailure("trace requested a concrete value but observed bottom");
+    }
+    return observed.value();
+  }
+
+  [[nodiscard]] dpor::model::Value encode_sim_message(const tpc::Message& msg) const {
+    try {
+      return tpc::serialize(msg);
+    } catch (const std::exception& ex) {
+      throw PlainSimulationFailure(ex.what());
+    }
+  }
+
+  [[nodiscard]] tpc::Message decode_sim_message(const dpor::model::Value& value) const {
+    try {
+      return tpc::deserialize(value);
+    } catch (const std::exception& ex) {
+      throw PlainSimulationFailure(ex.what());
+    }
+  }
+
   std::function<dpor::model::ThreadId(tpc::ParticipantId)> id_map_;
   std::size_t target_io_;
   const ThreadTrace& trace_;
@@ -172,14 +225,25 @@ std::optional<EventLabel> run_and_capture(
     ProtocolObj& obj,
     SimEnvironment& env) {
   try {
-    bool needs_message = obj.start(env);
+    bool needs_message = false;
+    if (const auto error = invoke_protocol_step(needs_message, [&]() {
+          return obj.start(env);
+        });
+        error.has_value()) {
+      return error;
+    }
     while (needs_message) {
       auto replayed = env.sim_receive();
       if (!replayed) {
         // Target I/O was a receive — label is stored in env.result().
         return env.result();
       }
-      needs_message = obj.receive(env, *replayed);
+      if (const auto error = invoke_protocol_step(needs_message, [&]() {
+            return obj.receive(env, *replayed);
+          });
+          error.has_value()) {
+        return error;
+      }
     }
     // Protocol finished before reaching target I/O.
     return std::nullopt;
@@ -200,9 +264,14 @@ inline ThreadFunction make_coordinator_function(
   return [num_participants, inject_crash, bug_on_p1_no](
              const ThreadTrace& trace,
              std::size_t step) -> std::optional<EventLabel> {
-    tpc::Coordinator coord(num_participants, bug_on_p1_no);
     SimEnvironment env(participant_to_thread, step, trace, 0, inject_crash);
-    return run_and_capture(coord, env);
+    std::optional<tpc::Coordinator> coord;
+    try {
+      coord.emplace(num_participants, bug_on_p1_no);
+    } catch (...) {
+      return EventLabel{dpor::model::ErrorLabel{}};
+    }
+    return run_and_capture(*coord, env);
   };
 }
 
@@ -211,9 +280,14 @@ inline ThreadFunction make_participant_function(
     tpc::ParticipantId pid) {
   return [pid](const ThreadTrace& trace,
                std::size_t step) -> std::optional<EventLabel> {
-    tpc::Participant participant(pid);
     SimEnvironment env(participant_to_thread, step, trace, 0);
-    return run_and_capture(participant, env);
+    std::optional<tpc::Participant> participant;
+    try {
+      participant.emplace(pid);
+    } catch (...) {
+      return EventLabel{dpor::model::ErrorLabel{}};
+    }
+    return run_and_capture(*participant, env);
   };
 }
 

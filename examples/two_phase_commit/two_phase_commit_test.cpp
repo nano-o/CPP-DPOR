@@ -93,6 +93,30 @@ static void dump_global_trace(const model::ExplorationGraph& graph) {
 }
 
 // ---------------------------------------------------------------------------
+// Simulation adapter tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SimEnvironment turns protocol exceptions into error events",
+          "[two_phase_commit][simulation]") {
+  struct ThrowOnReceive {
+    static bool start(tpc::Environment& /*env*/) { return true; }
+
+    static bool receive(tpc::Environment& /*env*/, const tpc::Message& /*msg*/) {
+      throw std::logic_error("protocol bug");
+    }
+  };
+
+  ThrowOnReceive protocol;
+  ThreadTrace trace{model::ObservedValue{"PREPARE"}};
+  SimEnvironment env(participant_to_thread, /*target_io=*/1, trace,
+                     /*trace_offset=*/0);
+
+  const auto label = run_and_capture(protocol, env);
+  REQUIRE(label.has_value());
+  REQUIRE(std::holds_alternative<model::ErrorLabel>(*label));
+}
+
+// ---------------------------------------------------------------------------
 // DPOR tests
 // ---------------------------------------------------------------------------
 
@@ -238,16 +262,24 @@ TEST_CASE("2PC scales to 3 participants", "[two_phase_commit]") {
   REQUIRE(result.executions_explored > 0);
 }
 
-TEST_CASE("2PC protocol bug surfaces as exception, not silent success", "[two_phase_commit]") {
+TEST_CASE("2PC protocol bug surfaces as verification failure", "[two_phase_commit]") {
   auto prog = make_two_phase_commit_program(2, /*inject_crash=*/false,
                                             /*bug_on_p1_no=*/true);
 
+  bool saw_error_execution = false;
   algo::DporConfig config;
   config.program = std::move(prog);
+  config.on_execution = [&](const model::ExplorationGraph& graph) {
+    for (std::size_t event_id = 0; event_id < graph.event_count(); ++event_id) {
+      if (model::is_error(graph.event(event_id))) {
+        saw_error_execution = true;
+      }
+    }
+  };
 
-  // The buggy coordinator throws when participant 1 votes No.
-  // This must propagate out of verify(), not be silently swallowed.
-  REQUIRE_THROWS_AS(algo::verify(config), std::logic_error);
+  const auto result = algo::verify(config);
+  REQUIRE(result.kind == algo::VerifyResultKind::ErrorFound);
+  REQUIRE(saw_error_execution);
 }
 
 TEST_CASE("2PC false invariant is detected: Abort implies some voted No", "[two_phase_commit]") {

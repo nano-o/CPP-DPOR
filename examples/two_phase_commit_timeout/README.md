@@ -188,20 +188,20 @@ The UDP tests additionally check runtime transport and timer behavior:
 ## Error handling
 
 If the protocol implementation throws an unexpected exception during DPOR
-exploration, the model checker **stops immediately**. The exception propagates
-through `run_and_capture` → the `ThreadFunction` → the DPOR engine's `verify()`
-call. This is a deliberate fail-fast design: a
-protocol bug should not be silently absorbed and produce a false "all executions
-safe" result.
+exploration, the simulation adapter converts that uncaught protocol exception
+into a terminal `ErrorLabel`. DPOR then reports
+`VerifyResultKind::ErrorFound`, treating the bug as a verification failure in
+the explored execution rather than as an infrastructure crash.
 
 The known/expected exceptions (`CrashInjected`, `StepBoundaryReached`) are
-caught and handled normally. Only truly unexpected exceptions (logic errors,
-assertion failures, etc.) trigger the fail-fast path.
+caught and handled normally. Simulator/adaptor failures still propagate as
+ordinary exceptions; only unexpected protocol exceptions (logic errors,
+assertion failures, etc.) are reclassified as verification failures.
 
 The `Coordinator` constructor accepts a `bug_on_p1_no` flag that injects a
 deliberate bug (throwing when participant 1 votes No). This exists solely to
-test that the fail-fast mechanism works -- it would not be part of a real 2PC
-implementation.
+test that the verification-failure path works -- it would not be part of a real
+2PC implementation.
 
 ## Running
 

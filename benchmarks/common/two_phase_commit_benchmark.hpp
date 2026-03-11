@@ -237,6 +237,9 @@ template <typename ProgramFactory>
   const auto result = options.parallel
       ? algo::verify_parallel(config, options.parallel_options)
       : algo::verify(config);
+  if (result.kind == algo::VerifyResultKind::ErrorFound) {
+    throw std::runtime_error("verification failed: " + result.message);
+  }
   if (result.kind != algo::VerifyResultKind::AllExecutionsExplored) {
     throw std::runtime_error("DPOR did not explore all executions");
   }
