@@ -258,7 +258,7 @@ TEST_CASE("error event results in ErrorFound", "[algo][dpor]") {
   config.program.threads[1] = [](const ThreadTrace&,
                                  std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
-      return ErrorLabel{};
+      return ErrorLabel{.message = "boom"};
     }
     return std::nullopt;
   };
@@ -266,6 +266,7 @@ TEST_CASE("error event results in ErrorFound", "[algo][dpor]") {
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::ErrorFound);
   REQUIRE(result.executions_explored == 1);
+  REQUIRE(result.message == "error event reached in thread 1: boom");
 }
 
 // --- ND choices ---
@@ -884,7 +885,7 @@ TEST_CASE("detail visit shows the terminal error event to the observer before ro
   Program program;
   program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
-      return ErrorLabel{};
+      return ErrorLabel{.message = "observer-visible error"};
     }
     return std::nullopt;
   };
@@ -897,6 +898,7 @@ TEST_CASE("detail visit shows the terminal error event to the observer before ro
     ++observed_count;
     REQUIRE(graph.event_count() == 1);
     REQUIRE(is_error(graph.event(0)));
+    REQUIRE(as_error(graph.event(0))->message == "observer-visible error");
   };
 
   VerifyResult result;
@@ -2038,7 +2040,7 @@ TEST_CASE("verify_parallel stops cleanly when sibling branches race to error",
       };
     }
     if (step == 1 && trace.size() == 1) {
-      return ErrorLabel{};
+      return ErrorLabel{.message = "parallel boom"};
     }
     return std::nullopt;
   };
@@ -2064,6 +2066,7 @@ TEST_CASE("verify_parallel stops cleanly when sibling branches race to error",
   const auto result = verify_parallel(config, options);
   REQUIRE(result.kind == VerifyResultKind::ErrorFound);
   REQUIRE(result.executions_explored == 1);
+  REQUIRE(result.message == "error event reached in thread 1: parallel boom");
   REQUIRE(observed_count == 1);
   REQUIRE_FALSE(saw_bad_error_graph);
 }

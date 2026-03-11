@@ -76,6 +76,15 @@ namespace detail {
 
 using EventId = typename model::ExplorationGraphT<model::Value>::EventId;
 
+[[nodiscard]] inline std::string format_error_message(const model::ThreadId tid,
+                                                      const model::ErrorLabel& error) {
+  auto message = "error event reached in thread " + std::to_string(tid);
+  if (!error.message.empty()) {
+    message += ": " + error.message;
+  }
+  return message;
+}
+
 template <typename ValueT>
 [[nodiscard]] inline std::vector<model::ThreadId> sorted_thread_ids(
     const ProgramT<ValueT>& program) {
@@ -402,10 +411,11 @@ class SequentialExecutor {
   }
 
   [[nodiscard]] bool publish_error_execution(const model::ExplorationGraphT<ValueT>& graph,
-                                             const model::ThreadId tid) {
+                                             const model::ThreadId tid,
+                                             const model::ErrorLabel& error) {
     ++result_.executions_explored;
     result_.kind = VerifyResultKind::ErrorFound;
-    result_.message = "error event reached in thread " + std::to_string(tid);
+    result_.message = format_error_message(tid, error);
     if (config_.on_execution) {
       config_.on_execution(graph);
     }
@@ -539,7 +549,8 @@ class ParallelExecutor {
   }
 
   [[nodiscard]] bool publish_error_execution(const model::ExplorationGraphT<ValueT>& graph,
-                                             const model::ThreadId tid) {
+                                             const model::ThreadId tid,
+                                             const model::ErrorLabel& error) {
     bool published = false;
     {
       std::lock_guard lock(publication_mutex_);
@@ -549,7 +560,7 @@ class ParallelExecutor {
           return false;
         }
         ++worker_state().local_executions;
-        first_error_message_ = "error event reached in thread " + std::to_string(tid);
+        first_error_message_ = format_error_message(tid, error);
         stop_requested_.store(true, std::memory_order_release);
         published = true;
       } else {
@@ -557,7 +568,7 @@ class ParallelExecutor {
         // is counted and observed; only the first message is kept.
         ++worker_state().local_executions;
         if (!first_error_message_.has_value()) {
-          first_error_message_ = "error event reached in thread " + std::to_string(tid);
+          first_error_message_ = format_error_message(tid, error);
         }
         stop_requested_.store(true, std::memory_order_release);
         published = true;
@@ -951,10 +962,10 @@ inline void visit_impl(const ProgramT<ValueT>& program, model::ExplorationGraphT
 
   const auto& [tid, label] = *next;
 
-  if (std::holds_alternative<model::ErrorLabel>(label)) {
+  if (const auto* error = std::get_if<model::ErrorLabel>(&label)) {
     ScopedRollback rollback(graph);
     static_cast<void>(graph.add_event(tid, label));
-    static_cast<void>(executor.publish_error_execution(graph, tid));
+    static_cast<void>(executor.publish_error_execution(graph, tid, *error));
     return;
   }
 

@@ -19,6 +19,7 @@
 #include <exception>
 #include <functional>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -48,6 +49,10 @@ struct PlainSimulationFailure : std::logic_error {
   using std::logic_error::logic_error;
 };
 
+[[nodiscard]] inline EventLabel make_protocol_error_label(std::string message) {
+  return EventLabel{dpor::model::ErrorLabel{.message = std::move(message)}};
+}
+
 template <typename ResultT, typename Fn>
 [[nodiscard]] std::optional<EventLabel> invoke_protocol_step(
     ResultT& out,
@@ -61,8 +66,12 @@ template <typename ResultT, typename Fn>
     throw;
   } catch (const PlainSimulationFailure&) {
     throw;
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& ex) {
+    return make_protocol_error_label(ex.what());
   } catch (...) {
-    return EventLabel{dpor::model::ErrorLabel{}};
+    return make_protocol_error_label("uncaught non-standard exception");
   }
 }
 
@@ -177,6 +186,8 @@ class SimEnvironment : public tpc::Environment {
   [[nodiscard]] dpor::model::Value encode_sim_message(const tpc::Message& msg) const {
     try {
       return tpc::serialize(msg);
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (const std::exception& ex) {
       throw PlainSimulationFailure(ex.what());
     }
@@ -185,6 +196,8 @@ class SimEnvironment : public tpc::Environment {
   [[nodiscard]] tpc::Message decode_sim_message(const dpor::model::Value& value) const {
     try {
       return tpc::deserialize(value);
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (const std::exception& ex) {
       throw PlainSimulationFailure(ex.what());
     }
@@ -268,8 +281,12 @@ inline ThreadFunction make_coordinator_function(
     std::optional<tpc::Coordinator> coord;
     try {
       coord.emplace(num_participants, bug_on_p1_no);
+    } catch (const std::bad_alloc&) {
+      throw;
+    } catch (const std::exception& ex) {
+      return make_protocol_error_label(ex.what());
     } catch (...) {
-      return EventLabel{dpor::model::ErrorLabel{}};
+      return make_protocol_error_label("uncaught non-standard exception");
     }
     return run_and_capture(*coord, env);
   };
@@ -284,8 +301,12 @@ inline ThreadFunction make_participant_function(
     std::optional<tpc::Participant> participant;
     try {
       participant.emplace(pid);
+    } catch (const std::bad_alloc&) {
+      throw;
+    } catch (const std::exception& ex) {
+      return make_protocol_error_label(ex.what());
     } catch (...) {
-      return EventLabel{dpor::model::ErrorLabel{}};
+      return make_protocol_error_label("uncaught non-standard exception");
     }
     return run_and_capture(*participant, env);
   };

@@ -23,6 +23,7 @@
 #include <exception>
 #include <functional>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
@@ -234,6 +235,10 @@ struct TimeoutSimulationFailure : std::logic_error {
   using std::logic_error::logic_error;
 };
 
+[[nodiscard]] inline EventLabel make_protocol_error_label(std::string message) {
+  return EventLabel{dpor::model::ErrorLabel{.message = std::move(message)}};
+}
+
 template <typename ResultT, typename Fn>
 [[nodiscard]] std::optional<EventLabel> invoke_protocol_step(
     ResultT& out,
@@ -247,8 +252,12 @@ template <typename ResultT, typename Fn>
     throw;
   } catch (const TimeoutSimulationFailure&) {
     throw;
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& ex) {
+    return make_protocol_error_label(ex.what());
   } catch (...) {
-    return EventLabel{dpor::model::ErrorLabel{}};
+    return make_protocol_error_label("uncaught non-standard exception");
   }
 }
 
@@ -392,6 +401,9 @@ class SimEnvironment : public tpc::Environment {
     // Matching UdpEnvironment, setting the same timer id refreshes/replaces it.
     // A different id would mean multiple simultaneously-active timers, which
     // this simplified adapter does not encode in bottom observations.
+    // Treat this as a simulator limitation, not a protocol verification error:
+    // the adapter cannot represent more than one concurrent timer in its
+    // bottom-based receive encoding, so exploration must stop loudly here.
     if (active_timer_.has_value() && active_timer_->id != id) {
       throw TimeoutSimulationFailure(
           "SimEnvironment supports at most one active timer per thread");
@@ -440,6 +452,8 @@ class SimEnvironment : public tpc::Environment {
   [[nodiscard]] SimValue encode_sim_message(const tpc::Message& msg) const {
     try {
       return encode_message(msg);
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (const std::exception& ex) {
       throw TimeoutSimulationFailure(ex.what());
     }
@@ -448,6 +462,8 @@ class SimEnvironment : public tpc::Environment {
   [[nodiscard]] tpc::Vote decode_sim_vote_choice(SimValue value) const {
     try {
       return decode_vote_choice(value);
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (const std::exception& ex) {
       throw TimeoutSimulationFailure(ex.what());
     }
@@ -456,6 +472,8 @@ class SimEnvironment : public tpc::Environment {
   [[nodiscard]] bool decode_sim_crash_choice(SimValue value) const {
     try {
       return decode_crash_choice(value);
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (const std::exception& ex) {
       throw TimeoutSimulationFailure(ex.what());
     }
@@ -464,6 +482,8 @@ class SimEnvironment : public tpc::Environment {
   [[nodiscard]] tpc::Message decode_sim_message(SimValue value) const {
     try {
       return decode_message(value);
+    } catch (const std::bad_alloc&) {
+      throw;
     } catch (const std::exception& ex) {
       throw TimeoutSimulationFailure(ex.what());
     }
@@ -484,6 +504,10 @@ class SimEnvironment : public tpc::Environment {
           return callback(*this);
         });
         error.has_value()) {
+      // A protocol exception during timer replay makes the execution terminal
+      // immediately. Reuse StepBoundaryReached to unwind back to
+      // run_and_capture(), which returns this stored ErrorLabel as the next
+      // DPOR event instead of attempting to continue replay after failure.
       result_ = *error;
       throw StepBoundaryReached{};
     }
@@ -573,8 +597,12 @@ inline ThreadFunction make_coordinator_function(
     std::optional<tpc::Coordinator> coord;
     try {
       coord.emplace(num_participants, bug_on_p1_no);
+    } catch (const std::bad_alloc&) {
+      throw;
+    } catch (const std::exception& ex) {
+      return make_protocol_error_label(ex.what());
     } catch (...) {
-      return EventLabel{dpor::model::ErrorLabel{}};
+      return make_protocol_error_label("uncaught non-standard exception");
     }
     return run_and_capture(*coord, env);
   };
@@ -589,8 +617,12 @@ inline ThreadFunction make_participant_function(
     std::optional<tpc::Participant> participant;
     try {
       participant.emplace(pid);
+    } catch (const std::bad_alloc&) {
+      throw;
+    } catch (const std::exception& ex) {
+      return make_protocol_error_label(ex.what());
     } catch (...) {
-      return EventLabel{dpor::model::ErrorLabel{}};
+      return make_protocol_error_label("uncaught non-standard exception");
     }
     return run_and_capture(*participant, env);
   };

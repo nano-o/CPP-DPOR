@@ -557,7 +557,7 @@ TEST_CASE("SimEnvironment refreshes the active timer when the id is reused",
   REQUIRE(send->value == ack_message(1));
 }
 
-TEST_CASE("SimEnvironment rejects multiple simultaneous active timers",
+TEST_CASE("SimEnvironment rejects multiple simultaneous active timers as a simulation failure",
           "[two_phase_commit][simulation][timer]") {
   struct WaitWithTwoTimers {
     static bool start(tpc::Environment& env) {
@@ -574,6 +574,8 @@ TEST_CASE("SimEnvironment rejects multiple simultaneous active timers",
   SimEnvironment env(participant_to_thread, /*target_io=*/0, trace,
                      /*trace_offset=*/0);
 
+  // The simplified timer adapter cannot represent multiple concurrent timers,
+  // so this remains an infrastructure failure rather than an ErrorLabel.
   REQUIRE_THROWS_AS(run_and_capture(protocol, env), std::logic_error);
 }
 
@@ -598,6 +600,7 @@ TEST_CASE("SimEnvironment turns timer-callback protocol exceptions into error ev
   const auto label = run_and_capture(protocol, env);
   REQUIRE(label.has_value());
   REQUIRE(std::holds_alternative<model::ErrorLabel>(*label));
+  REQUIRE(std::get<model::ErrorLabel>(*label).message == "protocol bug");
 }
 
 // ---------------------------------------------------------------------------
@@ -787,6 +790,8 @@ TEST_CASE("2PC protocol bug surfaces as verification failure", "[two_phase_commi
 
   const auto result = algo::verify(config);
   REQUIRE(result.kind == algo::VerifyResultKind::ErrorFound);
+  REQUIRE(result.message.find("coordinator cannot handle No vote from participant 1") !=
+          std::string::npos);
   REQUIRE(saw_error_execution);
 }
 

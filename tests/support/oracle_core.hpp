@@ -35,8 +35,11 @@ template <typename ValueT>
     oss << (recv->is_nonblocking() ? "Rnb" : "Rb");
   } else if (model::is_block(event)) {
     oss << "B";
-  } else if (model::is_error(event)) {
+  } else if (const auto* error = model::as_error(event)) {
     oss << "E";
+    if (!error->message.empty()) {
+      oss << "(" << error->message << ")";
+    }
   }
   return oss.str();
 }

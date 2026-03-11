@@ -114,6 +114,7 @@ TEST_CASE("SimEnvironment turns protocol exceptions into error events",
   const auto label = run_and_capture(protocol, env);
   REQUIRE(label.has_value());
   REQUIRE(std::holds_alternative<model::ErrorLabel>(*label));
+  REQUIRE(std::get<model::ErrorLabel>(*label).message == "protocol bug");
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +280,8 @@ TEST_CASE("2PC protocol bug surfaces as verification failure", "[two_phase_commi
 
   const auto result = algo::verify(config);
   REQUIRE(result.kind == algo::VerifyResultKind::ErrorFound);
+  REQUIRE(result.message.find("coordinator cannot handle No vote from participant 1") !=
+          std::string::npos);
   REQUIRE(saw_error_execution);
 }
 

@@ -120,7 +120,9 @@ struct NondeterministicChoiceLabelT {
 
 struct BlockLabel {};
 
-struct ErrorLabel {};
+struct ErrorLabel {
+  std::string message{};
+};
 
 template <typename ValueT>
 using EventLabelT = std::variant<ReceiveLabelT<ValueT>, SendLabelT<ValueT>,
