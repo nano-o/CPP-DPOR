@@ -5,6 +5,7 @@ tag="dpor-dev"
 container_name=""
 debug_mode=""
 persist=""
+mount_claude=""
 if [[ $# -gt 0 && "$1" != -* ]]; then
   tag="$1"
   shift
@@ -32,6 +33,10 @@ while [[ $# -gt 0 ]]; do
       persist=1
       shift
       ;;
+    --mount-claude-dir)
+      mount_claude=1
+      shift
+      ;;
     --)
       shift
       break
@@ -47,11 +52,10 @@ if [[ -z "${container_name}" ]]; then
   container_name="$(printf 'dev-%s' "${project_name}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_.-' '-')"
 fi
 
-claude_state_dir="${HOME}/.claude"
 codex_state_dir="${HOME}/.codex"
 host_git_user_name="$(git config --global --get user.name 2>/dev/null || true)"
 host_git_user_email="$(git config --global --get user.email 2>/dev/null || true)"
-mkdir -p "${claude_state_dir}" "${codex_state_dir}"
+mkdir -p "${codex_state_dir}"
 
 docker_args=(
   -it
@@ -59,7 +63,6 @@ docker_args=(
   -e PROJECT_NAME="${project_name}"
   -e COLORTERM=truecolor
   -v "${PWD}:/home/dev/project"
-  -v "${claude_state_dir}:/home/dev/.claude"
   -v "${codex_state_dir}:/home/dev/.codex"
 
   # --- hardening (transparent to normal use) ---
@@ -71,6 +74,15 @@ docker_args=(
 
 if [[ -z "${persist}" ]]; then
   docker_args+=(--rm)
+fi
+
+if [[ -n "${mount_claude}" ]]; then
+  claude_state_dir="${HOME}/.claude"
+  mkdir -p "${claude_state_dir}"
+  docker_args+=(
+    -v "${claude_state_dir}:/home/dev/.claude"
+    -e CLAUDE_CONFIG_DIR=/home/dev/.claude
+  )
 fi
 
 if [[ -n "${host_git_user_name}" ]]; then
