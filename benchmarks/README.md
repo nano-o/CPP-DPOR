@@ -7,12 +7,10 @@ than test harness overhead.
 
 ## Available benchmarks
 
-- `dpor_two_phase_commit_benchmark`
-  Plain 2PC model (no timers), using `examples/two_phase_commit/simulation.hpp`.
 - `dpor_two_phase_commit_timeout_benchmark`
-  Timer-inclusive 2PC model, using `examples/two_phase_commit_timeout/simulation.hpp`.
+  2PC model with timers, using `examples/two_phase_commit_timeout/simulation.hpp`.
 
-Both executables support the same CLI:
+The executable supports the following CLI:
 
 ```text
 --mode dpor|oracle|both
@@ -58,7 +56,6 @@ cmake -S . -B build/bench-release -G Ninja \
   -DDPOR_BUILD_BENCHMARKS=ON
 
 cmake --build build/bench-release --target \
-  dpor_two_phase_commit_benchmark \
   dpor_two_phase_commit_timeout_benchmark
 ```
 
@@ -109,28 +106,14 @@ sudo sysctl -w kernel.perf_event_max_stack=512
 
 ## Run examples
 
-Plain 2PC, DPOR plus oracle, 2 participants, crash injection enabled:
-
-```bash
-build/bench-release/benchmarks/two_phase_commit/dpor_two_phase_commit_benchmark \
-  --mode both --participants 2 --iterations 1
-```
-
-Plain 2PC, oracle only, no crash:
-
-```bash
-build/bench-release/benchmarks/two_phase_commit/dpor_two_phase_commit_benchmark \
-  --mode oracle --participants 2 --iterations 1 --no-crash
-```
-
-Timeout-inclusive 2PC, DPOR only:
+2PC, DPOR only:
 
 ```bash
 build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \
   --mode dpor --participants 3 --iterations 1
 ```
 
-Timeout-inclusive 2PC, parallel DPOR with conservative split heuristics:
+2PC, parallel DPOR with conservative split heuristics:
 
 ```bash
 build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \
@@ -139,7 +122,7 @@ build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_ti
   --spawn-depth-cutoff 2 --min-fanout 4
 ```
 
-Timeout-inclusive 2PC, oracle only:
+2PC, oracle only:
 
 ```bash
 build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \

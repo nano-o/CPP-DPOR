@@ -42,8 +42,7 @@ The API layer is currently thin.
 
 The library includes examples that demonstrate how to model distributed protocols:
 - **`minimal/`**: A tiny smoke example for the current `Session` API.
-- **`two_phase_commit/`**: A more complex case study modeling the Two-Phase Commit (2PC) protocol, including UDP network modeling and simulation logic.
-- **`two_phase_commit_timeout/`**: A 2PC variant that adds timers in the UDP runtime while keeping current DPOR exploration focused on async message interleavings.
+- **`two_phase_commit_timeout/`**: A case study modeling the Two-Phase Commit (2PC) protocol with timers, including UDP network modeling and simulation logic.
 
 ---
 

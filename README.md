@@ -128,6 +128,6 @@ Key properties:
 - `include/dpor/model`: core model types (events, relations, execution/exploration graphs)
 - `src`: implementation details
 - `tests`: unit/integration tests with CTest
-- `examples`: `minimal/`, `two_phase_commit/`, and `two_phase_commit_timeout/`
+- `examples`: `minimal/` and `two_phase_commit_timeout/`
 - `cmake`: packaging and build helper modules
 - `docs`: architecture notes

@@ -110,7 +110,7 @@ include/dpor/
   api/      → dpor::api    (Session — public entry point)
 src/api/    → only compiled source (session.cpp)
 tests/      → Catch2 test files
-examples/   → minimal/, two_phase_commit/, and two_phase_commit_timeout/
+examples/   → minimal/ and two_phase_commit_timeout/
 ```
 
 - Most code is **header-only templates** in `include/dpor/model/` and `include/dpor/algo/`
@@ -151,8 +151,7 @@ Thread-function traces use `ObservedValueT` entries rather than raw payloads.
 | `dpor_test.cpp` | DPOR algorithm end-to-end (paper examples, non-blocking receive coverage, oracle cross-checks) |
 | `dpor_stress_test.cpp` | Randomized stress tests with multiple seeds, including oracle-backed coverage |
 | `tests/support/oracle.hpp` | Exhaustive async oracle shared by DPOR correctness tests |
-| `examples/two_phase_commit/two_phase_commit_test.cpp` | 2PC protocol example |
-| `examples/two_phase_commit_timeout/two_phase_commit_test.cpp` | 2PC + timer behavior example |
+| `examples/two_phase_commit_timeout/two_phase_commit_test.cpp` | 2PC protocol + timer behavior example |
 
 ## Prototype Policy
 
