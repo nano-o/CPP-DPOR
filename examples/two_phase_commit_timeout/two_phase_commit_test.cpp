@@ -390,7 +390,7 @@ TEST_CASE("Participant timeout causes local abort while waiting for decision",
 // Simulation adapter tests
 // ---------------------------------------------------------------------------
 
-TEST_CASE("SimEnvironment captures timer-free waits as blocking receives",
+TEST_CASE("NondeterministicVoteEnvironment captures timer-free waits as blocking receives",
           "[two_phase_commit][simulation][timer]") {
   struct WaitForMessage {
     static bool start(tpc::Environment& /*env*/) { return true; }
@@ -399,8 +399,8 @@ TEST_CASE("SimEnvironment captures timer-free waits as blocking receives",
 
   WaitForMessage protocol;
   ThreadTrace trace;
-  SimEnvironment env(participant_to_thread, /*target_io=*/0, trace,
-                     /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0,
+                                      trace, /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(label.has_value());
@@ -410,7 +410,7 @@ TEST_CASE("SimEnvironment captures timer-free waits as blocking receives",
   REQUIRE(recv->is_blocking());
 }
 
-TEST_CASE("SimEnvironment captures timer-armed waits as non-blocking receives",
+TEST_CASE("NondeterministicVoteEnvironment captures timer-armed waits as non-blocking receives",
           "[two_phase_commit][simulation][timer]") {
   struct WaitWithTimer {
     static bool start(tpc::Environment& env) {
@@ -422,8 +422,8 @@ TEST_CASE("SimEnvironment captures timer-armed waits as non-blocking receives",
 
   WaitWithTimer protocol;
   ThreadTrace trace;
-  SimEnvironment env(participant_to_thread, /*target_io=*/0, trace,
-                     /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0,
+                                      trace, /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(label.has_value());
@@ -433,7 +433,7 @@ TEST_CASE("SimEnvironment captures timer-armed waits as non-blocking receives",
   REQUIRE(recv->is_nonblocking());
 }
 
-TEST_CASE("SimEnvironment returns to blocking receive after timer cancellation",
+TEST_CASE("NondeterministicVoteEnvironment returns to blocking receive after timer cancellation",
           "[two_phase_commit][simulation][timer]") {
   struct WaitWithCanceledTimer {
     static bool start(tpc::Environment& env) {
@@ -446,8 +446,8 @@ TEST_CASE("SimEnvironment returns to blocking receive after timer cancellation",
 
   WaitWithCanceledTimer protocol;
   ThreadTrace trace;
-  SimEnvironment env(participant_to_thread, /*target_io=*/0, trace,
-                     /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0,
+                                      trace, /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(label.has_value());
@@ -457,7 +457,7 @@ TEST_CASE("SimEnvironment returns to blocking receive after timer cancellation",
   REQUIRE(recv->is_blocking());
 }
 
-TEST_CASE("SimEnvironment replays bottom as timer firing",
+TEST_CASE("NondeterministicVoteEnvironment replays bottom as timer firing",
           "[two_phase_commit][simulation][timer]") {
   struct TimerThenSend {
     bool timer_fired = false;
@@ -476,8 +476,8 @@ TEST_CASE("SimEnvironment replays bottom as timer firing",
 
   TimerThenSend protocol;
   ThreadTrace trace{ObservedValue::bottom()};
-  SimEnvironment env(participant_to_thread, /*target_io=*/1, trace,
-                     /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/1,
+                                      trace, /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(protocol.timer_fired);
@@ -488,7 +488,7 @@ TEST_CASE("SimEnvironment replays bottom as timer firing",
   REQUIRE(send->value == prepare_message());
 }
 
-TEST_CASE("SimEnvironment replays timer-callback sends before later target steps",
+TEST_CASE("NondeterministicVoteEnvironment replays timer-callback sends before later target steps",
           "[two_phase_commit][simulation][timer]") {
   struct TimerSendThenWait {
     bool timer_fired = false;
@@ -507,8 +507,8 @@ TEST_CASE("SimEnvironment replays timer-callback sends before later target steps
 
   TimerSendThenWait protocol;
   ThreadTrace trace{ObservedValue::bottom()};
-  SimEnvironment env(participant_to_thread, /*target_io=*/2, trace,
-                     /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/2,
+                                      trace, /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(protocol.timer_fired);
@@ -519,7 +519,7 @@ TEST_CASE("SimEnvironment replays timer-callback sends before later target steps
   REQUIRE(recv->is_blocking());
 }
 
-TEST_CASE("SimEnvironment refreshes the active timer when the id is reused",
+TEST_CASE("NondeterministicVoteEnvironment refreshes the active timer when the id is reused",
           "[two_phase_commit][simulation][timer]") {
   struct ReplaceTimer {
     bool old_timer_fired = false;
@@ -544,8 +544,8 @@ TEST_CASE("SimEnvironment refreshes the active timer when the id is reused",
 
   ReplaceTimer protocol;
   ThreadTrace trace{ObservedValue::bottom()};
-  SimEnvironment env(participant_to_thread, /*target_io=*/1, trace,
-                     /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/1,
+                                      trace, /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE_FALSE(protocol.old_timer_fired);
@@ -557,7 +557,7 @@ TEST_CASE("SimEnvironment refreshes the active timer when the id is reused",
   REQUIRE(send->value == ack_message(1));
 }
 
-TEST_CASE("SimEnvironment rejects multiple simultaneous active timers as a simulation failure",
+TEST_CASE("NondeterministicVoteEnvironment rejects multiple simultaneous active timers as a simulation failure",
           "[two_phase_commit][simulation][timer]") {
   struct WaitWithTwoTimers {
     static bool start(tpc::Environment& env) {
@@ -571,15 +571,15 @@ TEST_CASE("SimEnvironment rejects multiple simultaneous active timers as a simul
 
   WaitWithTwoTimers protocol;
   ThreadTrace trace;
-  SimEnvironment env(participant_to_thread, /*target_io=*/0, trace,
-                     /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0,
+                                      trace, /*trace_offset=*/0);
 
   // The simplified timer adapter cannot represent multiple concurrent timers,
   // so this remains an infrastructure failure rather than an ErrorLabel.
   REQUIRE_THROWS_AS(run_and_capture(protocol, env), std::logic_error);
 }
 
-TEST_CASE("SimEnvironment turns timer-callback protocol exceptions into error events",
+TEST_CASE("NondeterministicVoteEnvironment turns timer-callback protocol exceptions into error events",
           "[two_phase_commit][simulation][timer]") {
   struct ThrowInTimer {
     static bool start(tpc::Environment& env) {
@@ -594,8 +594,8 @@ TEST_CASE("SimEnvironment turns timer-callback protocol exceptions into error ev
 
   ThrowInTimer protocol;
   ThreadTrace trace{ObservedValue::bottom()};
-  SimEnvironment env(participant_to_thread, /*target_io=*/1, trace,
-                     /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/1,
+                                      trace, /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(label.has_value());

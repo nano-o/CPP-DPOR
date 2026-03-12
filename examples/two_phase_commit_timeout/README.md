@@ -10,7 +10,13 @@ model-checking adapter accommodates the protocol, not the other way around.
 |------|-------------|
 | `protocol.hpp` | 2PC protocol: `Coordinator`, `Participant`, `Environment` interface |
 | `udp_network.hpp` | Real UDP `Environment` implementation |
-| `simulation.hpp` | DPOR adapter: `SimEnvironment` + `ThreadFunction` factories |
+| `simulation.hpp` | Umbrella header for the DPOR-facing simulation modules |
+| `sim/dpor_types.hpp` | DPOR-visible value and graph/program aliases |
+| `sim/bridge.hpp` | Conversion between protocol messages/choices and DPOR values |
+| `sim/core.hpp` | Shared deterministic replay/capture helper |
+| `sim/nominal_environment.hpp` | Explicit nondeterministic-vote scenario environment |
+| `sim/crash_environment.hpp` | Explicit crash-before-decision scenario environment |
+| `sim/programs.hpp` | Scenario-specific thread-function and program builders |
 | `two_phase_commit_test.cpp` | Catch2 tests: DPOR invariant checks + UDP integration tests + timer behavior tests |
 
 ## Design intent
@@ -19,8 +25,8 @@ The goal is to demonstrate that the DPOR engine can verify properties of
 **existing, production-style code**. The protocol has no awareness of model
 checking. It exposes an event-driven interface (`start()` + `receive()`) and
 uses a minimal abstract `Environment`. The same `Coordinator` and
-`Participant` classes work with both `UdpEnvironment` (real sockets) and
-`SimEnvironment` (DPOR exploration).
+`Participant` classes work with both `UdpEnvironment` (real sockets) and the
+explicit simulation environments used for DPOR exploration.
 
 ## Protocol interface
 
@@ -79,21 +85,34 @@ construction time.
 ### Votes
 
 The participant calls `env.get_vote()` after processing `Prepare`. In
-the simulation, `SimEnvironment` intercepts this call and produces a
-`NondeterministicChoiceLabel` with choices `{"YES", "NO"}`. The DPOR engine
-explores both branches. In the real UDP implementation, `UdpEnvironment`
-returns a fixed vote when provided at construction time, otherwise it chooses a
-random vote.
+the simulation, `NondeterministicVoteEnvironment` intercepts this call and
+produces a `NondeterministicChoiceLabel` with choices `{"YES", "NO"}`. The
+DPOR engine explores both branches. In the real UDP implementation,
+`UdpEnvironment` returns a fixed vote when provided at construction time,
+otherwise it chooses a random vote.
 
 ### Crashes
 
-The coordinator knows nothing about crashes. `SimEnvironment` inspects every
-`send()` call and, when it sees the first `DecisionMsg` (the boundary between
-phase 1 and phase 2), it injects a `NondeterministicChoiceLabel` with choices
-`{"no_crash", "crash"}` before allowing the send to proceed. If the choice
-resolves to "crash", the coordinator's thread is terminated and phase 2 never
-happens. This models a crash between the two phases without any protocol-level
-awareness.
+The coordinator knows nothing about crashes.
+`CrashBeforeDecisionEnvironment` inspects every `send()` call and, when it
+sees the first `DecisionMsg` (the boundary between phase 1 and phase 2),
+injects a `NondeterministicChoiceLabel` with choices `{"no_crash", "crash"}`
+before allowing the send to proceed. If the choice resolves to `"crash"`, the
+coordinator's thread is terminated and phase 2 never happens. This models a
+crash between the two phases without any protocol-level awareness.
+
+## Simulation module split
+
+The simulation code is intentionally split into three concerns:
+
+- `sim/dpor_types.hpp`: the compact value type and aliases exposed to DPOR
+- `sim/bridge.hpp`: the bridge between protocol messages and DPOR values
+- `sim/core.hpp`: deterministic replay, target-step capture, timer replay, and
+  protocol-exception handling
+
+The scenario files stay small and explicit. They delegate the tricky replay
+mechanics to `ReplayCore`, but each scenario still spells out its own policy
+for `send()` and `get_vote()`.
 
 ## The replay-from-scratch approach
 
@@ -101,12 +120,12 @@ The DPOR engine may call each `ThreadFunction` non-linearly across exploration
 branches. The simulation handles this with a simple replay strategy:
 
 1. Each `ThreadFunction` call creates a fresh protocol object and
-   `SimEnvironment`.
+   scenario environment.
 2. `run_and_capture()` drives the protocol directly via `start()` /
    `receive()`.
-3. `SimEnvironment` fast-forwards through past I/O operations (replaying
-   receive values and nondeterministic choices from the trace), then captures
-   the current I/O operation as a DPOR `EventLabel`.
+3. `ReplayCore` fast-forwards through past I/O operations (replaying receive
+   values and nondeterministic choices from the trace), then captures the
+   current I/O operation as a DPOR `EventLabel`.
 
 The cost is O(step) per call, which is negligible for small protocols.
 
@@ -127,8 +146,8 @@ This timeout variant extends the environment with `set_timer()` /
   completes without waiting further. This prevents the coordinator from hanging
   when a participant times out and never sends its ack.
 - `UdpEnvironment` implements timers and dispatches callbacks inside `run()`.
-- `SimEnvironment` now tracks active timers during replay. When a thread waits
-  for input with no active timer, the adapter emits a blocking receive. When a
+- `ReplayCore` tracks active timers during replay. When a thread waits for
+  input with no active timer, the adapter emits a blocking receive. When a
   timer is active, the adapter emits a non-blocking receive, and a bottom
   observation means that active timer fired.
 - Timer callbacks are replayed directly; the adapter does not fabricate special
@@ -193,10 +212,11 @@ into a terminal `ErrorLabel`. DPOR then reports
 `VerifyResultKind::ErrorFound`, treating the bug as a verification failure in
 the explored execution rather than as an infrastructure crash.
 
-The known/expected exceptions (`CrashInjected`, `StepBoundaryReached`) are
-caught and handled normally. Simulator/adaptor failures still propagate as
-ordinary exceptions; only unexpected protocol exceptions (logic errors,
-assertion failures, etc.) are reclassified as verification failures.
+The known/expected replay exceptions (`ScenarioThreadTerminated`,
+`StepBoundaryReached`) are caught and handled normally. Simulator/adaptor
+failures still propagate as ordinary exceptions; only unexpected protocol
+exceptions (logic errors, assertion failures, etc.) are reclassified as
+verification failures.
 
 The `Coordinator` constructor accepts a `bug_on_p1_no` flag that injects a
 deliberate bug (throwing when participant 1 votes No). This exists solely to
