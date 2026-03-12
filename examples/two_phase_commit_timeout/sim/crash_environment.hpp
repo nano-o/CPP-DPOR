@@ -56,6 +56,8 @@ class CrashBeforeDecisionEnvironment : public tpc::Environment {
 
  private:
   ReplayCore core_;
+  // Each ThreadFunction replay creates a fresh environment instance, so this
+  // only suppresses repeated crash injection within a single replay.
   bool crash_injected_{false};
 };
 

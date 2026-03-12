@@ -8,8 +8,25 @@
 
 #include <new>
 #include <optional>
+#include <utility>
 
 namespace tpc_sim {
+
+template <typename T, typename... Args>
+[[nodiscard]] std::optional<EventLabel> try_emplace_protocol_object(
+    std::optional<T>& out,
+    Args&&... args) {
+  try {
+    out.emplace(std::forward<Args>(args)...);
+    return std::nullopt;
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& ex) {
+    return make_protocol_error_label(ex.what());
+  } catch (...) {
+    return make_protocol_error_label("uncaught non-standard exception");
+  }
+}
 
 inline ThreadFunction make_nominal_coordinator_function(
     std::size_t num_participants,
@@ -19,14 +36,10 @@ inline ThreadFunction make_nominal_coordinator_function(
              std::size_t step) -> std::optional<EventLabel> {
     NondeterministicVoteEnvironment env(participant_to_thread, step, trace, 0);
     std::optional<tpc::Coordinator> coord;
-    try {
-      coord.emplace(num_participants, bug_on_p1_no);
-    } catch (const std::bad_alloc&) {
-      throw;
-    } catch (const std::exception& ex) {
-      return make_protocol_error_label(ex.what());
-    } catch (...) {
-      return make_protocol_error_label("uncaught non-standard exception");
+    if (const auto error = try_emplace_protocol_object(
+            coord, num_participants, bug_on_p1_no);
+        error.has_value()) {
+      return error;
     }
     return run_and_capture(*coord, env);
   };
@@ -40,14 +53,10 @@ inline ThreadFunction make_crash_before_decision_coordinator_function(
              std::size_t step) -> std::optional<EventLabel> {
     CrashBeforeDecisionEnvironment env(participant_to_thread, step, trace, 0);
     std::optional<tpc::Coordinator> coord;
-    try {
-      coord.emplace(num_participants, bug_on_p1_no);
-    } catch (const std::bad_alloc&) {
-      throw;
-    } catch (const std::exception& ex) {
-      return make_protocol_error_label(ex.what());
-    } catch (...) {
-      return make_protocol_error_label("uncaught non-standard exception");
+    if (const auto error = try_emplace_protocol_object(
+            coord, num_participants, bug_on_p1_no);
+        error.has_value()) {
+      return error;
     }
     return run_and_capture(*coord, env);
   };
@@ -59,14 +68,9 @@ inline ThreadFunction make_participant_function(
                std::size_t step) -> std::optional<EventLabel> {
     NondeterministicVoteEnvironment env(participant_to_thread, step, trace, 0);
     std::optional<tpc::Participant> participant;
-    try {
-      participant.emplace(pid);
-    } catch (const std::bad_alloc&) {
-      throw;
-    } catch (const std::exception& ex) {
-      return make_protocol_error_label(ex.what());
-    } catch (...) {
-      return make_protocol_error_label("uncaught non-standard exception");
+    if (const auto error = try_emplace_protocol_object(participant, pid);
+        error.has_value()) {
+      return error;
     }
     return run_and_capture(*participant, env);
   };

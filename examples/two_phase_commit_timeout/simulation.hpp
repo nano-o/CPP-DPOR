@@ -8,6 +8,9 @@
 // - sim/core.hpp: shared deterministic replay/capture helper
 // - sim/*_environment.hpp: explicit scenario environments
 // - sim/programs.hpp: scenario-specific ThreadFunction / Program builders
+//
+// Keep these includes explicit even though some are transitively reachable via
+// sim/programs.hpp; this header also documents the intended module boundaries.
 
 #include "sim/bridge.hpp"
 #include "sim/core.hpp"
