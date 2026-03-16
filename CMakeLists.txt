@@ -7,6 +7,8 @@ project(
   LANGUAGES CXX
 )
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 include(GNUInstallDirs)
 include(CTest)
 
@@ -141,7 +143,6 @@ if(DPOR_BUILD_TESTING)
 endif()
 
 if(DPOR_BUILD_EXAMPLES)
-  add_subdirectory(examples/minimal)
   if(DPOR_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks/two_phase_commit_timeout)
   endif()
