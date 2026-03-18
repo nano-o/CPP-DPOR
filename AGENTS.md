@@ -42,12 +42,12 @@ This is required to preserve DPOR soundness/completeness assumptions.
 ## Current Scope
 
 - prioritize correctness and clarity over optimization
-- focus first on async communication model support
+- focus first on async message-passing semantics and the current FIFO point-to-point mode
 - add genericity where it improves integration with real systems (not genericity for its own sake)
 
 ### Semantics In Scope (Now)
 
-- communication model: async message passing only
+- communication models: async message passing plus the current FIFO point-to-point mode (`FifoP2P`)
 - receive semantics: blocking receives plus the current async non-blocking mode, which may observe bottom (`⊥`) when no compatible unread send is taken
 - event kinds: send, receive, nondeterministic choice, block, error
 - `block` is an internal DPOR event used to represent waiting on a blocking receive; user thread callbacks/adapters must not emit `Block` directly
@@ -58,7 +58,7 @@ This is required to preserve DPOR soundness/completeness assumptions.
 ### Semantics Out of Scope (Now)
 
 - broader Must non-blocking semantics beyond the current async/bottom support
-- multiple communication models (`p2p`, `cd`, `mbox`) and their model-specific consistency rules
+- additional communication-model generality beyond the currently implemented `Async` and `FifoP2P` modes
 - monitor-specific semantics for temporal properties
 
 ## Consistency Invariants Policy

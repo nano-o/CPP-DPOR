@@ -4,12 +4,33 @@ A vibe-coded C++20 DPOR model-checking library inspired by Must.
 See the Must paper in docs/.
 
 There are some initial examples of use in the examples/ folder.
+See `docs/api.md` for a public API summary and `docs/architecture.md` for the
+high-level design.
 
-## Current model assumptions
+## Current scope
 
-- Asynchronous message-passing is the only supported communication model.
+- Supported communication models are `Async` and `FifoP2P`.
 - The set of threads is fixed at program construction time — there is no dynamic thread creation during exploration.
-- Support blocking and non-blocking receives (the latter can be used to model timeouts as in the 2PC-with-timeouts example) .
+- Supports blocking and non-blocking receives. Non-blocking receives may observe
+  bottom (`⊥`), which is useful for timeout-style modeling such as the 2PC
+  example.
+- Event kinds are send, receive, nondeterministic choice, block, and error.
+  `block` is an internal DPOR event; user thread functions should not emit it.
+- Receive compatibility is predicate-based, with helpers for both arbitrary
+  matchers and finite accepted-value sets.
+
+## Public API
+
+- Main exploration entry points: `dpor::algo::verify()` and experimental
+  `dpor::algo::verify_parallel()`.
+- Programs are modeled as `dpor::algo::ProgramT<ValueT>` collections of
+  deterministic thread functions.
+- Published executions are exposed to observers as
+  `dpor::model::ExplorationGraphT<ValueT>`.
+- Manual graph validation is available through
+  `dpor::model::AsyncConsistencyCheckerT`, `FifoP2PConsistencyCheckerT`, and
+  `ConsistencyCheckerT`.
+- The user-facing API is summarized in `docs/api.md`.
 
 ## Build
 
@@ -145,4 +166,4 @@ Key properties:
 - `tests`: unit/integration tests with CTest
 - `examples`: `two_phase_commit_timeout/`
 - `cmake`: packaging and build helper modules
-- `docs`: architecture notes
+- `docs`: API and architecture notes
