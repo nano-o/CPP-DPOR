@@ -6,13 +6,16 @@
 // - Insertion order tracking (needed for <=_G and backward revisiting)
 // - restrict(keep_set): returns a new graph with only specified events
 // - with_rf(recv, send): returns a copy with rf assignment changed
+// - with_rf_preserving_known_acyclicity(recv, send): returns a copy with rf
+//   assignment changed while preserving known acyclicity when the caller has
+//   already proved the rewrite safe
 // - with_nd_value(nd_event, value): returns a copy with ND choice value set
 // - checkpoint()/rollback(): worker-local temporary mutation support
 // - thread_trace(tid): extracts value sequence for a thread
 // - porf_contains(from, to): checks (po ∪ rf)+ reachability
 // - has_porf_cache(): reports whether PORF reachability has been materialized
-// - is_known_acyclic(): reports whether append-only forward-path mutations have
-//   preserved a known-acyclic (po ∪ rf) structure
+// - is_known_acyclic(): reports whether the current (po ∪ rf) structure is
+//   known acyclic
 // - has_causal_cycle_without_cache(): cycle-only check without building PORF cache
 // - receives_in_destination(send_id): receives in the send's destination thread
 // - has_causal_cycle(): cache-backed cycle check
@@ -347,27 +350,28 @@ class ExplorationGraphT {
 
   // Returns a copy with the rf assignment for recv changed to send.
   [[nodiscard]] ExplorationGraphT with_rf(EventId recv, EventId send) const {
-    auto copy = *this;
-    copy.invalidate_known_acyclicity();
-    copy.set_reads_from(recv, send);
-    copy.clear_worker_local_history();
-    return copy;
+    return copy_with_rf_source(recv, ReadsFromSource::from_send(send), false);
+  }
+
+  // Returns a copy with the rf assignment for recv changed to send. The caller
+  // is responsible for proving that this rewrite preserves acyclicity, in which
+  // case the known-acyclic metadata is preserved.
+  [[nodiscard]] ExplorationGraphT with_rf_preserving_known_acyclicity(EventId recv,
+                                                                      EventId send) const {
+    return copy_with_rf_source(recv, ReadsFromSource::from_send(send),
+                               known_acyclic_ && is_valid_event_id(recv) &&
+                                   is_receive(event(recv)) && is_valid_event_id(send) &&
+                                   is_send(event(send)));
   }
 
   [[nodiscard]] ExplorationGraphT with_rf_source(EventId recv, ReadsFromSource source) const {
-    auto copy = *this;
-    copy.invalidate_known_acyclicity();
-    copy.set_reads_from_source(recv, std::move(source));
-    copy.clear_worker_local_history();
-    return copy;
+    return copy_with_rf_source(recv, std::move(source), false);
   }
 
   [[nodiscard]] ExplorationGraphT with_bottom_rf(EventId recv) const {
-    auto copy = *this;
-    copy.invalidate_known_acyclicity();
-    copy.set_reads_from_bottom(recv);
-    copy.clear_worker_local_history();
-    return copy;
+    return copy_with_rf_source(recv, ReadsFromSource::bottom(),
+                               known_acyclic_ && is_valid_event_id(recv) &&
+                                   is_receive(event(recv)));
   }
 
   // Returns a copy with the ND choice value for nd_event changed.
@@ -407,14 +411,13 @@ class ExplorationGraphT {
 
   [[nodiscard]] bool has_porf_cache() const noexcept { return static_cast<bool>(porf_cache_); }
 
-  // This tracks only the narrow append-only fast path. The checker still runs
-  // full endpoint/RF validation before using it, and may re-arm it after a
-  // graph has been fully validated as acyclic.
+  // The checker still runs full endpoint/RF validation before trusting this,
+  // but may skip the explicit cycle query when the current graph is already
+  // known acyclic.
   [[nodiscard]] bool is_known_acyclic() const noexcept { return known_acyclic_; }
 
-  // Metadata-only hook for the consistency checker: once a graph has been
-  // fully validated as acyclic, later tail appends can use the append-only
-  // fast path again.
+  // Metadata-only hook for callers that have established acyclicity of the
+  // current graph.
   void mark_known_acyclic() noexcept {
     known_acyclic_ = true;
     pending_fresh_receive_id_.reset();
@@ -499,6 +502,19 @@ class ExplorationGraphT {
     rf_undo_log_.clear();
   }
 
+  [[nodiscard]] ExplorationGraphT copy_with_rf_source(EventId recv, ReadsFromSource source,
+                                                      const bool preserve_known_acyclicity) const {
+    auto copy = *this;
+    copy.set_reads_from_source(recv, std::move(source));
+    if (preserve_known_acyclicity) {
+      copy.mark_known_acyclic();
+    } else {
+      copy.invalidate_known_acyclicity();
+    }
+    copy.clear_worker_local_history();
+    return copy;
+  }
+
   [[nodiscard]] ExplorationGraphT restrict_from_keep_mask(
       const std::vector<std::uint8_t>& keep_mask) const {
     if (keep_mask.size() != event_count()) {
@@ -549,7 +565,11 @@ class ExplorationGraphT {
       }
     }
 
-    result.invalidate_known_acyclicity();
+    if (known_acyclic_) {
+      result.mark_known_acyclic();
+    } else {
+      result.invalidate_known_acyclicity();
+    }
     result.clear_worker_local_history();
     return result;
   }

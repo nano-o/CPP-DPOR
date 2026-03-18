@@ -643,7 +643,7 @@ TEST_CASE("exploration-graph checker re-arms known acyclicity for with_rf copies
   REQUIRE(revisited.is_known_acyclic());
 }
 
-TEST_CASE("exploration-graph checker re-arms known acyclicity for restricted graphs",
+TEST_CASE("restricted graphs preserve known acyclicity metadata",
           "[model][consistency][exploration_graph]") {
   ExplorationGraph graph;
   const auto s1 = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
@@ -651,11 +651,14 @@ TEST_CASE("exploration-graph checker re-arms known acyclicity for restricted gra
   const auto s2 = graph.add_event(2, SendLabel{.destination = 3, .value = "side"});
   graph.set_reads_from(r1, s1);
 
+  const AsyncConsistencyChecker checker;
+  REQUIRE(checker.check(graph).is_consistent());
+  REQUIRE(graph.is_known_acyclic());
+
   auto restricted = graph.restrict({s1, r1, s2});
-  REQUIRE_FALSE(restricted.is_known_acyclic());
+  REQUIRE(restricted.is_known_acyclic());
   REQUIRE_FALSE(restricted.has_porf_cache());
 
-  const AsyncConsistencyChecker checker;
   const auto result = checker.check(restricted);
 
   REQUIRE(result.is_consistent());

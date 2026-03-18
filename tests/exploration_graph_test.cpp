@@ -515,23 +515,57 @@ TEST_CASE("malformed rf assignments clear known acyclicity",
   }
 }
 
-TEST_CASE("restrict and rf-copy helpers clear known acyclicity",
+TEST_CASE("copy helpers preserve known acyclicity only when the proof is available",
           "[model][exploration_graph][known_acyclic]") {
-  ExplorationGraph g;
-  const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
-  const auto r = g.add_event(2, make_receive_label<Value>());
-  g.set_reads_from(r, s);
+  SECTION("restrict preserves known acyclicity") {
+    ExplorationGraph g;
+    const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+    const auto r = g.add_event(2, make_receive_label<Value>());
+    g.set_reads_from(r, s);
 
-  REQUIRE(g.is_known_acyclic());
+    REQUIRE(g.is_known_acyclic());
 
-  const auto rewired = g.with_rf(r, s);
-  REQUIRE_FALSE(rewired.is_known_acyclic());
+    const auto restricted = g.restrict({s, r});
+    REQUIRE(restricted.is_known_acyclic());
+  }
 
-  const auto bottomed = g.with_bottom_rf(r);
-  REQUIRE_FALSE(bottomed.is_known_acyclic());
+  SECTION("with_bottom_rf preserves known acyclicity") {
+    ExplorationGraph g;
+    const auto s = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+    const auto r = g.add_event(2, make_nonblocking_receive_label<Value>());
+    g.set_reads_from(r, s);
 
-  const auto restricted = g.restrict({s, r});
-  REQUIRE_FALSE(restricted.is_known_acyclic());
+    REQUIRE(g.is_known_acyclic());
+
+    const auto bottomed = g.with_bottom_rf(r);
+    REQUIRE(bottomed.is_known_acyclic());
+  }
+
+  SECTION("conservative with_rf still clears known acyclicity") {
+    ExplorationGraph g;
+    const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+    const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
+    const auto r = g.add_event(2, make_receive_label<Value>());
+    g.set_reads_from(r, s1);
+
+    REQUIRE(g.is_known_acyclic());
+
+    const auto rewired = g.with_rf(r, s2);
+    REQUIRE_FALSE(rewired.is_known_acyclic());
+  }
+
+  SECTION("proven-safe with_rf preserves known acyclicity") {
+    ExplorationGraph g;
+    const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+    const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
+    const auto r = g.add_event(2, make_receive_label<Value>());
+    g.set_reads_from(r, s1);
+
+    REQUIRE(g.is_known_acyclic());
+
+    const auto rewired = g.with_rf_preserving_known_acyclicity(r, s2);
+    REQUIRE(rewired.is_known_acyclic());
+  }
 }
 
 // --- porf_contains ---

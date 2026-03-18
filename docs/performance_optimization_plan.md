@@ -191,7 +191,8 @@ Mutation rules:
 3. `with_nd_value()`
    - preserve the acyclicity metadata, because it changes neither `po` nor `rf`
 4. conservative operations
-   - `restrict()`, `with_rf()`, `with_rf_source()`, and `with_bottom_rf()` should all produce graphs with unknown acyclicity
+   - `with_rf()` and `with_rf_source()` should produce graphs with unknown acyclicity unless the caller uses an explicitly proven-safe rewrite helper
+   - `restrict()` and `with_bottom_rf()` should preserve `known_acyclic_` when the source graph is already known acyclic
 
 Rationale for the narrow safe case:
 
@@ -215,7 +216,9 @@ Landing 1 tests:
 - forward receive plus `set_reads_from_bottom()` preserves `known_acyclic_`
 - appending another event before finalizing an older fresh receive clears only the pending id, not the known-acyclic bit
 - rewriting `rf` on a pre-existing receive clears known acyclicity
-- `restrict()` and `with_rf()` clear known acyclicity
+- `restrict()` preserves known acyclicity
+- `with_bottom_rf()` preserves known acyclicity
+- `with_rf()` clears known acyclicity unless the caller uses the proven-safe helper
 - checker parity remains unchanged for malformed graphs and for non-structural issue combinations
 - a revisit-derived graph still falls back to ordinary cycle checking
 
