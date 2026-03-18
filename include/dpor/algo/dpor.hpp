@@ -181,6 +181,113 @@ template <typename ValueT>
   return result;
 }
 
+// Lightweight `(po ∪ rf)` view over a kept-event mask. This lets
+// revisit_condition() emulate `G|Previous` without materializing a child graph.
+template <typename ValueT>
+class MaskedPorfContext {
+ public:
+  using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
+
+  MaskedPorfContext(const model::ExplorationGraphT<ValueT>& graph,
+                    const std::vector<std::uint8_t>& keep_mask)
+      : graph_(graph),
+        keep_mask_(keep_mask),
+        kept_position_in_thread_(graph.event_count(), kNoPosition),
+        consumed_send_mask_(graph.event_count(), 0),
+        rf_successors_by_send_(graph.event_count()) {
+    if (keep_mask_.size() != graph_.event_count()) {
+      throw std::invalid_argument("keep mask size must match event count");
+    }
+
+    for (const auto event_id : graph_.insertion_order()) {
+      if (!keeps(event_id)) {
+        continue;
+      }
+      const auto& evt = graph_.event(event_id);
+      const auto thread_index = static_cast<std::size_t>(evt.thread);
+      if (thread_index >= kept_events_by_thread_.size()) {
+        kept_events_by_thread_.resize(thread_index + 1);
+      }
+      auto& thread_events = kept_events_by_thread_[thread_index];
+      kept_position_in_thread_[event_id] = thread_events.size();
+      thread_events.push_back(event_id);
+    }
+
+    for (const auto& [recv_id, source] : graph_.reads_from()) {
+      if (!keeps(recv_id) || source.is_bottom()) {
+        continue;
+      }
+      const auto send_id = source.send_id();
+      if (!keeps(send_id)) {
+        continue;
+      }
+      consumed_send_mask_[send_id] = 1U;
+      rf_successors_by_send_[send_id].push_back(recv_id);
+    }
+  }
+
+  [[nodiscard]] bool keeps(EvId event_id) const noexcept {
+    return event_id < keep_mask_.size() && keep_mask_[event_id] != 0U;
+  }
+
+  [[nodiscard]] bool send_is_unread(EvId send_id) const noexcept {
+    return keeps(send_id) && consumed_send_mask_[send_id] == 0U;
+  }
+
+  [[nodiscard]] std::vector<std::uint8_t> reachable_from(EvId from) const {
+    if (!graph_.is_valid_event_id(from)) {
+      throw std::out_of_range("event id not found in masked PORF context");
+    }
+    if (!keeps(from)) {
+      throw std::logic_error("masked PORF reachability requires a kept source event");
+    }
+
+    std::vector<std::uint8_t> reachable(graph_.event_count(), 0);
+    std::vector<EvId> pending;
+    pending.reserve(graph_.event_count());
+    append_successors(from, pending);
+
+    std::size_t cursor = 0;
+    while (cursor < pending.size()) {
+      const auto current = pending[cursor++];
+      if (reachable[current] != 0U) {
+        continue;
+      }
+      reachable[current] = 1U;
+      append_successors(current, pending);
+    }
+
+    return reachable;
+  }
+
+ private:
+  static constexpr std::size_t kNoPosition = std::numeric_limits<std::size_t>::max();
+
+  void append_successors(EvId from, std::vector<EvId>& pending) const {
+    const auto thread_index = static_cast<std::size_t>(graph_.event(from).thread);
+    if (thread_index < kept_events_by_thread_.size()) {
+      const auto& thread_events = kept_events_by_thread_[thread_index];
+      const auto position = kept_position_in_thread_[from];
+      if (position != kNoPosition) {
+        for (std::size_t i = position + 1; i < thread_events.size(); ++i) {
+          pending.push_back(thread_events[i]);
+        }
+      }
+    }
+
+    for (const auto recv_id : rf_successors_by_send_[from]) {
+      pending.push_back(recv_id);
+    }
+  }
+
+  const model::ExplorationGraphT<ValueT>& graph_;
+  const std::vector<std::uint8_t>& keep_mask_;
+  std::vector<std::vector<EvId>> kept_events_by_thread_;
+  std::vector<std::size_t> kept_position_in_thread_;
+  std::vector<std::uint8_t> consumed_send_mask_;
+  std::vector<std::vector<EvId>> rf_successors_by_send_;
+};
+
 template <typename ValueT>
 [[nodiscard]] inline bool rewiring_recv_creates_cycle(
     const model::ExplorationGraphT<ValueT>& graph,
@@ -277,6 +384,92 @@ template <typename ValueT>
   throw std::logic_error("get_cons_tiebreaker invariant violated: no consistent source found");
 }
 
+template <typename ValueT>
+[[nodiscard]] inline typename model::ExplorationGraphT<ValueT>::EventId
+get_cons_tiebreaker_masked(const model::ExplorationGraphT<ValueT>& graph,
+                           const std::vector<std::uint8_t>& keep_mask,
+                           typename model::ExplorationGraphT<ValueT>::EventId recv) {
+  using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
+
+  const MaskedPorfContext<ValueT> masked_graph(graph, keep_mask);
+  if (!masked_graph.keeps(recv)) {
+    throw std::logic_error("get_cons_tiebreaker invariant violated: event missing from keep mask");
+  }
+
+  const auto& recv_evt = graph.event(recv);
+  const auto* recv_label = model::as_receive(recv_evt);
+  if (recv_label == nullptr) {
+    throw std::logic_error("get_cons_tiebreaker invariant violated: event is not a receive");
+  }
+  if (recv_label->is_nonblocking()) {
+    throw std::logic_error(
+        "get_cons_tiebreaker invariant violated: event is not a blocking receive");
+  }
+
+  struct Candidate {
+    EvId send_id;
+    model::ThreadId sender_thread;
+  };
+
+  auto rf_it = graph.reads_from().find(recv);
+  if (rf_it == graph.reads_from().end()) {
+    throw std::logic_error(
+        "get_cons_tiebreaker invariant violated: receive missing reads-from source");
+  }
+  if (rf_it->second.is_bottom()) {
+    throw std::logic_error(
+        "get_cons_tiebreaker invariant violated: blocking receive reads from bottom");
+  }
+  const auto current_rf_source = rf_it->second.send_id();
+  if (!masked_graph.keeps(current_rf_source)) {
+    throw std::logic_error(
+        "get_cons_tiebreaker invariant violated: receive source missing from keep mask");
+  }
+
+  std::vector<Candidate> candidates;
+  candidates.reserve(graph.event_count());
+  for (EvId send_id = 0; send_id < graph.event_count(); ++send_id) {
+    if (!masked_graph.send_is_unread(send_id)) {
+      continue;
+    }
+    const auto& send_evt = graph.event(send_id);
+    const auto* send_label = model::as_send(send_evt);
+    if (send_label == nullptr) {
+      continue;
+    }
+    if (send_label->destination != recv_evt.thread) {
+      continue;
+    }
+    if (!recv_label->accepts(send_label->value)) {
+      continue;
+    }
+    candidates.push_back(Candidate{send_id, send_evt.thread});
+  }
+
+  const auto& send_evt = graph.event(current_rf_source);
+  const auto* send_label = model::as_send(send_evt);
+  if (send_label != nullptr && send_label->destination == recv_evt.thread &&
+      recv_label->accepts(send_label->value)) {
+    candidates.push_back(Candidate{current_rf_source, send_evt.thread});
+  }
+
+  std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+    if (a.sender_thread != b.sender_thread) {
+      return a.sender_thread < b.sender_thread;
+    }
+    return a.send_id < b.send_id;
+  });
+
+  const auto reachable_from_recv = masked_graph.reachable_from(recv);
+  for (const auto& candidate : candidates) {
+    if (reachable_from_recv[candidate.send_id] == 0U) {
+      return candidate.send_id;
+    }
+  }
+
+  throw std::logic_error("get_cons_tiebreaker invariant violated: no consistent source found");
+}
+
 // REVISITCONDITION(G, e, s):
 // - ND → val(e) == min(S)
 // - non-receive → no receive in Previous reads from e
@@ -333,28 +526,12 @@ template <typename ValueT>
   // Must Algorithm 1 requires the tiebreaker to be computed on G restricted
   // to the Previous set, not the full graph.
   const auto previous = compute_previous_set(graph, e, s);
-  auto restricted = model::detail::restrict_masked(graph, previous);
-
-  // Build old-to-new ID mapping for events kept in the restricted graph.
-  std::vector<EvId> id_map(graph.event_count(), kNoSource);
-  {
-    EvId new_id = 0;
-    for (const auto old_id : graph.insertion_order()) {
-      if (previous[old_id] != 0U) {
-        id_map[old_id] = new_id++;
-      }
-    }
-  }
-
-  // Remap e to its ID in the restricted graph.
-  const auto remapped_e = id_map[e];
-  if (remapped_e == kNoSource) {
+  if (previous[e] == 0U) {
     throw std::logic_error("revisit_condition invariant violated: event missing from Previous");
   }
 
-  // Remap current rf(e) to its ID in the restricted graph.
-  // If rf(e) is not in Previous, the equality must fail (it cannot match any
-  // tiebreaker source of G|Previous).
+  // If rf(e) is not in Previous, the equality must fail: it cannot match any
+  // tiebreaker source of G|Previous.
   auto rf_it = graph.reads_from().find(e);
   if (rf_it == graph.reads_from().end()) {
     throw std::logic_error(
@@ -365,16 +542,14 @@ template <typename ValueT>
         "revisit_condition invariant violated: blocking receive reads from bottom");
   }
   const auto current_rf_original = rf_it->second.send_id();
-  const auto remapped_rf = id_map[current_rf_original];
-  if (remapped_rf == kNoSource) {
-    // This is a normal blocking-receive failure case, not an invariant break:
-    // Algorithm 1 compares rf(e) against a tiebreaker computed on G|Previous,
-    // so if the current source is not in Previous the equality cannot hold.
+  if (current_rf_original == kNoSource || current_rf_original >= previous.size() ||
+      previous[current_rf_original] == 0U) {
+    // This is a normal blocking-receive failure case, not an invariant break.
     return false;
   }
 
-  const auto tiebreaker = get_cons_tiebreaker(restricted, remapped_e);
-  return remapped_rf == tiebreaker;
+  const auto tiebreaker = get_cons_tiebreaker_masked(graph, previous, e);
+  return current_rf_original == tiebreaker;
 }
 
 enum class ExplorationTaskMode : std::uint8_t { Visit, VisitIfConsistent };

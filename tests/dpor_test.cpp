@@ -1558,9 +1558,51 @@ TEST_CASE("receive revisit condition should use tiebreaker from G|Previous",
   const auto rf_it = restricted.reads_from().find(recv_in_previous);
   REQUIRE(rf_it != restricted.reads_from().end());
   REQUIRE(rf_it->second == expected_tiebreaker);
+  REQUIRE(dpor::algo::detail::get_cons_tiebreaker_masked(graph, previous, receive) ==
+          send_current);
 
   // This should hold when the tiebreaker is computed on G|Previous.
   REQUIRE(dpor::algo::detail::revisit_condition(graph, receive, revisiting_send));
+}
+
+TEST_CASE("masked tiebreaker should skip deleted intermediate same-thread events",
+          "[algo][dpor][regression]") {
+  ExplorationGraph graph;
+
+  const auto send_current = graph.add_event(4, SendLabel{.destination = 1, .value = "x"});
+  const auto receive = graph.add_event(1, make_receive_label_from_values<Value>({"x"}));
+  const auto deleted_mid = graph.add_event(1, SendLabel{.destination = 9, .value = "noise"});
+  const auto send_path = graph.add_event(1, SendLabel{.destination = 2, .value = "chain"});
+  const auto recv_path = graph.add_event(2, make_receive_label_from_values<Value>({"chain"}));
+  const auto send_bad = graph.add_event(2, SendLabel{.destination = 1, .value = "x"});
+  const auto send_good = graph.add_event(3, SendLabel{.destination = 1, .value = "x"});
+
+  graph.set_reads_from(receive, send_current);
+  graph.set_reads_from(recv_path, send_path);
+
+  std::vector<std::uint8_t> keep_mask(graph.event_count(), 1);
+  keep_mask[deleted_mid] = 0U;
+
+  const auto restricted = dpor::model::detail::restrict_masked(graph, keep_mask);
+  const auto recv_in_restricted = find_event_id_by_thread_index(restricted, 1, 0);
+  REQUIRE(recv_in_restricted != ExplorationGraph::kNoSource);
+
+  const auto expected_tiebreaker =
+      dpor::algo::detail::get_cons_tiebreaker(restricted, recv_in_restricted);
+  const auto masked_tiebreaker =
+      dpor::algo::detail::get_cons_tiebreaker_masked(graph, keep_mask, receive);
+  const auto* restricted_send = as_send(restricted.event(expected_tiebreaker));
+  const auto* masked_send = as_send(graph.event(masked_tiebreaker));
+
+  REQUIRE(expected_tiebreaker != ExplorationGraph::kNoSource);
+  REQUIRE(masked_tiebreaker != send_bad);
+  REQUIRE(masked_tiebreaker == send_good);
+  REQUIRE(restricted_send != nullptr);
+  REQUIRE(masked_send != nullptr);
+  REQUIRE(restricted.event(expected_tiebreaker).thread == graph.event(masked_tiebreaker).thread);
+  REQUIRE(restricted_send->value == masked_send->value);
+  REQUIRE(restricted_send->destination == masked_send->destination);
+  REQUIRE(restricted.event(expected_tiebreaker).thread == 3);
 }
 
 TEST_CASE("receive revisit condition rejects rf source outside G|Previous",
