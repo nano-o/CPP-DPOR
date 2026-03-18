@@ -35,12 +35,18 @@ RUN set -eux; \
         procps \
         ripgrep \
         bash-completion \
+        bubblewrap \
         build-essential \
         clang \
         clang-format \
         clang-tidy \
         cppcheck \
         iwyu \
+        poppler-utils \
+        python3 \
+        python3-pip \
+        python3-venv \
+        socat \
         sudo \
         tmux \
         vim \
@@ -81,15 +87,24 @@ RUN set -eux; \
     echo "${USER} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${USER}"; \
     chmod 0440 "/etc/sudoers.d/${USER}"
 
-# Prepare user-writable bin and npm locations.
-RUN install -d -o "${UID}" -g "${GID}" "/home/${USER}/.local/bin" "/home/${USER}/.npm-global"
+# Prepare user-writable XDG and npm directories.
+RUN install -d -o "${UID}" -g "${GID}" \
+    "/home/${USER}/.local/bin" \
+    "/home/${USER}/.local/share" \
+    "/home/${USER}/.local/state" \
+    "/home/${USER}/.cache" \
+    "/home/${USER}/.config" \
+    "/home/${USER}/.npm-global"
 
 # npm global prefix for the dev user.
 ENV NPM_CONFIG_PREFIX="/home/${USER}/.npm-global" \
     PATH="/home/${USER}/.local/bin:/home/${USER}/.npm-global/bin:${PATH}"
 
-# Install agent CLIs globally as the dev user.
-RUN su - "${USER}" -c "NPM_CONFIG_PREFIX=/home/${USER}/.npm-global npm install -g @anthropic-ai/claude-code @openai/codex && npm cache clean --force"
+# Install Claude Code via native installer (npm method is deprecated).
+RUN su - "${USER}" -c "curl -fsSL https://claude.ai/install.sh | bash"
+
+# Install Codex CLI via npm.
+RUN su - "${USER}" -c "NPM_CONFIG_PREFIX=/home/${USER}/.npm-global npm install -g @openai/codex && npm cache clean --force"
 
 # Create mount points and user config.
 RUN install -d -o "${UID}" -g "${GID}" "/home/${USER}/project" "/home/${USER}/.claude" "/home/${USER}/.codex"

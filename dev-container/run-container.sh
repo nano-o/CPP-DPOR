@@ -6,6 +6,7 @@ container_name=""
 debug_mode=""
 persist=""
 mount_claude=""
+allow_new_privs=""
 if [[ $# -gt 0 && "$1" != -* ]]; then
   tag="$1"
   shift
@@ -37,6 +38,10 @@ while [[ $# -gt 0 ]]; do
       mount_claude=1
       shift
       ;;
+    --allow-new-privileges)
+      allow_new_privs=1
+      shift
+      ;;
     --)
       shift
       break
@@ -59,6 +64,7 @@ mkdir -p "${codex_state_dir}"
 
 docker_args=(
   -it
+  --init
   --name "${container_name}"
   -e PROJECT_NAME="${project_name}"
   -e COLORTERM=truecolor
@@ -104,11 +110,17 @@ if [[ "${debug_mode}" == "debug" ]]; then
   )
 elif [[ "${debug_mode}" == "full" ]]; then
   # Full privileges — replaces all hardening above.
+  allow_new_privs=1
   docker_args+=(
     --privileged
     --security-opt=seccomp=unconfined
     --security-opt=apparmor=unconfined
   )
+fi
+
+if [[ -n "${allow_new_privs}" ]]; then
+  # Override the earlier no-new-privileges restriction.
+  docker_args+=(--security-opt=no-new-privileges=false)
 fi
 
 if [[ "${debug_mode}" == "full" ]]; then
