@@ -3,5 +3,4 @@ target_link_libraries(dpor_two_phase_commit_timeout_test PRIVATE dpor::dpor Catc
 target_include_directories(dpor_two_phase_commit_timeout_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 dpor_apply_static_analysis(dpor_two_phase_commit_timeout_test)
 
-include(Catch)
-catch_discover_tests(dpor_two_phase_commit_timeout_test)
+dpor_discover_catch_tests(dpor_two_phase_commit_timeout_test)

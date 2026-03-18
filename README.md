@@ -19,6 +19,18 @@ cmake --build --preset debug
 ctest --preset debug
 ```
 
+CTest vs Catch filtering:
+
+- `ctest -R ...` matches CTest test names, not Catch tags.
+- Catch-discovered tests are prefixed with their executable name, so
+  `ctest --preset debug -R dpor_dpor_test` runs the tests discovered from
+  `dpor_dpor_test`, and
+  `ctest --preset debug -R dpor_two_phase_commit_timeout_test` runs the 2PC
+  example tests.
+- Catch tag expressions such as `[paper]` or `[two_phase_commit]` only work on
+  the test binaries themselves, for example
+  `./build/debug/examples/two_phase_commit_timeout/dpor_two_phase_commit_timeout_test "[two_phase_commit]"`.
+
 Tests are written with Catch2 (v3). CMake uses a system Catch2 package if available.
 Paper-derived examples in current scope are in `tests/dpor_test.cpp` and tagged `[paper]`.
 `tests/dpor_test.cpp` and `tests/dpor_stress_test.cpp` also cross-check DPOR

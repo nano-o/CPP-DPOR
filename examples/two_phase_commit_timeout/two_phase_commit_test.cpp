@@ -2,7 +2,10 @@
 #include "dpor/model/event.hpp"
 #include "dpor/model/exploration_graph.hpp"
 
-#include "simulation.hpp"
+#include "sim/bridge.hpp"
+#include "sim/crash_before_decision.hpp"
+#include "sim/dpor_types.hpp"
+#include "sim/nominal.hpp"
 #include "udp_network.hpp"
 #include <catch2/catch_test_macros.hpp>
 
@@ -23,6 +26,9 @@
 
 using namespace dpor;
 using namespace tpc_sim;
+
+namespace nominal_sim = tpc_sim::nominal;
+namespace crash_sim = tpc_sim::crash_before_decision;
 
 // ---------------------------------------------------------------------------
 // Trace helpers
@@ -390,7 +396,7 @@ TEST_CASE("Participant timeout causes local abort while waiting for decision",
 // Simulation adapter tests
 // ---------------------------------------------------------------------------
 
-TEST_CASE("NondeterministicVoteEnvironment captures timer-free waits as blocking receives",
+TEST_CASE("nominal::Environment captures timer-free waits as blocking receives",
           "[two_phase_commit][simulation][timer]") {
   struct WaitForMessage {
     static bool start(tpc::Environment& /*env*/) { return true; }
@@ -399,10 +405,9 @@ TEST_CASE("NondeterministicVoteEnvironment captures timer-free waits as blocking
 
   WaitForMessage protocol;
   ThreadTrace trace;
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0, trace,
-                                      /*trace_offset=*/0);
+  nominal_sim::Environment env(participant_to_thread, /*target_io=*/0, trace, /*trace_offset=*/0);
 
-  const auto label = run_and_capture(protocol, env);
+  const auto label = nominal_sim::run_and_capture(protocol, env);
   REQUIRE(label.has_value());
   const auto* recv =
       std::get_if<ReceiveLabel>(&*label);  // NOLINT(bugprone-unchecked-optional-access)
@@ -410,7 +415,7 @@ TEST_CASE("NondeterministicVoteEnvironment captures timer-free waits as blocking
   REQUIRE(recv->is_blocking());
 }
 
-TEST_CASE("NondeterministicVoteEnvironment captures timer-armed waits as non-blocking receives",
+TEST_CASE("nominal::Environment captures timer-armed waits as non-blocking receives",
           "[two_phase_commit][simulation][timer]") {
   struct WaitWithTimer {
     static bool start(tpc::Environment& env) {
@@ -422,10 +427,9 @@ TEST_CASE("NondeterministicVoteEnvironment captures timer-armed waits as non-blo
 
   WaitWithTimer protocol;
   ThreadTrace trace;
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0, trace,
-                                      /*trace_offset=*/0);
+  nominal_sim::Environment env(participant_to_thread, /*target_io=*/0, trace, /*trace_offset=*/0);
 
-  const auto label = run_and_capture(protocol, env);
+  const auto label = nominal_sim::run_and_capture(protocol, env);
   REQUIRE(label.has_value());
   const auto* recv =
       std::get_if<ReceiveLabel>(&*label);  // NOLINT(bugprone-unchecked-optional-access)
@@ -433,7 +437,7 @@ TEST_CASE("NondeterministicVoteEnvironment captures timer-armed waits as non-blo
   REQUIRE(recv->is_nonblocking());
 }
 
-TEST_CASE("NondeterministicVoteEnvironment returns to blocking receive after timer cancellation",
+TEST_CASE("nominal::Environment returns to blocking receive after timer cancellation",
           "[two_phase_commit][simulation][timer]") {
   struct WaitWithCanceledTimer {
     static bool start(tpc::Environment& env) {
@@ -446,10 +450,9 @@ TEST_CASE("NondeterministicVoteEnvironment returns to blocking receive after tim
 
   WaitWithCanceledTimer protocol;
   ThreadTrace trace;
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0, trace,
-                                      /*trace_offset=*/0);
+  nominal_sim::Environment env(participant_to_thread, /*target_io=*/0, trace, /*trace_offset=*/0);
 
-  const auto label = run_and_capture(protocol, env);
+  const auto label = nominal_sim::run_and_capture(protocol, env);
   REQUIRE(label.has_value());
   const auto* recv =
       std::get_if<ReceiveLabel>(&*label);  // NOLINT(bugprone-unchecked-optional-access)
@@ -457,7 +460,7 @@ TEST_CASE("NondeterministicVoteEnvironment returns to blocking receive after tim
   REQUIRE(recv->is_blocking());
 }
 
-TEST_CASE("NondeterministicVoteEnvironment replays bottom as timer firing",
+TEST_CASE("nominal::Environment replays bottom as timer firing",
           "[two_phase_commit][simulation][timer]") {
   struct TimerThenSend {
     bool timer_fired = false;
@@ -476,10 +479,9 @@ TEST_CASE("NondeterministicVoteEnvironment replays bottom as timer firing",
 
   TimerThenSend protocol;
   ThreadTrace trace{ObservedValue::bottom()};
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/1, trace,
-                                      /*trace_offset=*/0);
+  nominal_sim::Environment env(participant_to_thread, /*target_io=*/1, trace, /*trace_offset=*/0);
 
-  const auto label = run_and_capture(protocol, env);
+  const auto label = nominal_sim::run_and_capture(protocol, env);
   REQUIRE(protocol.timer_fired);
   REQUIRE(label.has_value());
   const auto* send = std::get_if<SendLabel>(&*label);  // NOLINT(bugprone-unchecked-optional-access)
@@ -488,7 +490,7 @@ TEST_CASE("NondeterministicVoteEnvironment replays bottom as timer firing",
   REQUIRE(send->value == prepare_message());
 }
 
-TEST_CASE("NondeterministicVoteEnvironment replays timer-callback sends before later target steps",
+TEST_CASE("nominal::Environment replays timer-callback sends before later target steps",
           "[two_phase_commit][simulation][timer]") {
   struct TimerSendThenWait {
     bool timer_fired = false;
@@ -507,10 +509,9 @@ TEST_CASE("NondeterministicVoteEnvironment replays timer-callback sends before l
 
   TimerSendThenWait protocol;
   ThreadTrace trace{ObservedValue::bottom()};
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/2, trace,
-                                      /*trace_offset=*/0);
+  nominal_sim::Environment env(participant_to_thread, /*target_io=*/2, trace, /*trace_offset=*/0);
 
-  const auto label = run_and_capture(protocol, env);
+  const auto label = nominal_sim::run_and_capture(protocol, env);
   REQUIRE(protocol.timer_fired);
   REQUIRE(label.has_value());
   const auto* recv =
@@ -519,7 +520,7 @@ TEST_CASE("NondeterministicVoteEnvironment replays timer-callback sends before l
   REQUIRE(recv->is_blocking());
 }
 
-TEST_CASE("NondeterministicVoteEnvironment refreshes the active timer when the id is reused",
+TEST_CASE("nominal::Environment refreshes the active timer when the id is reused",
           "[two_phase_commit][simulation][timer]") {
   struct ReplaceTimer {
     bool old_timer_fired = false;
@@ -544,10 +545,9 @@ TEST_CASE("NondeterministicVoteEnvironment refreshes the active timer when the i
 
   ReplaceTimer protocol;
   ThreadTrace trace{ObservedValue::bottom()};
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/1, trace,
-                                      /*trace_offset=*/0);
+  nominal_sim::Environment env(participant_to_thread, /*target_io=*/1, trace, /*trace_offset=*/0);
 
-  const auto label = run_and_capture(protocol, env);
+  const auto label = nominal_sim::run_and_capture(protocol, env);
   REQUIRE_FALSE(protocol.old_timer_fired);
   REQUIRE(protocol.new_timer_fired);
   REQUIRE(label.has_value());
@@ -558,8 +558,7 @@ TEST_CASE("NondeterministicVoteEnvironment refreshes the active timer when the i
 }
 
 TEST_CASE(
-    "NondeterministicVoteEnvironment rejects multiple simultaneous active timers as a simulation "
-    "failure",
+    "nominal::Environment rejects multiple simultaneous active timers as a simulation failure",
     "[two_phase_commit][simulation][timer]") {
   struct WaitWithTwoTimers {
     static bool start(tpc::Environment& env) {
@@ -573,17 +572,15 @@ TEST_CASE(
 
   WaitWithTwoTimers protocol;
   ThreadTrace trace;
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0, trace,
-                                      /*trace_offset=*/0);
+  nominal_sim::Environment env(participant_to_thread, /*target_io=*/0, trace, /*trace_offset=*/0);
 
   // The simplified timer adapter cannot represent multiple concurrent timers,
   // so this remains an infrastructure failure rather than an ErrorLabel.
-  REQUIRE_THROWS_AS(run_and_capture(protocol, env), std::logic_error);
+  REQUIRE_THROWS_AS(nominal_sim::run_and_capture(protocol, env), std::logic_error);
 }
 
-TEST_CASE(
-    "NondeterministicVoteEnvironment turns timer-callback protocol exceptions into error events",
-    "[two_phase_commit][simulation][timer]") {
+TEST_CASE("nominal::Environment turns timer-callback protocol exceptions into error events",
+          "[two_phase_commit][simulation][timer]") {
   struct ThrowInTimer {
     static bool start(tpc::Environment& env) {
       env.set_timer(1, 10, [](tpc::Environment& /*timer_env*/) -> bool {
@@ -597,10 +594,9 @@ TEST_CASE(
 
   ThrowInTimer protocol;
   ThreadTrace trace{ObservedValue::bottom()};
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/1, trace,
-                                      /*trace_offset=*/0);
+  nominal_sim::Environment env(participant_to_thread, /*target_io=*/1, trace, /*trace_offset=*/0);
 
-  const auto label = run_and_capture(protocol, env);
+  const auto label = nominal_sim::run_and_capture(protocol, env);
   if (!label.has_value()) {
     FAIL("expected error label");
     return;
@@ -615,7 +611,7 @@ TEST_CASE(
 // ---------------------------------------------------------------------------
 
 TEST_CASE("2PC basic exploration with 2 participants", "[two_phase_commit]") {
-  auto prog = make_two_phase_commit_program(2);
+  auto prog = crash_sim::make_program({.num_participants = 2});
 
   algo::DporConfigT<SimValue> config;
   config.program = std::move(prog);
@@ -631,8 +627,7 @@ TEST_CASE("2PC basic exploration with 2 participants", "[two_phase_commit]") {
 
 TEST_CASE("2PC DPOR explores participant local timeout executions", "[two_phase_commit]") {
   constexpr std::size_t kNumParticipants = 2;
-  auto prog = make_two_phase_commit_program(kNumParticipants,
-                                            /*inject_crash=*/false);
+  auto prog = nominal_sim::make_program({.num_participants = kNumParticipants});
 
   bool saw_local_timeout = false;
 
@@ -653,7 +648,7 @@ TEST_CASE("2PC DPOR explores participant local timeout executions", "[two_phase_
 
 TEST_CASE("2PC agreement invariant: all decided participants agree", "[two_phase_commit]") {
   constexpr std::size_t kNumParticipants = 2;
-  auto prog = make_two_phase_commit_program(kNumParticipants);
+  auto prog = crash_sim::make_program({.num_participants = kNumParticipants});
 
   bool invariant_violated = false;
 
@@ -686,7 +681,7 @@ TEST_CASE("2PC agreement invariant: all decided participants agree", "[two_phase
 
 TEST_CASE("2PC validity invariant: Commit implies all voted Yes", "[two_phase_commit]") {
   constexpr std::size_t kNumParticipants = 2;
-  auto prog = make_two_phase_commit_program(kNumParticipants);
+  auto prog = crash_sim::make_program({.num_participants = kNumParticipants});
 
   bool invariant_violated = false;
 
@@ -726,7 +721,7 @@ TEST_CASE("2PC validity invariant: Commit implies all voted Yes", "[two_phase_co
 TEST_CASE("2PC crash behavior: no participant decides after coordinator crash",
           "[two_phase_commit]") {
   constexpr std::size_t kNumParticipants = 2;
-  auto prog = make_two_phase_commit_program(kNumParticipants);
+  auto prog = crash_sim::make_program({.num_participants = kNumParticipants});
 
   bool invariant_violated = false;
   std::size_t crash_executions = 0;
@@ -758,7 +753,7 @@ TEST_CASE("2PC crash behavior: no participant decides after coordinator crash",
 
 TEST_CASE("2PC without crashes explores timeout-inclusive executions for 2 participants",
           "[two_phase_commit]") {
-  auto prog = make_two_phase_commit_program(2, /*inject_crash=*/false);
+  auto prog = nominal_sim::make_program({.num_participants = 2});
 
   algo::DporConfigT<SimValue> config;
   config.program = std::move(prog);
@@ -770,7 +765,7 @@ TEST_CASE("2PC without crashes explores timeout-inclusive executions for 2 parti
 }
 
 TEST_CASE("2PC scales to 3 participants", "[two_phase_commit]") {
-  auto prog = make_two_phase_commit_program(3);
+  auto prog = crash_sim::make_program({.num_participants = 3});
 
   algo::DporConfigT<SimValue> config;
   config.program = std::move(prog);
@@ -781,8 +776,10 @@ TEST_CASE("2PC scales to 3 participants", "[two_phase_commit]") {
 }
 
 TEST_CASE("2PC protocol bug surfaces as verification failure", "[two_phase_commit]") {
-  auto prog = make_two_phase_commit_program(2, /*inject_crash=*/false,
-                                            /*bug_on_p1_no=*/true);
+  auto prog = nominal_sim::make_program({
+      .num_participants = 2,
+      .bug_on_p1_no = true,
+  });
 
   bool saw_error_execution = false;
   algo::DporConfigT<SimValue> config;
@@ -804,8 +801,7 @@ TEST_CASE("2PC protocol bug surfaces as verification failure", "[two_phase_commi
 
 TEST_CASE("2PC false invariant is detected: Abort implies some voted No", "[two_phase_commit]") {
   constexpr std::size_t kNumParticipants = 2;
-  auto prog = make_two_phase_commit_program(kNumParticipants,
-                                            /*inject_crash=*/false);
+  auto prog = nominal_sim::make_program({.num_participants = kNumParticipants});
 
   bool invariant_violated = false;
 

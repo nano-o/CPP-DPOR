@@ -74,6 +74,8 @@ This is required to preserve DPOR soundness/completeness assumptions.
 - **CMake presets**: `debug`, `release`, `asan`, `tsan`, `debug-fetch-catch2`, `lint`
 - Build: `cmake --preset debug && cmake --build --preset debug`
 - Run tests: `ctest --preset debug`
+- `ctest -R ...` matches CTest test names, not Catch tags; Catch-discovered tests are prefixed with their executable name, so target-level filters should use names like `ctest --preset debug -R dpor_dpor_test` or `ctest --preset debug -R dpor_two_phase_commit_timeout_test`
+- Catch tag expressions such as `[paper]` or `[two_phase_commit]` should be passed to the test binary directly, not to `ctest -R`
 - The `debug-fetch-catch2` preset auto-fetches Catch2 if not installed locally
 - The `asan` preset enables AddressSanitizer and UndefinedBehaviorSanitizer
 - The `tsan` preset enables ThreadSanitizer; use `scripts/run_tsan.sh` to build and run (handles ASLR)

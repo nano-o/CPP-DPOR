@@ -131,6 +131,14 @@ if(DPOR_BUILD_TESTING)
     endif()
   endif()
 
+  include(Catch)
+
+  function(dpor_discover_catch_tests target)
+    catch_discover_tests(${target}
+      TEST_PREFIX "${target}::"
+    )
+  endfunction()
+
   enable_testing()
   add_subdirectory(tests)
 endif()
