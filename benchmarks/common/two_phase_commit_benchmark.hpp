@@ -26,6 +26,7 @@ struct Options {
   enum class Mode { Dpor, Oracle, Both };
 
   Mode mode{Mode::Both};
+  model::CommunicationModel communication_model{model::CommunicationModel::Async};
   std::size_t participants{3};
   std::size_t iterations{1};
   bool inject_crash{true};
@@ -52,12 +53,23 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
   using type = ValueT;
 };
 
+[[nodiscard]] inline std::string_view communication_model_name(
+    const model::CommunicationModel communication_model) {
+  switch (communication_model) {
+    case model::CommunicationModel::Async:
+      return "async";
+    case model::CommunicationModel::FifoP2P:
+      return "fifo_p2p";
+  }
+  throw std::logic_error("unknown communication model");
+}
+
 [[noreturn]] inline void print_usage_and_exit(const char* argv0, std::string_view benchmark_label,
                                               int exit_code) {
   std::ostream& os = exit_code == 0 ? std::cout : std::cerr;
   os << "Usage: " << argv0
      << " [--mode dpor|oracle|both] [--participants N] [--iterations N]"
-        " [--no-crash] [--parallel]"
+        " [--no-crash] [--fifo] [--parallel]"
         " [--max-workers N] [--max-queued-tasks N]"
         " [--spawn-depth-cutoff N] [--min-fanout N]\n";
   os << benchmark_label << '\n';
@@ -102,6 +114,10 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
     }
     if (arg == "--no-crash") {
       options.inject_crash = false;
+      continue;
+    }
+    if (arg == "--fifo") {
+      options.communication_model = model::CommunicationModel::FifoP2P;
       continue;
     }
     if (arg == "--parallel") {
@@ -215,6 +231,7 @@ template <typename ProgramFactory>
   using ValueT = typename ProgramValueType<std::decay_t<decltype(program)>>::type;
   algo::DporConfigT<ValueT> config;
   config.program = std::move(program);
+  config.communication_model = options.communication_model;
   const auto result = options.parallel ? algo::verify_parallel(config, options.parallel_options)
                                        : algo::verify(config);
   if (result.kind == algo::VerifyResultKind::ErrorFound) {
@@ -231,9 +248,10 @@ template <typename ProgramFactory>
 
 template <typename ProgramFactory>
 [[nodiscard]] inline OracleRunResult run_oracle(std::size_t participants, bool inject_crash,
+                                                model::CommunicationModel communication_model,
                                                 const ProgramFactory& make_program) {
   auto program = make_program(participants, inject_crash);
-  const auto stats = test_support::collect_oracle_stats(program);
+  const auto stats = test_support::collect_oracle_stats(program, communication_model);
   return OracleRunResult{
       .executions = stats.signatures.size(),
       .paths_explored = stats.paths_explored,
@@ -249,7 +267,8 @@ template <typename ProgramFactory>
   for (std::size_t i = 0; i < options.iterations; ++i) {
     measurements.push_back(
         use_oracle ? measure_once([&] {
-          return run_oracle(options.participants, options.inject_crash, make_program);
+          return run_oracle(options.participants, options.inject_crash, options.communication_model,
+                            make_program);
         })
                    : measure_once([&] { return run_dpor(options, make_program); }));
     if (measurements.back().executions != measurements.front().executions) {
@@ -272,6 +291,8 @@ inline int run_two_phase_commit_benchmark(int argc, char** argv, std::string_vie
     const auto options = detail::parse_args(argc, argv, benchmark_label);
 
     std::cout << benchmark_label << " participants=" << options.participants
+              << " communication_model="
+              << detail::communication_model_name(options.communication_model)
               << " inject_crash=" << std::boolalpha << options.inject_crash
               << " iterations=" << options.iterations;
     if (options.parallel && options.mode != detail::Options::Mode::Oracle) {

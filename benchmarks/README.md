@@ -19,6 +19,7 @@ The executable supports the following CLI:
 --participants N
 --iterations N
 --no-crash
+--fifo
 --parallel
 --max-workers N
 --max-queued-tasks N
@@ -33,6 +34,8 @@ The executable supports the following CLI:
 - `--iterations` defaults to `1`.
 - `--no-crash` disables the coordinator crash choice so you can benchmark the
   no-crash state space separately.
+- `--fifo` switches the communication model from async to FIFO point-to-point
+  (`CommunicationModel::FifoP2P`) for both DPOR and oracle runs.
 - `--parallel` switches DPOR runs from `verify()` to `verify_parallel()`. If
   `--max-workers` is omitted, worker count falls back to the library's
   hardware-based default.
@@ -115,6 +118,13 @@ build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_ti
   --mode dpor --participants 3 --iterations 1
 ```
 
+2PC, FIFO DPOR only:
+
+```bash
+build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \
+  --mode dpor --fifo --participants 3 --iterations 1
+```
+
 2PC, parallel DPOR with conservative split heuristics:
 
 ```bash
@@ -136,7 +146,7 @@ build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_ti
 Each benchmark prints per-run timings and a summary. Example shape:
 
 ```text
-Plain 2PC benchmark participants=2 inject_crash=true iterations=1 optimized_build=true
+Plain 2PC benchmark participants=2 communication_model=async inject_crash=true iterations=1 optimized_build=true
 DPOR
   run 1: executions=24 elapsed_ms=...
   summary: min_ms=... avg_ms=... max_ms=... executions=24
