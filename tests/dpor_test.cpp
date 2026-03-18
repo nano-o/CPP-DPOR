@@ -194,7 +194,7 @@ TEST_CASE("verify accepts compact zero-based thread ids", "[algo][dpor]") {
 
 TEST_CASE("single thread with one send explores 1 execution", "[algo][dpor]") {
   DporConfig config;
-  config.program.threads[1] = [](const ThreadTrace&,
+  config.program.threads[1] = [](const ThreadTrace& trace,
                                  std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 2, .value = "hello"};
@@ -209,7 +209,7 @@ TEST_CASE("single thread with one send explores 1 execution", "[algo][dpor]") {
 
 TEST_CASE("single thread with multiple sends explores 1 execution", "[algo][dpor]") {
   DporConfig config;
-  config.program.threads[1] = [](const ThreadTrace&,
+  config.program.threads[1] = [](const ThreadTrace& trace,
                                  std::size_t step) -> std::optional<EventLabel> {
     if (step < 3) {
       return SendLabel{.destination = 2, .value = "msg"};
@@ -228,7 +228,7 @@ TEST_CASE("two threads, one send-receive pair explores 1 execution", "[algo][dpo
   DporConfig config;
 
   // Thread 1: send to thread 2.
-  config.program.threads[1] = [](const ThreadTrace&,
+  config.program.threads[1] = [](const ThreadTrace& trace,
                                  std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 2, .value = "x"};
@@ -255,7 +255,7 @@ TEST_CASE("two threads, one send-receive pair explores 1 execution", "[algo][dpo
 TEST_CASE("error event results in ErrorFound", "[algo][dpor]") {
   DporConfig config;
 
-  config.program.threads[1] = [](const ThreadTrace&,
+  config.program.threads[1] = [](const ThreadTrace& trace,
                                  std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return ErrorLabel{.message = "boom"};
@@ -316,7 +316,7 @@ TEST_CASE("two sends to same receiver explores 2 executions", "[algo][dpor]") {
   DporConfig config;
 
   // Thread 1: send "a" to thread 3.
-  config.program.threads[1] = [](const ThreadTrace&,
+  config.program.threads[1] = [](const ThreadTrace& trace,
                                  std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 3, .value = "a"};
@@ -354,7 +354,7 @@ TEST_CASE("s+s+r: two sends from one thread, one receive, explores 2 executions"
   DporConfig config;
 
   // Thread 1: send "a" then send "b" to thread 2.
-  config.program.threads[1] = [](const ThreadTrace&,
+  config.program.threads[1] = [](const ThreadTrace& trace,
                                  std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 2, .value = "a"};
@@ -931,7 +931,7 @@ TEST_CASE("cycle-inducing rf assignment is pruned by consistency check", "[algo]
   };
 
   // Thread 2: send to thread 1, then receive from thread 1.
-  config.program.threads[2] = [](const ThreadTrace& trace,
+  config.program.threads[2] = [](const ThreadTrace&,
                                  std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "b"};

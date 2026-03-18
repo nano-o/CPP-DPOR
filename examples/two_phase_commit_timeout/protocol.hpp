@@ -66,8 +66,7 @@ inline std::string serialize(const Message& msg) {
           return std::string("VOTE ") + std::to_string(m.from) + " " +
                  (m.vote == Vote::Yes ? "YES" : "NO");
         } else if constexpr (std::is_same_v<T, DecisionMsg>) {
-          return std::string("DECISION ") +
-                 (m.decision == Decision::Commit ? "COMMIT" : "ABORT");
+          return std::string("DECISION ") + (m.decision == Decision::Commit ? "COMMIT" : "ABORT");
         } else if constexpr (std::is_same_v<T, Ack>) {
           return std::string("ACK ") + std::to_string(m.from);
         }
@@ -142,8 +141,7 @@ class Environment {
   // the callback is invoked. If a timer with the same id already exists, it is
   // replaced. The callback returns the same continuation flag as receive():
   // true means the protocol still needs input, false means it is done.
-  virtual void set_timer(TimerId id, std::size_t timeout_ms,
-                         TimerCallback callback) = 0;
+  virtual void set_timer(TimerId id, std::size_t timeout_ms, TimerCallback callback) = 0;
 
   // Cancel a previously set timer. No-op if the timer doesn't exist or has
   // already fired.
@@ -156,10 +154,8 @@ class Environment {
 
 class Coordinator {
  public:
-  explicit Coordinator(std::size_t num_participants,
-                       bool bug_on_p1_no = false,
-                       std::size_t vote_timeout_ms = 100,
-                       std::size_t ack_timeout_ms = 1000)
+  explicit Coordinator(std::size_t num_participants, bool bug_on_p1_no = false,
+                       std::size_t vote_timeout_ms = 100, std::size_t ack_timeout_ms = 1000)
       : num_participants_(num_participants),
         bug_on_p1_no_(bug_on_p1_no),
         vote_timeout_ms_(vote_timeout_ms),
@@ -180,9 +176,7 @@ class Coordinator {
       env.send(pid, Prepare{});
     }
     env.set_timer(kVoteTimeoutTimerId, vote_timeout_ms_,
-                  [this](Environment& timer_env) {
-                    return on_vote_timeout(timer_env);
-                  });
+                  [this](Environment& timer_env) { return on_vote_timeout(timer_env); });
     return true;
   }
 
@@ -192,8 +186,7 @@ class Coordinator {
     switch (phase_) {
       case Phase::CollectingVotes: {
         const auto* vote = std::get_if<VoteMsg>(&msg);
-        if (vote == nullptr || !is_valid_participant(vote->from) ||
-            vote_seen_[vote->from]) {
+        if (vote == nullptr || !is_valid_participant(vote->from) || vote_seen_[vote->from]) {
           return true;
         }
 
@@ -202,8 +195,7 @@ class Coordinator {
         if (vote->vote == Vote::No) {
           all_yes_ = false;
           if (bug_on_p1_no_ && vote->from == 1) {
-            throw std::logic_error(
-                "BUG: coordinator cannot handle No vote from participant 1");
+            throw std::logic_error("BUG: coordinator cannot handle No vote from participant 1");
           }
         }
         if (votes_received_ < num_participants_) {
@@ -217,8 +209,7 @@ class Coordinator {
       }
       case Phase::CollectingAcks: {
         const auto* ack = std::get_if<Ack>(&msg);
-        if (ack == nullptr || !is_valid_participant(ack->from) ||
-            ack_seen_[ack->from]) {
+        if (ack == nullptr || !is_valid_participant(ack->from) || ack_seen_[ack->from]) {
           return true;
         }
 
@@ -237,9 +228,7 @@ class Coordinator {
     return false;
   }
 
-  [[nodiscard]] std::optional<Decision> decision() const noexcept {
-    return decision_;
-  }
+  [[nodiscard]] std::optional<Decision> decision() const noexcept { return decision_; }
 
  private:
   static constexpr TimerId kVoteTimeoutTimerId = 1;
@@ -272,9 +261,7 @@ class Coordinator {
       env.send(pid, DecisionMsg{*decision_});
     }
     env.set_timer(kAckTimeoutTimerId, ack_timeout_ms_,
-                  [this](Environment& timer_env) {
-                    return on_ack_timeout(timer_env);
-                  });
+                  [this](Environment& timer_env) { return on_ack_timeout(timer_env); });
     phase_ = Phase::CollectingAcks;
   }
 
@@ -300,8 +287,7 @@ class Coordinator {
 
 class Participant {
  public:
-  explicit Participant(ParticipantId id,
-                       std::size_t decision_timeout_ms = 1000)
+  explicit Participant(ParticipantId id, std::size_t decision_timeout_ms = 1000)
       : id_(id), decision_timeout_ms_(decision_timeout_ms) {}
 
   // Kick off the protocol: participant waits for Prepare, so it just
@@ -325,9 +311,7 @@ class Participant {
         auto vote = env.get_vote();
         env.send(kCoordinator, VoteMsg{id_, vote});
         env.set_timer(kDecisionTimeoutTimerId, decision_timeout_ms_,
-                      [this](Environment& timer_env) {
-                        return on_decision_timeout(timer_env);
-                      });
+                      [this](Environment& timer_env) { return on_decision_timeout(timer_env); });
         state_ = State::WaitDecision;
         return true;
       }
@@ -350,9 +334,7 @@ class Participant {
   }
 
   [[nodiscard]] ParticipantId id() const noexcept { return id_; }
-  [[nodiscard]] std::optional<Decision> outcome() const noexcept {
-    return outcome_;
-  }
+  [[nodiscard]] std::optional<Decision> outcome() const noexcept { return outcome_; }
 
  private:
   static constexpr TimerId kDecisionTimeoutTimerId = 1;

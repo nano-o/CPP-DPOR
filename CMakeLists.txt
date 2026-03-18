@@ -24,44 +24,37 @@ endif()
 
 include(cmake/StaticAnalysis.cmake)
 
-add_library(dpor)
+add_library(dpor INTERFACE)
 add_library(dpor::dpor ALIAS dpor)
 
-target_sources(
-  dpor
-  PRIVATE
-    src/api/session.cpp
-)
-
-target_compile_features(dpor PUBLIC cxx_std_20)
+target_compile_features(dpor INTERFACE cxx_std_20)
 
 set_target_properties(
   dpor
   PROPERTIES
-    VERSION ${PROJECT_VERSION}
-    SOVERSION ${PROJECT_VERSION_MAJOR}
     EXPORT_NAME dpor
 )
 
 target_include_directories(
   dpor
-  PUBLIC
+  INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
+# Internal build target for the header-only library. This gives warnings and
+# static-analysis tools a concrete translation unit to compile without changing
+# the public package shape.
+add_library(dpor_header_check OBJECT src/header_check.cpp)
+target_link_libraries(dpor_header_check PRIVATE dpor::dpor)
 if(DPOR_ENABLE_WARNINGS)
-  dpor_set_project_warnings(dpor)
+  dpor_set_project_warnings(dpor_header_check)
 endif()
-
-dpor_apply_static_analysis(dpor)
+dpor_apply_static_analysis(dpor_header_check)
 
 install(
   TARGETS dpor
   EXPORT dporTargets
-  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 

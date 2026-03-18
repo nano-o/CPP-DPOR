@@ -1,4 +1,5 @@
 #include "dpor/model/consistency.hpp"
+
 #include "dpor/model/execution_graph.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -11,21 +12,14 @@ namespace {
 using namespace dpor::model;
 
 bool has_issue(const ConsistencyResult& result, const ConsistencyIssueCode code) {
-  return std::any_of(
-      result.issues.begin(),
-      result.issues.end(),
-      [code](const ConsistencyIssue& issue) {
-        return issue.code == code;
-      });
+  return std::any_of(result.issues.begin(), result.issues.end(),
+                     [code](const ConsistencyIssue& issue) { return issue.code == code; });
 }
 
 std::size_t count_issues(const ConsistencyResult& result, const ConsistencyIssueCode code) {
-  return static_cast<std::size_t>(std::count_if(
-      result.issues.begin(),
-      result.issues.end(),
-      [code](const ConsistencyIssue& issue) {
-        return issue.code == code;
-      }));
+  return static_cast<std::size_t>(
+      std::count_if(result.issues.begin(), result.issues.end(),
+                    [code](const ConsistencyIssue& issue) { return issue.code == code; }));
 }
 
 std::vector<ConsistencyIssueCode> issue_codes(const ConsistencyResult& result) {
@@ -90,8 +84,7 @@ TEST_CASE("graph with non-communication events is consistent", "[model][consiste
 TEST_CASE("simple well-formed send-receive pair is consistent", "[model][consistency]") {
   ExecutionGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "ok"});
-  const auto r = graph.add_event(
-      2, make_receive_label_from_values<Value>({"ok"}));
+  const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"ok"}));
   graph.set_reads_from(r, s);
 
   const AsyncConsistencyChecker checker;
@@ -102,11 +95,9 @@ TEST_CASE("simple well-formed send-receive pair is consistent", "[model][consist
 TEST_CASE("multiple independent send-receive pairs are consistent", "[model][consistency]") {
   ExecutionGraph graph;
   const auto s0 = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
-  const auto r0 = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
+  const auto r0 = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
   const auto s1 = graph.add_event(3, SendLabel{.destination = 4, .value = "y"});
-  const auto r1 = graph.add_event(
-      4, make_receive_label_from_values<Value>({"y"}));
+  const auto r1 = graph.add_event(4, make_receive_label_from_values<Value>({"y"}));
 
   graph.set_reads_from(r0, s0);
   graph.set_reads_from(r1, s1);
@@ -120,11 +111,9 @@ TEST_CASE("chain: thread 1 sends to 2, thread 2 sends to 3 (acyclic)", "[model][
   ExecutionGraph graph;
 
   const auto s1 = graph.add_event(1, SendLabel{.destination = 2, .value = "a"});
-  const auto r2 = graph.add_event(
-      2, make_receive_label_from_values<Value>({"a"}));
+  const auto r2 = graph.add_event(2, make_receive_label_from_values<Value>({"a"}));
   const auto s2 = graph.add_event(2, SendLabel{.destination = 3, .value = "b"});
-  const auto r3 = graph.add_event(
-      3, make_receive_label_from_values<Value>({"b"}));
+  const auto r3 = graph.add_event(3, make_receive_label_from_values<Value>({"b"}));
 
   graph.set_reads_from(r2, s1);
   graph.set_reads_from(r3, s2);
@@ -156,7 +145,7 @@ TEST_CASE("non-blocking receive reading bottom is consistent", "[model][consiste
 }
 
 TEST_CASE("blocking receive reading bottom reports BlockingReceiveReadsBottom",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
   const auto r = graph.add_event(2, make_receive_label<Value>());
   graph.set_reads_from_bottom(r);
@@ -170,7 +159,7 @@ TEST_CASE("blocking receive reading bottom reports BlockingReceiveReadsBottom",
 // --- InvalidEventReference ---
 
 TEST_CASE("reads-from with invalid receive id reports InvalidEventReference",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
   graph.set_reads_from(999, s);
@@ -182,10 +171,9 @@ TEST_CASE("reads-from with invalid receive id reports InvalidEventReference",
 }
 
 TEST_CASE("reads-from with invalid source id reports InvalidEventReference",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
-  const auto r = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
+  const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
   graph.set_reads_from(r, 999);
 
   const AsyncConsistencyChecker checker;
@@ -195,7 +183,7 @@ TEST_CASE("reads-from with invalid source id reports InvalidEventReference",
 }
 
 TEST_CASE("reads-from with both ids invalid reports two InvalidEventReference issues",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
   static_cast<void>(graph.add_event(1, SendLabel{.destination = 2, .value = "x"}));
   graph.set_reads_from(888, 999);
@@ -209,7 +197,7 @@ TEST_CASE("reads-from with both ids invalid reports two InvalidEventReference is
 // --- ReadsFromTargetNotReceive ---
 
 TEST_CASE("reads-from target that is a send reports ReadsFromTargetNotReceive",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
   const auto s0 = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto s1 = graph.add_event(2, SendLabel{.destination = 1, .value = "y"});
@@ -222,7 +210,7 @@ TEST_CASE("reads-from target that is a send reports ReadsFromTargetNotReceive",
 }
 
 TEST_CASE("reads-from target that is a block reports ReadsFromTargetNotReceive",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
   const auto b = graph.add_event(1, BlockLabel{});
   const auto s = graph.add_event(2, SendLabel{.destination = 1, .value = "x"});
@@ -237,12 +225,10 @@ TEST_CASE("reads-from target that is a block reports ReadsFromTargetNotReceive",
 // --- ReadsFromSourceNotSend ---
 
 TEST_CASE("reads-from source that is a receive reports ReadsFromSourceNotSend",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
-  const auto r0 = graph.add_event(
-      1, make_receive_label_from_values<Value>({"x"}));
-  const auto r1 = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
+  const auto r0 = graph.add_event(1, make_receive_label_from_values<Value>({"x"}));
+  const auto r1 = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
   graph.set_reads_from(r0, r1);
 
   const AsyncConsistencyChecker checker;
@@ -252,11 +238,10 @@ TEST_CASE("reads-from source that is a receive reports ReadsFromSourceNotSend",
 }
 
 TEST_CASE("reads-from source that is error reports ReadsFromSourceNotSend",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
   const auto e = graph.add_event(1, ErrorLabel{});
-  const auto r = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
+  const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
   graph.set_reads_from(r, e);
 
   const AsyncConsistencyChecker checker;
@@ -268,10 +253,9 @@ TEST_CASE("reads-from source that is error reports ReadsFromSourceNotSend",
 // --- MissingReadsFromForReceive ---
 
 TEST_CASE("receive without reads-from source reports MissingReadsFromForReceive",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
-  static_cast<void>(graph.add_event(
-      1, make_receive_label_from_values<Value>({"x"})));
+  static_cast<void>(graph.add_event(1, make_receive_label_from_values<Value>({"x"})));
 
   const AsyncConsistencyChecker checker;
   const auto result = checker.check(graph);
@@ -280,12 +264,10 @@ TEST_CASE("receive without reads-from source reports MissingReadsFromForReceive"
 }
 
 TEST_CASE("multiple receives without sources each report MissingReadsFromForReceive",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
-  static_cast<void>(graph.add_event(
-      1, make_receive_label_from_values<Value>({"x"})));
-  static_cast<void>(graph.add_event(
-      2, make_receive_label_from_values<Value>({"y"})));
+  static_cast<void>(graph.add_event(1, make_receive_label_from_values<Value>({"x"})));
+  static_cast<void>(graph.add_event(2, make_receive_label_from_values<Value>({"y"})));
 
   const AsyncConsistencyChecker checker;
   const auto result = checker.check(graph);
@@ -294,13 +276,11 @@ TEST_CASE("multiple receives without sources each report MissingReadsFromForRece
 }
 
 TEST_CASE("one receive matched, one unmatched: only the unmatched reports missing source",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
-  const auto r0 = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
-  static_cast<void>(graph.add_event(
-      3, make_receive_label_from_values<Value>({"y"})));
+  const auto r0 = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
+  static_cast<void>(graph.add_event(3, make_receive_label_from_values<Value>({"y"})));
 
   graph.set_reads_from(r0, s);
 
@@ -313,13 +293,11 @@ TEST_CASE("one receive matched, one unmatched: only the unmatched reports missin
 // --- SendConsumedMultipleTimes ---
 
 TEST_CASE("one send consumed by two receives reports SendConsumedMultipleTimes",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
-  const auto r0 = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
-  const auto r1 = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
+  const auto r0 = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
+  const auto r1 = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
 
   graph.set_reads_from(r0, s);
   graph.set_reads_from(r1, s);
@@ -331,15 +309,12 @@ TEST_CASE("one send consumed by two receives reports SendConsumedMultipleTimes",
 }
 
 TEST_CASE("one send consumed by three receives reports SendConsumedMultipleTimes twice",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
-  const auto r0 = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
-  const auto r1 = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
-  const auto r2 = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
+  const auto r0 = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
+  const auto r1 = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
+  const auto r2 = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
 
   graph.set_reads_from(r0, s);
   graph.set_reads_from(r1, s);
@@ -353,12 +328,10 @@ TEST_CASE("one send consumed by three receives reports SendConsumedMultipleTimes
 
 // --- ReceiveDestinationMismatch ---
 
-TEST_CASE("receive in wrong thread reports ReceiveDestinationMismatch",
-    "[model][consistency]") {
+TEST_CASE("receive in wrong thread reports ReceiveDestinationMismatch", "[model][consistency]") {
   ExecutionGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 5, .value = "x"});
-  const auto r = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
+  const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
   graph.set_reads_from(r, s);
 
   const AsyncConsistencyChecker checker;
@@ -368,11 +341,10 @@ TEST_CASE("receive in wrong thread reports ReceiveDestinationMismatch",
 }
 
 TEST_CASE("no ReceiveDestinationMismatch when send targets the receive thread",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
-  const auto r = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
+  const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
   graph.set_reads_from(r, s);
 
   const AsyncConsistencyChecker checker;
@@ -382,12 +354,10 @@ TEST_CASE("no ReceiveDestinationMismatch when send targets the receive thread",
 
 // --- ReceiveValueMismatch ---
 
-TEST_CASE("receive that rejects sent value reports ReceiveValueMismatch",
-    "[model][consistency]") {
+TEST_CASE("receive that rejects sent value reports ReceiveValueMismatch", "[model][consistency]") {
   ExecutionGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "unexpected"});
-  const auto r = graph.add_event(
-      2, make_receive_label_from_values<Value>({"expected"}));
+  const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"expected"}));
   graph.set_reads_from(r, s);
 
   const AsyncConsistencyChecker checker;
@@ -397,13 +367,11 @@ TEST_CASE("receive that rejects sent value reports ReceiveValueMismatch",
 }
 
 TEST_CASE("receive with custom predicate that rejects reports ReceiveValueMismatch",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "short"});
-  const auto r = graph.add_event(
-      2,
-      make_receive_label<Value>(
-          [](const Value& v) { return v.size() > 10; }));
+  const auto r =
+      graph.add_event(2, make_receive_label<Value>([](const Value& v) { return v.size() > 10; }));
   graph.set_reads_from(r, s);
 
   const AsyncConsistencyChecker checker;
@@ -412,14 +380,11 @@ TEST_CASE("receive with custom predicate that rejects reports ReceiveValueMismat
   REQUIRE(has_issue(result, ConsistencyIssueCode::ReceiveValueMismatch));
 }
 
-TEST_CASE("receive with custom predicate that accepts is consistent",
-    "[model][consistency]") {
+TEST_CASE("receive with custom predicate that accepts is consistent", "[model][consistency]") {
   ExecutionGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "long enough string"});
-  const auto r = graph.add_event(
-      2,
-      make_receive_label<Value>(
-          [](const Value& v) { return v.size() > 10; }));
+  const auto r =
+      graph.add_event(2, make_receive_label<Value>([](const Value& v) { return v.size() > 10; }));
   graph.set_reads_from(r, s);
 
   const AsyncConsistencyChecker checker;
@@ -432,14 +397,10 @@ TEST_CASE("receive with custom predicate that accepts is consistent",
 TEST_CASE("two-thread cycle: recv before send on both threads", "[model][consistency]") {
   ExecutionGraph graph;
 
-  const auto r1 = graph.add_event_with_index(
-      1, 0, make_receive_label_from_values<Value>({"b"}));
-  const auto s1 = graph.add_event_with_index(
-      1, 1, SendLabel{.destination = 2, .value = "a"});
-  const auto r2 = graph.add_event_with_index(
-      2, 0, make_receive_label_from_values<Value>({"a"}));
-  const auto s2 = graph.add_event_with_index(
-      2, 1, SendLabel{.destination = 1, .value = "b"});
+  const auto r1 = graph.add_event_with_index(1, 0, make_receive_label_from_values<Value>({"b"}));
+  const auto s1 = graph.add_event_with_index(1, 1, SendLabel{.destination = 2, .value = "a"});
+  const auto r2 = graph.add_event_with_index(2, 0, make_receive_label_from_values<Value>({"a"}));
+  const auto s2 = graph.add_event_with_index(2, 1, SendLabel{.destination = 1, .value = "b"});
 
   graph.set_reads_from(r1, s2);
   graph.set_reads_from(r2, s1);
@@ -454,22 +415,16 @@ TEST_CASE("three-thread cycle: A->B->C->A forms causal cycle", "[model][consiste
   ExecutionGraph graph;
 
   // Thread 1: recv from thread 3, then send to thread 2
-  const auto r1 = graph.add_event_with_index(
-      1, 0, make_receive_label_from_values<Value>({"c"}));
-  const auto s1 = graph.add_event_with_index(
-      1, 1, SendLabel{.destination = 2, .value = "a"});
+  const auto r1 = graph.add_event_with_index(1, 0, make_receive_label_from_values<Value>({"c"}));
+  const auto s1 = graph.add_event_with_index(1, 1, SendLabel{.destination = 2, .value = "a"});
 
   // Thread 2: recv from thread 1, then send to thread 3
-  const auto r2 = graph.add_event_with_index(
-      2, 0, make_receive_label_from_values<Value>({"a"}));
-  const auto s2 = graph.add_event_with_index(
-      2, 1, SendLabel{.destination = 3, .value = "b"});
+  const auto r2 = graph.add_event_with_index(2, 0, make_receive_label_from_values<Value>({"a"}));
+  const auto s2 = graph.add_event_with_index(2, 1, SendLabel{.destination = 3, .value = "b"});
 
   // Thread 3: recv from thread 2, then send to thread 1
-  const auto r3 = graph.add_event_with_index(
-      3, 0, make_receive_label_from_values<Value>({"b"}));
-  const auto s3 = graph.add_event_with_index(
-      3, 1, SendLabel{.destination = 1, .value = "c"});
+  const auto r3 = graph.add_event_with_index(3, 0, make_receive_label_from_values<Value>({"b"}));
+  const auto s3 = graph.add_event_with_index(3, 1, SendLabel{.destination = 1, .value = "c"});
 
   graph.set_reads_from(r1, s3);
   graph.set_reads_from(r2, s1);
@@ -482,20 +437,16 @@ TEST_CASE("three-thread cycle: A->B->C->A forms causal cycle", "[model][consiste
 }
 
 TEST_CASE("acyclic cross-thread communication: send before recv on both threads",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
 
   // Thread 1: send to 2, then recv from 2
-  const auto s1 = graph.add_event_with_index(
-      1, 0, SendLabel{.destination = 2, .value = "a"});
-  const auto r1 = graph.add_event_with_index(
-      1, 1, make_receive_label_from_values<Value>({"b"}));
+  const auto s1 = graph.add_event_with_index(1, 0, SendLabel{.destination = 2, .value = "a"});
+  const auto r1 = graph.add_event_with_index(1, 1, make_receive_label_from_values<Value>({"b"}));
 
   // Thread 2: recv from 1 (program-order first), then send to 1
-  const auto r2 = graph.add_event_with_index(
-      2, 0, make_receive_label_from_values<Value>({"a"}));
-  const auto s2 = graph.add_event_with_index(
-      2, 1, SendLabel{.destination = 1, .value = "b"});
+  const auto r2 = graph.add_event_with_index(2, 0, make_receive_label_from_values<Value>({"a"}));
+  const auto s2 = graph.add_event_with_index(2, 1, SendLabel{.destination = 1, .value = "b"});
 
   graph.set_reads_from(r1, s2);
   graph.set_reads_from(r2, s1);
@@ -506,8 +457,7 @@ TEST_CASE("acyclic cross-thread communication: send before recv on both threads"
   REQUIRE(result.is_consistent());
 }
 
-TEST_CASE("self-loop: send reads-from itself reports target-not-receive",
-    "[model][consistency]") {
+TEST_CASE("self-loop: send reads-from itself reports target-not-receive", "[model][consistency]") {
   ExecutionGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 1, .value = "x"});
   graph.set_reads_from(s, s);
@@ -524,11 +474,10 @@ TEST_CASE("self-loop: send reads-from itself reports target-not-receive",
 // --- Multiple simultaneous issues ---
 
 TEST_CASE("graph with destination mismatch AND value mismatch reports both",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 5, .value = "wrong"});
-  const auto r = graph.add_event(
-      2, make_receive_label_from_values<Value>({"right"}));
+  const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"right"}));
   graph.set_reads_from(r, s);
 
   const AsyncConsistencyChecker checker;
@@ -538,8 +487,7 @@ TEST_CASE("graph with destination mismatch AND value mismatch reports both",
   REQUIRE(has_issue(result, ConsistencyIssueCode::ReceiveValueMismatch));
 }
 
-TEST_CASE("invalid references skip further endpoint checks for that edge",
-    "[model][consistency]") {
+TEST_CASE("invalid references skip further endpoint checks for that edge", "[model][consistency]") {
   ExecutionGraph graph;
   static_cast<void>(graph.add_event(1, SendLabel{.destination = 2, .value = "x"}));
   graph.set_reads_from(500, 600);
@@ -554,11 +502,10 @@ TEST_CASE("invalid references skip further endpoint checks for that edge",
 }
 
 TEST_CASE("wrong endpoint kinds skip destination and value checks for that edge",
-    "[model][consistency]") {
+          "[model][consistency]") {
   ExecutionGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
-  const auto r = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
+  const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
 
   // send -> send: target is not a receive, source is valid
   graph.set_reads_from(s, s);
@@ -576,7 +523,7 @@ TEST_CASE("wrong endpoint kinds skip destination and value checks for that edge"
 }
 
 TEST_CASE("exploration-graph checker overload preserves malformed rf diagnostics",
-    "[model][consistency][exploration_graph]") {
+          "[model][consistency][exploration_graph]") {
   ExplorationGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
   graph.set_reads_from(12345, s);
@@ -590,7 +537,8 @@ TEST_CASE("exploration-graph checker overload preserves malformed rf diagnostics
   REQUIRE_FALSE(has_issue(exploration_result, ConsistencyIssueCode::CausalCycle));
 }
 
-TEST_CASE("exploration-graph checker overload still reports cycle alongside malformed rf diagnostics",
+TEST_CASE(
+    "exploration-graph checker overload still reports cycle alongside malformed rf diagnostics",
     "[model][consistency][exploration_graph]") {
   ExplorationGraph graph;
 
@@ -613,19 +561,14 @@ TEST_CASE("exploration-graph checker overload still reports cycle alongside malf
 }
 
 TEST_CASE("exploration-graph checker overload still reports cycle with non-structural issues",
-    "[model][consistency][exploration_graph]") {
+          "[model][consistency][exploration_graph]") {
   ExplorationGraph graph;
 
-  const auto r1 = graph.add_event(
-      1, make_receive_label_from_values<Value>({"b"}));
-  const auto s1 = graph.add_event(
-      1, SendLabel{.destination = 2, .value = "a"});
-  const auto r2 = graph.add_event(
-      2, make_receive_label_from_values<Value>({"a"}));
-  const auto s2 = graph.add_event(
-      2, SendLabel{.destination = 1, .value = "b"});
-  static_cast<void>(graph.add_event(
-      3, make_receive_label_from_values<Value>({"c"})));
+  const auto r1 = graph.add_event(1, make_receive_label_from_values<Value>({"b"}));
+  const auto s1 = graph.add_event(1, SendLabel{.destination = 2, .value = "a"});
+  const auto r2 = graph.add_event(2, make_receive_label_from_values<Value>({"a"}));
+  const auto s2 = graph.add_event(2, SendLabel{.destination = 1, .value = "b"});
+  static_cast<void>(graph.add_event(3, make_receive_label_from_values<Value>({"c"})));
 
   graph.set_reads_from(r1, s2);
   graph.set_reads_from(r2, s1);
@@ -640,7 +583,7 @@ TEST_CASE("exploration-graph checker overload still reports cycle with non-struc
 }
 
 TEST_CASE("exploration-graph checker overload leaves cold porf cache untouched",
-    "[model][consistency][exploration_graph]") {
+          "[model][consistency][exploration_graph]") {
   ExplorationGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
@@ -657,7 +600,7 @@ TEST_CASE("exploration-graph checker overload leaves cold porf cache untouched",
 }
 
 TEST_CASE("exploration-graph checker overload reuses warm porf cache",
-    "[model][consistency][exploration_graph]") {
+          "[model][consistency][exploration_graph]") {
   ExplorationGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
   const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
@@ -674,7 +617,8 @@ TEST_CASE("exploration-graph checker overload reuses warm porf cache",
   REQUIRE(graph.has_porf_cache());
 }
 
-TEST_CASE("exploration-graph checker overload still detects cycles after with_rf clears known acyclicity",
+TEST_CASE(
+    "exploration-graph checker overload still detects cycles after with_rf clears known acyclicity",
     "[model][consistency][exploration_graph]") {
   ExplorationGraph graph;
   const auto r1 = graph.add_event(1, make_receive_label<Value>());
@@ -704,12 +648,9 @@ TEST_CASE("consistency checker works with custom value type", "[model][consisten
   };
 
   ExecutionGraphT<Msg> graph;
-  const auto s = graph.add_event(
-      1, SendLabelT<Msg>{.destination = 2, .value = Msg{.code = 42}});
-  const auto r = graph.add_event(
-      2,
-      make_receive_label<Msg>(
-          [](const Msg& m) { return m.code == 42; }));
+  const auto s = graph.add_event(1, SendLabelT<Msg>{.destination = 2, .value = Msg{.code = 42}});
+  const auto r =
+      graph.add_event(2, make_receive_label<Msg>([](const Msg& m) { return m.code == 42; }));
   graph.set_reads_from(r, s);
 
   const AsyncConsistencyCheckerT<Msg> checker;
@@ -723,12 +664,9 @@ TEST_CASE("consistency checker with custom type detects value mismatch", "[model
   };
 
   ExecutionGraphT<Msg> graph;
-  const auto s = graph.add_event(
-      1, SendLabelT<Msg>{.destination = 2, .value = Msg{.code = 99}});
-  const auto r = graph.add_event(
-      2,
-      make_receive_label<Msg>(
-          [](const Msg& m) { return m.code == 42; }));
+  const auto s = graph.add_event(1, SendLabelT<Msg>{.destination = 2, .value = Msg{.code = 99}});
+  const auto r =
+      graph.add_event(2, make_receive_label<Msg>([](const Msg& m) { return m.code == 42; }));
   graph.set_reads_from(r, s);
 
   const AsyncConsistencyCheckerT<Msg> checker;
@@ -739,8 +677,7 @@ TEST_CASE("consistency checker with custom type detects value mismatch", "[model
 
 // --- Larger graphs ---
 
-TEST_CASE("four-thread diamond: no cycle when communication is acyclic",
-    "[model][consistency]") {
+TEST_CASE("four-thread diamond: no cycle when communication is acyclic", "[model][consistency]") {
   ExecutionGraph graph;
 
   // Thread 1 sends to threads 2 and 3
@@ -748,20 +685,16 @@ TEST_CASE("four-thread diamond: no cycle when communication is acyclic",
   const auto s1b = graph.add_event(1, SendLabel{.destination = 3, .value = "b"});
 
   // Thread 2 receives from 1, sends to 4
-  const auto r2 = graph.add_event(
-      2, make_receive_label_from_values<Value>({"a"}));
+  const auto r2 = graph.add_event(2, make_receive_label_from_values<Value>({"a"}));
   const auto s2 = graph.add_event(2, SendLabel{.destination = 4, .value = "c"});
 
   // Thread 3 receives from 1, sends to 4
-  const auto r3 = graph.add_event(
-      3, make_receive_label_from_values<Value>({"b"}));
+  const auto r3 = graph.add_event(3, make_receive_label_from_values<Value>({"b"}));
   const auto s3 = graph.add_event(3, SendLabel{.destination = 4, .value = "d"});
 
   // Thread 4 receives from both 2 and 3
-  const auto r4a = graph.add_event(
-      4, make_receive_label_from_values<Value>({"c"}));
-  const auto r4b = graph.add_event(
-      4, make_receive_label_from_values<Value>({"d"}));
+  const auto r4a = graph.add_event(4, make_receive_label_from_values<Value>({"c"}));
+  const auto r4b = graph.add_event(4, make_receive_label_from_values<Value>({"d"}));
 
   graph.set_reads_from(r2, s1a);
   graph.set_reads_from(r3, s1b);
@@ -773,14 +706,12 @@ TEST_CASE("four-thread diamond: no cycle when communication is acyclic",
   REQUIRE(result.is_consistent());
 }
 
-TEST_CASE("mixed events: sends, receives, blocks, errors in one graph",
-    "[model][consistency]") {
+TEST_CASE("mixed events: sends, receives, blocks, errors in one graph", "[model][consistency]") {
   ExecutionGraph graph;
 
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
   static_cast<void>(graph.add_event(1, BlockLabel{}));
-  const auto r = graph.add_event(
-      2, make_receive_label_from_values<Value>({"x"}));
+  const auto r = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
   static_cast<void>(graph.add_event(2, ErrorLabel{}));
   static_cast<void>(graph.add_event(3, NondeterministicChoiceLabel{.value = "choice_a"}));
 

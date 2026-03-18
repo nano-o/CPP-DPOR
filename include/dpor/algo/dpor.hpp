@@ -761,7 +761,7 @@ template <typename ValueT, typename StopFn, typename EmitFn>
 inline void for_each_backward_revisit_child(
     const model::ExplorationGraphT<ValueT>& graph,
     const typename model::ExplorationGraphT<ValueT>::EventId send_id,
-    StopFn&& should_stop,  // NOLINT(cppcoreguidelines-missing-std-forward)
+    StopFn&& should_stop,       // NOLINT(cppcoreguidelines-missing-std-forward)
     EmitFn&& emit_revisited) {  // NOLINT(cppcoreguidelines-missing-std-forward)
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
 

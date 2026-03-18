@@ -1,6 +1,3 @@
-add_executable(dpor_session_test session_test.cpp)
-target_link_libraries(dpor_session_test PRIVATE dpor::dpor Catch2::Catch2WithMain)
-
 add_executable(dpor_model_types_test model_types_test.cpp)
 target_link_libraries(dpor_model_types_test PRIVATE dpor::dpor Catch2::Catch2WithMain)
 
@@ -19,16 +16,20 @@ target_link_libraries(dpor_dpor_test PRIVATE dpor::dpor Catch2::Catch2WithMain)
 add_executable(dpor_dpor_stress_test dpor_stress_test.cpp)
 target_link_libraries(dpor_dpor_stress_test PRIVATE dpor::dpor Catch2::Catch2WithMain)
 
-dpor_apply_static_analysis(dpor_session_test)
-dpor_apply_static_analysis(dpor_model_types_test)
-dpor_apply_static_analysis(dpor_relation_test)
-dpor_apply_static_analysis(dpor_consistency_test)
-dpor_apply_static_analysis(dpor_exploration_graph_test)
-dpor_apply_static_analysis(dpor_dpor_test)
-dpor_apply_static_analysis(dpor_dpor_stress_test)
+set(DPOR_TEST_TARGETS
+  dpor_model_types_test
+  dpor_relation_test
+  dpor_consistency_test
+  dpor_exploration_graph_test
+  dpor_dpor_test
+  dpor_dpor_stress_test
+)
+
+foreach(target IN LISTS DPOR_TEST_TARGETS)
+  dpor_apply_static_analysis(${target})
+endforeach()
 
 include(Catch)
-catch_discover_tests(dpor_session_test)
 catch_discover_tests(dpor_model_types_test)
 catch_discover_tests(dpor_relation_test)
 catch_discover_tests(dpor_consistency_test)

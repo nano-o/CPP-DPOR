@@ -13,9 +13,8 @@
 namespace tpc_sim {
 
 template <typename T, typename... Args>
-[[nodiscard]] std::optional<EventLabel> try_emplace_protocol_object(
-    std::optional<T>& out,
-    Args&&... args) {
+[[nodiscard]] std::optional<EventLabel> try_emplace_protocol_object(std::optional<T>& out,
+                                                                    Args&&... args) {
   try {
     out.emplace(std::forward<Args>(args)...);
     return std::nullopt;
@@ -28,16 +27,13 @@ template <typename T, typename... Args>
   }
 }
 
-inline ThreadFunction make_nominal_coordinator_function(
-    std::size_t num_participants,
-    bool bug_on_p1_no = false) {
-  return [num_participants, bug_on_p1_no](
-             const ThreadTrace& trace,
-             std::size_t step) -> std::optional<EventLabel> {
+inline ThreadFunction make_nominal_coordinator_function(std::size_t num_participants,
+                                                        bool bug_on_p1_no = false) {
+  return [num_participants, bug_on_p1_no](const ThreadTrace& trace,
+                                          std::size_t step) -> std::optional<EventLabel> {
     NondeterministicVoteEnvironment env(participant_to_thread, step, trace, 0);
     std::optional<tpc::Coordinator> coord;
-    if (const auto error = try_emplace_protocol_object(
-            coord, num_participants, bug_on_p1_no);
+    if (const auto error = try_emplace_protocol_object(coord, num_participants, bug_on_p1_no);
         error.has_value()) {
       return error;
     }
@@ -45,16 +41,13 @@ inline ThreadFunction make_nominal_coordinator_function(
   };
 }
 
-inline ThreadFunction make_crash_before_decision_coordinator_function(
-    std::size_t num_participants,
-    bool bug_on_p1_no = false) {
-  return [num_participants, bug_on_p1_no](
-             const ThreadTrace& trace,
-             std::size_t step) -> std::optional<EventLabel> {
+inline ThreadFunction make_crash_before_decision_coordinator_function(std::size_t num_participants,
+                                                                      bool bug_on_p1_no = false) {
+  return [num_participants, bug_on_p1_no](const ThreadTrace& trace,
+                                          std::size_t step) -> std::optional<EventLabel> {
     CrashBeforeDecisionEnvironment env(participant_to_thread, step, trace, 0);
     std::optional<tpc::Coordinator> coord;
-    if (const auto error = try_emplace_protocol_object(
-            coord, num_participants, bug_on_p1_no);
+    if (const auto error = try_emplace_protocol_object(coord, num_participants, bug_on_p1_no);
         error.has_value()) {
       return error;
     }
@@ -62,51 +55,41 @@ inline ThreadFunction make_crash_before_decision_coordinator_function(
   };
 }
 
-inline ThreadFunction make_participant_function(
-    tpc::ParticipantId pid) {
-  return [pid](const ThreadTrace& trace,
-               std::size_t step) -> std::optional<EventLabel> {
+inline ThreadFunction make_participant_function(tpc::ParticipantId pid) {
+  return [pid](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
     NondeterministicVoteEnvironment env(participant_to_thread, step, trace, 0);
     std::optional<tpc::Participant> participant;
-    if (const auto error = try_emplace_protocol_object(participant, pid);
-        error.has_value()) {
+    if (const auto error = try_emplace_protocol_object(participant, pid); error.has_value()) {
       return error;
     }
     return run_and_capture(*participant, env);
   };
 }
 
-inline Program make_nominal_two_phase_commit_program(
-    std::size_t num_participants,
-    bool bug_on_p1_no = false) {
+inline Program make_nominal_two_phase_commit_program(std::size_t num_participants,
+                                                     bool bug_on_p1_no = false) {
   Program prog;
   prog.threads[participant_to_thread(tpc::kCoordinator)] =
       make_nominal_coordinator_function(num_participants, bug_on_p1_no);
   for (std::size_t pid = 1; pid <= num_participants; ++pid) {
-    prog.threads[participant_to_thread(pid)] =
-        make_participant_function(pid);
+    prog.threads[participant_to_thread(pid)] = make_participant_function(pid);
   }
   return prog;
 }
 
-inline Program make_crash_two_phase_commit_program(
-    std::size_t num_participants,
-    bool bug_on_p1_no = false) {
+inline Program make_crash_two_phase_commit_program(std::size_t num_participants,
+                                                   bool bug_on_p1_no = false) {
   Program prog;
   prog.threads[participant_to_thread(tpc::kCoordinator)] =
-      make_crash_before_decision_coordinator_function(num_participants,
-                                                      bug_on_p1_no);
+      make_crash_before_decision_coordinator_function(num_participants, bug_on_p1_no);
   for (std::size_t pid = 1; pid <= num_participants; ++pid) {
-    prog.threads[participant_to_thread(pid)] =
-        make_participant_function(pid);
+    prog.threads[participant_to_thread(pid)] = make_participant_function(pid);
   }
   return prog;
 }
 
-inline Program make_two_phase_commit_program(
-    std::size_t num_participants,
-    bool inject_crash = true,
-    bool bug_on_p1_no = false) {
+inline Program make_two_phase_commit_program(std::size_t num_participants, bool inject_crash = true,
+                                             bool bug_on_p1_no = false) {
   if (inject_crash) {
     return make_crash_two_phase_commit_program(num_participants, bug_on_p1_no);
   }

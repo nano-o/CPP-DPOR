@@ -497,7 +497,8 @@ class ExplorationGraphT {
     }
 
     std::vector<EventId> kept_ids;
-    kept_ids.reserve(std::count(keep_mask.begin(), keep_mask.end(), std::uint8_t{1}));
+    kept_ids.reserve(
+        static_cast<std::size_t>(std::count(keep_mask.begin(), keep_mask.end(), std::uint8_t{1})));
     std::vector<EventId> id_map(event_count(), kNoSource);
 
     EventId new_id = 0;

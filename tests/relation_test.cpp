@@ -7,13 +7,11 @@
 
 namespace {
 
-std::vector<dpor::model::NodeId> collect_successors(
-    const auto& relation,
-    const dpor::model::NodeId from) {
+std::vector<dpor::model::NodeId> collect_successors(const auto& relation,
+                                                    const dpor::model::NodeId from) {
   std::vector<dpor::model::NodeId> successors;
-  relation.for_each_successor(from, [&](const dpor::model::NodeId to) {
-    successors.push_back(to);
-  });
+  relation.for_each_successor(from,
+                              [&](const dpor::model::NodeId to) { successors.push_back(to); });
   return successors;
 }
 
@@ -41,15 +39,15 @@ TEST_CASE("program order relation derives edges from thread sequences", "[model]
   REQUIRE(collect_successors(po, 5).empty());
 }
 
-TEST_CASE("program order relation validates malformed thread assignments", "[model][relation][po]") {
+TEST_CASE("program order relation validates malformed thread assignments",
+          "[model][relation][po]") {
   dpor::model::ProgramOrderRelation po{3};
 
-  REQUIRE_THROWS_AS(
-      po.set_thread_events({
-          {0, 1},
-          {1, 2},
-      }),
-      std::invalid_argument);
+  REQUIRE_THROWS_AS(po.set_thread_events({
+                        {0, 1},
+                        {1, 2},
+                    }),
+                    std::invalid_argument);
 }
 
 TEST_CASE("explicit relation stores and queries direct edges", "[model][relation][explicit]") {

@@ -33,8 +33,7 @@ struct SimValue {
 using EventLabel = dpor::model::EventLabelT<SimValue>;
 using SendLabel = dpor::model::SendLabelT<SimValue>;
 using ReceiveLabel = dpor::model::ReceiveLabelT<SimValue>;
-using NondeterministicChoiceLabel =
-    dpor::model::NondeterministicChoiceLabelT<SimValue>;
+using NondeterministicChoiceLabel = dpor::model::NondeterministicChoiceLabelT<SimValue>;
 using ObservedValue = dpor::model::ObservedValueT<SimValue>;
 using ExplorationGraph = dpor::model::ExplorationGraphT<SimValue>;
 using ThreadTrace = dpor::algo::ThreadTraceT<SimValue>;

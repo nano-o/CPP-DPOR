@@ -60,9 +60,8 @@ template <typename ValueT>
       rf_edges.push_back("BOTTOM->" + event_signature(graph.event(recv_id)));
       continue;
     }
-    rf_edges.push_back(
-        event_signature(graph.event(source.send_id())) + "->" +
-        event_signature(graph.event(recv_id)));
+    rf_edges.push_back(event_signature(graph.event(source.send_id())) + "->" +
+                       event_signature(graph.event(recv_id)));
   }
   std::sort(rf_edges.begin(), rf_edges.end());
 
@@ -90,22 +89,18 @@ template <typename ValueT>
   program.threads.validate_compact_thread_ids();
   std::vector<model::ThreadId> thread_ids;
   thread_ids.reserve(program.threads.size());
-  program.threads.for_each_assigned([&](const model::ThreadId tid, const auto&) {
-    thread_ids.push_back(tid);
-  });
+  program.threads.for_each_assigned(
+      [&](const model::ThreadId tid, const auto&) { thread_ids.push_back(tid); });
   return thread_ids;
 }
 
 template <typename ValueT>
-[[nodiscard]] inline bool has_compatible_unread_send(
-    const model::ExplorationGraphT<ValueT>& graph,
-    const model::ThreadId tid,
-    const model::ReceiveLabelT<ValueT>& recv) {
+[[nodiscard]] inline bool has_compatible_unread_send(const model::ExplorationGraphT<ValueT>& graph,
+                                                     const model::ThreadId tid,
+                                                     const model::ReceiveLabelT<ValueT>& recv) {
   for (const auto send_id : graph.unread_send_event_ids()) {
     const auto* send = model::as_send(graph.event(send_id));
-    if (send != nullptr &&
-        send->destination == tid &&
-        recv.accepts(send->value)) {
+    if (send != nullptr && send->destination == tid && recv.accepts(send->value)) {
       return true;
     }
   }
@@ -113,10 +108,8 @@ template <typename ValueT>
 }
 
 template <typename ValueT>
-[[nodiscard]] inline typename model::ExplorationGraphT<ValueT>::EventId
-find_last_event_in_thread(
-    const model::ExplorationGraphT<ValueT>& graph,
-    const model::ThreadId tid) {
+[[nodiscard]] inline typename model::ExplorationGraphT<ValueT>::EventId find_last_event_in_thread(
+    const model::ExplorationGraphT<ValueT>& graph, const model::ThreadId tid) {
   using EventId = typename model::ExplorationGraphT<ValueT>::EventId;
 
   EventId last_id = model::ExplorationGraphT<ValueT>::kNoSource;
@@ -134,8 +127,7 @@ find_last_event_in_thread(
 
 template <typename ValueT>
 [[nodiscard]] inline std::vector<OracleTransitionT<ValueT>> enumerate_enabled_transitions(
-    const algo::ProgramT<ValueT>& program,
-    const model::ExplorationGraphT<ValueT>& graph) {
+    const algo::ProgramT<ValueT>& program, const model::ExplorationGraphT<ValueT>& graph) {
   using OracleTransition = OracleTransitionT<ValueT>;
 
   const auto thread_ids = sorted_thread_ids(program);
@@ -155,17 +147,14 @@ template <typename ValueT>
     }
 
     if (std::holds_alternative<model::BlockLabel>(*next_label)) {
-      throw std::logic_error(
-          "stress program returned BlockLabel; blocks are internal to DPOR");
+      throw std::logic_error("stress program returned BlockLabel; blocks are internal to DPOR");
     }
 
     if (const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&*next_label)) {
       bool found_compatible = false;
       for (const auto send_id : graph.unread_send_event_ids()) {
         const auto* send = model::as_send(graph.event(send_id));
-        if (send == nullptr ||
-            send->destination != tid ||
-            !recv->accepts(send->value)) {
+        if (send == nullptr || send->destination != tid || !recv->accepts(send->value)) {
           continue;
         }
         found_compatible = true;
@@ -191,8 +180,7 @@ template <typename ValueT>
       continue;
     }
 
-    if (const auto* nd =
-            std::get_if<model::NondeterministicChoiceLabelT<ValueT>>(&*next_label)) {
+    if (const auto* nd = std::get_if<model::NondeterministicChoiceLabelT<ValueT>>(&*next_label)) {
       if (nd->choices.empty()) {
         transitions.push_back(OracleTransition{
             .thread = tid,
@@ -226,8 +214,7 @@ template <typename ValueT>
 
 template <typename ValueT>
 [[nodiscard]] inline std::vector<model::ExplorationGraphT<ValueT>> enumerate_reschedulable_graphs(
-    const algo::ProgramT<ValueT>& program,
-    const model::ExplorationGraphT<ValueT>& graph) {
+    const algo::ProgramT<ValueT>& program, const model::ExplorationGraphT<ValueT>& graph) {
   using ExplorationGraph = model::ExplorationGraphT<ValueT>;
 
   std::vector<ExplorationGraph> rescheduled;
@@ -235,8 +222,7 @@ template <typename ValueT>
 
   for (const auto tid : thread_ids) {
     const auto last_id = find_last_event_in_thread(graph, tid);
-    if (last_id == ExplorationGraph::kNoSource ||
-        !model::is_block(graph.event(last_id))) {
+    if (last_id == ExplorationGraph::kNoSource || !model::is_block(graph.event(last_id))) {
       continue;
     }
 
@@ -254,12 +240,10 @@ template <typename ValueT>
     const auto step = unblocked.thread_event_count(tid);
     const auto next_label = thread_fn(trace, step);
     if (!next_label.has_value()) {
-      throw std::logic_error(
-          "rescheduling failed in oracle: blocked thread became done");
+      throw std::logic_error("rescheduling failed in oracle: blocked thread became done");
     }
     if (std::holds_alternative<model::BlockLabel>(*next_label)) {
-      throw std::logic_error(
-          "stress program returned BlockLabel; blocks are internal to DPOR");
+      throw std::logic_error("stress program returned BlockLabel; blocks are internal to DPOR");
     }
     const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&*next_label);
     if (recv == nullptr) {
@@ -280,11 +264,10 @@ template <typename ValueT>
 }
 
 template <typename ValueT>
-inline void enumerate_consistent_executions(
-    const algo::ProgramT<ValueT>& program,
-    const model::ExplorationGraphT<ValueT>& graph,
-    model::AsyncConsistencyCheckerT<ValueT>& checker,
-    OracleExplorationStatsT<ValueT>& stats) {
+inline void enumerate_consistent_executions(const algo::ProgramT<ValueT>& program,
+                                            const model::ExplorationGraphT<ValueT>& graph,
+                                            model::AsyncConsistencyCheckerT<ValueT>& checker,
+                                            OracleExplorationStatsT<ValueT>& stats) {
   const auto transitions = enumerate_enabled_transitions(program, graph);
   if (!transitions.empty()) {
     for (const auto& transition : transitions) {
@@ -368,16 +351,12 @@ template <typename ValueT>
   comparison.result = algo::verify(config);
 
   std::set_difference(
-      comparison.oracle_signatures.begin(),
-      comparison.oracle_signatures.end(),
-      comparison.dpor_unique.begin(),
-      comparison.dpor_unique.end(),
+      comparison.oracle_signatures.begin(), comparison.oracle_signatures.end(),
+      comparison.dpor_unique.begin(), comparison.dpor_unique.end(),
       std::inserter(comparison.missing_from_dpor, comparison.missing_from_dpor.end()));
   std::set_difference(
-      comparison.dpor_unique.begin(),
-      comparison.dpor_unique.end(),
-      comparison.oracle_signatures.begin(),
-      comparison.oracle_signatures.end(),
+      comparison.dpor_unique.begin(), comparison.dpor_unique.end(),
+      comparison.oracle_signatures.begin(), comparison.oracle_signatures.end(),
       std::inserter(comparison.unexpected_in_dpor, comparison.unexpected_in_dpor.end()));
 
   return comparison;

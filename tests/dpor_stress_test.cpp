@@ -185,12 +185,12 @@ std::vector<ProgramSpec> generate_stress_specs(std::size_t target_count,
     const auto sender1 = static_cast<ThreadId>((receiver % 3U) + 1U);
     const auto sender2 = static_cast<ThreadId>((sender1 % 3U) + 1U);
 
-    const auto i1 = value_dist(rng);
-    const auto i2 = value_dist(rng);
+    const auto i1 = static_cast<std::size_t>(value_dist(rng));
+    const auto i2 = static_cast<std::size_t>(value_dist(rng));
     const Value v1 = kValues[i1];
     const Value v2 = kValues[i2];
-    const Value v1_alt = kValues[(i1 + 1) % 3];
-    const Value v2_alt = kValues[(i2 + 1) % 3];
+    const Value v1_alt = kValues[(i1 + 1U) % kValues.size()];
+    const Value v2_alt = kValues[(i2 + 1U) % kValues.size()];
 
     ProgramSpec spec;
     // Keep at most one non-blocking receive per generated spec so the oracle

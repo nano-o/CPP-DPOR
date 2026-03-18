@@ -1,8 +1,8 @@
 #pragma once
 
-#include "support/oracle_core.hpp"
-
 #include "dpor/algo/dpor.hpp"
+
+#include "support/oracle_core.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -52,10 +52,8 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
   using type = ValueT;
 };
 
-[[noreturn]] inline void print_usage_and_exit(
-    const char* argv0,
-    std::string_view benchmark_label,
-    int exit_code) {
+[[noreturn]] inline void print_usage_and_exit(const char* argv0, std::string_view benchmark_label,
+                                              int exit_code) {
   std::ostream& os = exit_code == 0 ? std::cout : std::cerr;
   os << "Usage: " << argv0
      << " [--mode dpor|oracle|both] [--participants N] [--iterations N]"
@@ -66,9 +64,7 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
   std::exit(exit_code);
 }
 
-[[nodiscard]] inline std::size_t parse_positive_int(
-    std::string_view text,
-    std::string_view flag) {
+[[nodiscard]] inline std::size_t parse_positive_int(std::string_view text, std::string_view flag) {
   if (!text.empty() && text.front() == '-') {
     throw std::invalid_argument("invalid numeric value for " + std::string(flag));
   }
@@ -84,9 +80,8 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
   return value;
 }
 
-[[nodiscard]] inline std::size_t parse_nonnegative_int(
-    std::string_view text,
-    std::string_view flag) {
+[[nodiscard]] inline std::size_t parse_nonnegative_int(std::string_view text,
+                                                       std::string_view flag) {
   if (!text.empty() && text.front() == '-') {
     throw std::invalid_argument("invalid numeric value for " + std::string(flag));
   }
@@ -97,10 +92,7 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
   }
 }
 
-[[nodiscard]] inline Options parse_args(
-    int argc,
-    char** argv,
-    std::string_view benchmark_label) {
+[[nodiscard]] inline Options parse_args(int argc, char** argv, std::string_view benchmark_label) {
   Options options;
 
   for (int i = 1; i < argc; ++i) {
@@ -182,41 +174,32 @@ template <typename Fn>
   };
 }
 
-inline void print_measurements(
-    std::string_view label,
-    const std::vector<Measurement>& measurements,
-    bool show_paths) {
+inline void print_measurements(std::string_view label, const std::vector<Measurement>& measurements,
+                               bool show_paths) {
   if (measurements.empty()) {
     return;
   }
 
-  const auto minmax = std::minmax_element(
-      measurements.begin(),
-      measurements.end(),
-      [](const Measurement& lhs, const Measurement& rhs) {
-        return lhs.elapsed_ms < rhs.elapsed_ms;
-      });
+  const auto minmax = std::minmax_element(measurements.begin(), measurements.end(),
+                                          [](const Measurement& lhs, const Measurement& rhs) {
+                                            return lhs.elapsed_ms < rhs.elapsed_ms;
+                                          });
   const auto total_ms = std::accumulate(
       measurements.begin(), measurements.end(), 0.0,
-      [](double sum, const Measurement& measurement) {
-        return sum + measurement.elapsed_ms;
-      });
+      [](double sum, const Measurement& measurement) { return sum + measurement.elapsed_ms; });
   const auto average_ms = total_ms / static_cast<double>(measurements.size());
 
   std::cout << label << '\n';
   for (std::size_t i = 0; i < measurements.size(); ++i) {
-    std::cout << "  run " << (i + 1)
-              << ": executions=" << measurements[i].executions;
+    std::cout << "  run " << (i + 1) << ": executions=" << measurements[i].executions;
     if (show_paths) {
       std::cout << " paths_explored=" << measurements[i].paths_explored;
     }
-    std::cout << " elapsed_ms=" << std::fixed << std::setprecision(3)
-              << measurements[i].elapsed_ms << '\n';
+    std::cout << " elapsed_ms=" << std::fixed << std::setprecision(3) << measurements[i].elapsed_ms
+              << '\n';
   }
-  std::cout << "  summary:"
-            << " min_ms=" << std::fixed << std::setprecision(3)
-            << minmax.first->elapsed_ms
-            << " avg_ms=" << average_ms
+  std::cout << "  summary:" << " min_ms=" << std::fixed << std::setprecision(3)
+            << minmax.first->elapsed_ms << " avg_ms=" << average_ms
             << " max_ms=" << minmax.second->elapsed_ms
             << " executions=" << measurements.front().executions;
   if (show_paths) {
@@ -226,17 +209,14 @@ inline void print_measurements(
 }
 
 template <typename ProgramFactory>
-[[nodiscard]] inline OracleRunResult run_dpor(
-    const Options& options,
-    const ProgramFactory& make_program) {
+[[nodiscard]] inline OracleRunResult run_dpor(const Options& options,
+                                              const ProgramFactory& make_program) {
   auto program = make_program(options.participants, options.inject_crash);
-  using ValueT =
-      typename ProgramValueType<std::decay_t<decltype(program)>>::type;
+  using ValueT = typename ProgramValueType<std::decay_t<decltype(program)>>::type;
   algo::DporConfigT<ValueT> config;
   config.program = std::move(program);
-  const auto result = options.parallel
-      ? algo::verify_parallel(config, options.parallel_options)
-      : algo::verify(config);
+  const auto result = options.parallel ? algo::verify_parallel(config, options.parallel_options)
+                                       : algo::verify(config);
   if (result.kind == algo::VerifyResultKind::ErrorFound) {
     throw std::runtime_error("verification failed: " + result.message);
   }
@@ -250,10 +230,8 @@ template <typename ProgramFactory>
 }
 
 template <typename ProgramFactory>
-[[nodiscard]] inline OracleRunResult run_oracle(
-    std::size_t participants,
-    bool inject_crash,
-    const ProgramFactory& make_program) {
+[[nodiscard]] inline OracleRunResult run_oracle(std::size_t participants, bool inject_crash,
+                                                const ProgramFactory& make_program) {
   auto program = make_program(participants, inject_crash);
   const auto stats = test_support::collect_oracle_stats(program);
   return OracleRunResult{
@@ -264,21 +242,16 @@ template <typename ProgramFactory>
 
 template <typename ProgramFactory>
 [[nodiscard]] inline std::vector<Measurement> collect_measurements(
-    const Options& options,
-    bool use_oracle,
-    const ProgramFactory& make_program) {
+    const Options& options, bool use_oracle, const ProgramFactory& make_program) {
   std::vector<Measurement> measurements;
   measurements.reserve(options.iterations);
 
   for (std::size_t i = 0; i < options.iterations; ++i) {
     measurements.push_back(
-        use_oracle
-            ? measure_once([&] {
-                return run_oracle(options.participants, options.inject_crash, make_program);
-              })
-            : measure_once([&] {
-                return run_dpor(options, make_program);
-              }));
+        use_oracle ? measure_once([&] {
+          return run_oracle(options.participants, options.inject_crash, make_program);
+        })
+                   : measure_once([&] { return run_dpor(options, make_program); }));
     if (measurements.back().executions != measurements.front().executions) {
       throw std::runtime_error("execution count changed across iterations");
     }
@@ -293,21 +266,16 @@ template <typename ProgramFactory>
 }  // namespace detail
 
 template <typename ProgramFactory>
-inline int run_two_phase_commit_benchmark(
-    int argc,
-    char** argv,
-    std::string_view benchmark_label,
-    const ProgramFactory& make_program) {
+inline int run_two_phase_commit_benchmark(int argc, char** argv, std::string_view benchmark_label,
+                                          const ProgramFactory& make_program) {
   try {
     const auto options = detail::parse_args(argc, argv, benchmark_label);
 
-    std::cout << benchmark_label
-              << " participants=" << options.participants
+    std::cout << benchmark_label << " participants=" << options.participants
               << " inject_crash=" << std::boolalpha << options.inject_crash
               << " iterations=" << options.iterations;
     if (options.parallel && options.mode != detail::Options::Mode::Oracle) {
-      std::cout << " parallel=true"
-                << " max_workers=" << options.parallel_options.max_workers
+      std::cout << " parallel=true" << " max_workers=" << options.parallel_options.max_workers
                 << " max_queued_tasks=" << options.parallel_options.max_queued_tasks
                 << " spawn_depth_cutoff=" << options.parallel_options.spawn_depth_cutoff
                 << " min_fanout=" << options.parallel_options.min_fanout;
@@ -327,26 +295,19 @@ inline int run_two_phase_commit_benchmark(
 
     if (options.mode == detail::Options::Mode::Dpor ||
         options.mode == detail::Options::Mode::Both) {
-      dpor_measurements = detail::collect_measurements(
-          options,
-          false,
-          make_program);
+      dpor_measurements = detail::collect_measurements(options, false, make_program);
       detail::print_measurements("DPOR", dpor_measurements, false);
     }
 
     if (options.mode == detail::Options::Mode::Oracle ||
         options.mode == detail::Options::Mode::Both) {
-      oracle_measurements = detail::collect_measurements(
-          options,
-          true,
-          make_program);
+      oracle_measurements = detail::collect_measurements(options, true, make_program);
       detail::print_measurements("Oracle", oracle_measurements, true);
     }
 
     if (!dpor_measurements.empty() && !oracle_measurements.empty() &&
         dpor_measurements.front().executions != oracle_measurements.front().executions) {
-      std::cerr << "execution count mismatch: dpor="
-                << dpor_measurements.front().executions
+      std::cerr << "execution count mismatch: dpor=" << dpor_measurements.front().executions
                 << " oracle=" << oracle_measurements.front().executions << '\n';
       return 2;
     }

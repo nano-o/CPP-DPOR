@@ -24,9 +24,7 @@ struct TimeoutSimulationFailure : std::logic_error {
 }
 
 template <typename ResultT, typename Fn>
-[[nodiscard]] std::optional<EventLabel> invoke_protocol_step(
-    ResultT& out,
-    Fn&& fn) {
+[[nodiscard]] std::optional<EventLabel> invoke_protocol_step(ResultT& out, Fn&& fn) {
   try {
     out = std::forward<Fn>(fn)();
     return std::nullopt;
@@ -65,8 +63,7 @@ struct SimReceiveResult {
     };
   }
 
-  [[nodiscard]] static SimReceiveResult replayed_timer_fire(
-      bool keep_waiting) {
+  [[nodiscard]] static SimReceiveResult replayed_timer_fire(bool keep_waiting) {
     return SimReceiveResult{
         .kind = Kind::ReplayedTimerFire,
         .needs_message = keep_waiting,
@@ -82,11 +79,8 @@ struct SimReceiveResult {
 
 class ReplayCore {
  public:
-  ReplayCore(
-      std::function<dpor::model::ThreadId(tpc::ParticipantId)> id_map,
-      std::size_t target_io,
-      const ThreadTrace& trace,
-      std::size_t trace_offset)
+  ReplayCore(std::function<dpor::model::ThreadId(tpc::ParticipantId)> id_map, std::size_t target_io,
+             const ThreadTrace& trace, std::size_t trace_offset)
       : id_map_(std::move(id_map)),
         target_io_(target_io),
         trace_(trace),
@@ -105,8 +99,7 @@ class ReplayCore {
     throw StepBoundaryReached{};
   }
 
-  [[nodiscard]] SimValue replay_choice_or_capture(
-      std::initializer_list<SimValue> choices) {
+  [[nodiscard]] SimValue replay_choice_or_capture(std::initializer_list<SimValue> choices) {
     auto current = io_count_++;
 
     if (current < target_io_) {
@@ -146,8 +139,7 @@ class ReplayCore {
     // A different id would mean multiple simultaneously-active timers, which
     // this simplified adapter does not encode in bottom observations.
     if (active_timer_.has_value() && active_timer_->id != id) {
-      throw TimeoutSimulationFailure(
-          "SimEnvironment supports at most one active timer per thread");
+      throw TimeoutSimulationFailure("SimEnvironment supports at most one active timer per thread");
     }
     active_timer_ = ActiveTimer{
         .id = id,
@@ -161,9 +153,7 @@ class ReplayCore {
     }
   }
 
-  [[nodiscard]] std::optional<EventLabel> result() const {
-    return result_;
-  }
+  [[nodiscard]] std::optional<EventLabel> result() const { return result_; }
 
  private:
   struct ActiveTimer {
@@ -171,15 +161,11 @@ class ReplayCore {
     tpc::TimerCallback callback;
   };
 
-  [[nodiscard]] bool has_active_timer() const noexcept {
-    return active_timer_.has_value();
-  }
+  [[nodiscard]] bool has_active_timer() const noexcept { return active_timer_.has_value(); }
 
-  [[nodiscard]] const ThreadTrace::value_type& trace_entry(
-      std::size_t idx) const {
+  [[nodiscard]] const ThreadTrace::value_type& trace_entry(std::size_t idx) const {
     if (idx >= trace_.size()) {
-      throw TimeoutSimulationFailure(
-          "trace shorter than expected for simulated replay");
+      throw TimeoutSimulationFailure("trace shorter than expected for simulated replay");
     }
     return trace_[idx];
   }
@@ -187,8 +173,7 @@ class ReplayCore {
   [[nodiscard]] const SimValue& trace_value(std::size_t idx) const {
     const auto& observed = trace_entry(idx);
     if (observed.is_bottom()) {
-      throw TimeoutSimulationFailure(
-          "trace requested a concrete value but observed bottom");
+      throw TimeoutSimulationFailure("trace requested a concrete value but observed bottom");
     }
     return observed.value();
   }
@@ -205,15 +190,12 @@ class ReplayCore {
 
   [[nodiscard]] bool fire_active_timer(tpc::Environment& env) {
     if (!active_timer_.has_value()) {
-      throw TimeoutSimulationFailure(
-          "trace requested timer firing but no timer is active");
+      throw TimeoutSimulationFailure("trace requested timer firing but no timer is active");
     }
     auto callback = std::move(active_timer_->callback);
     active_timer_.reset();
     bool keep_waiting = false;
-    if (const auto error = invoke_protocol_step(keep_waiting, [&]() {
-          return callback(env);
-        });
+    if (const auto error = invoke_protocol_step(keep_waiting, [&]() { return callback(env); });
         error.has_value()) {
       result_ = *error;
       throw StepBoundaryReached{};
@@ -233,14 +215,10 @@ class ReplayCore {
 };
 
 template <typename ProtocolObj, typename SimEnvironmentT>
-std::optional<EventLabel> run_and_capture(
-    ProtocolObj& obj,
-    SimEnvironmentT& env) {
+std::optional<EventLabel> run_and_capture(ProtocolObj& obj, SimEnvironmentT& env) {
   try {
     bool needs_message = false;
-    if (const auto error = invoke_protocol_step(needs_message, [&]() {
-          return obj.start(env);
-        });
+    if (const auto error = invoke_protocol_step(needs_message, [&]() { return obj.start(env); });
         error.has_value()) {
       return error;
     }
@@ -253,9 +231,8 @@ std::optional<EventLabel> run_and_capture(
         needs_message = receive_step.needs_message;
         continue;
       }
-      if (const auto error = invoke_protocol_step(needs_message, [&]() {
-            return obj.receive(env, *receive_step.message);
-          });
+      if (const auto error = invoke_protocol_step(
+              needs_message, [&]() { return obj.receive(env, *receive_step.message); });
           error.has_value()) {
         return error;
       }

@@ -30,18 +30,13 @@ The algorithm layer implements the core DPOR engine and the system-under-test (S
 - **`verify()` result**: DPOR reports `AllExecutionsExplored`, `ErrorFound`, or `DepthLimitReached`.
 - **Exploration**: The engine recursively explores the space of consistent executions. It uses **backward revisiting** to identify alternative interleavings or message matches that could lead to new behaviors, performs Must-style receive rescheduling before terminating an execution, and explores non-blocking receives both through compatible sends and the bottom branch.
 
-## 3. API Layer (`dpor::api`)
+## 3. Public Entry Points
 
-The API layer is currently thin.
-
-- **`Session`**: A lightweight public wrapper that stores `SessionConfig` and exposes `describe()`. It is not the DPOR execution entry point today.
-- **`SessionConfig`**: The configuration payload owned by `Session`; it currently contains `name` and `max_depth`.
-- **Exploration entry points**: The actual DPOR APIs are still `dpor::algo::verify()` and `dpor::algo::verify_parallel()`.
+- **Exploration entry points**: The public DPOR APIs are `dpor::algo::verify()` and `dpor::algo::verify_parallel()`.
 
 ## 4. Demonstration and Examples (`examples/`)
 
 The library includes examples that demonstrate how to model distributed protocols:
-- **`minimal/`**: A tiny smoke example for the current `Session` API.
 - **`two_phase_commit_timeout/`**: A case study modeling the Two-Phase Commit (2PC) protocol with timers, including UDP network modeling and simulation logic.
 
 ---

@@ -107,14 +107,13 @@ If it is noticeably slower, the parallel infrastructure is adding unexpected ove
 include/dpor/
   model/    → dpor::model  (events, relations, graphs, consistency)
   algo/     → dpor::algo   (DPOR engine, program representation)
-  api/      → dpor::api    (Session — public entry point)
-src/api/    → only compiled source (session.cpp)
+src/        → internal build helpers only (`header_check.cpp` for warnings/analysis)
 tests/      → Catch2 test files
-examples/   → minimal/ and two_phase_commit_timeout/
+examples/   → two_phase_commit_timeout/
 ```
 
 - Most code is **header-only templates** in `include/dpor/model/` and `include/dpor/algo/`
-- The only `.cpp` source file is `src/api/session.cpp`; don't look for `.cpp` files for model/algo code
+- The library is header-only; `src/header_check.cpp` exists only as an internal build target for warnings/analysis
 
 ## DPOR Algorithm
 
@@ -143,7 +142,6 @@ Thread-function traces use `ObservedValueT` entries rather than raw payloads.
 
 | Test file | Covers |
 |---|---|
-| `session_test.cpp` | Session/SessionConfig API |
 | `model_types_test.cpp` | Events, labels, ExecutionGraphT |
 | `relation_test.cpp` | Relation concept, ExplicitRelation, ProgramOrderRelation, compose, transitive_closure |
 | `consistency_test.cpp` | AsyncConsistencyCheckerT, all ConsistencyIssueCodes |
@@ -166,3 +164,4 @@ This codebase is currently a prototype.
 - Ignore unrelated untracked workspace changes by default.
 - Do not remove or rewrite unrelated untracked files unless the user explicitly asks for that.
 - Still stop and ask if an unexpected change overlaps the files being modified or creates ambiguity about task correctness.
+- When committing, include a message describing what the commit does.

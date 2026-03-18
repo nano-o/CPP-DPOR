@@ -399,8 +399,8 @@ TEST_CASE("NondeterministicVoteEnvironment captures timer-free waits as blocking
 
   WaitForMessage protocol;
   ThreadTrace trace;
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0,
-                                      trace, /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0, trace,
+                                      /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(label.has_value());
@@ -422,8 +422,8 @@ TEST_CASE("NondeterministicVoteEnvironment captures timer-armed waits as non-blo
 
   WaitWithTimer protocol;
   ThreadTrace trace;
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0,
-                                      trace, /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0, trace,
+                                      /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(label.has_value());
@@ -446,8 +446,8 @@ TEST_CASE("NondeterministicVoteEnvironment returns to blocking receive after tim
 
   WaitWithCanceledTimer protocol;
   ThreadTrace trace;
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0,
-                                      trace, /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0, trace,
+                                      /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(label.has_value());
@@ -476,8 +476,8 @@ TEST_CASE("NondeterministicVoteEnvironment replays bottom as timer firing",
 
   TimerThenSend protocol;
   ThreadTrace trace{ObservedValue::bottom()};
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/1,
-                                      trace, /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/1, trace,
+                                      /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(protocol.timer_fired);
@@ -507,8 +507,8 @@ TEST_CASE("NondeterministicVoteEnvironment replays timer-callback sends before l
 
   TimerSendThenWait protocol;
   ThreadTrace trace{ObservedValue::bottom()};
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/2,
-                                      trace, /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/2, trace,
+                                      /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE(protocol.timer_fired);
@@ -544,8 +544,8 @@ TEST_CASE("NondeterministicVoteEnvironment refreshes the active timer when the i
 
   ReplaceTimer protocol;
   ThreadTrace trace{ObservedValue::bottom()};
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/1,
-                                      trace, /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/1, trace,
+                                      /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
   REQUIRE_FALSE(protocol.old_timer_fired);
@@ -557,8 +557,10 @@ TEST_CASE("NondeterministicVoteEnvironment refreshes the active timer when the i
   REQUIRE(send->value == ack_message(1));
 }
 
-TEST_CASE("NondeterministicVoteEnvironment rejects multiple simultaneous active timers as a simulation failure",
-          "[two_phase_commit][simulation][timer]") {
+TEST_CASE(
+    "NondeterministicVoteEnvironment rejects multiple simultaneous active timers as a simulation "
+    "failure",
+    "[two_phase_commit][simulation][timer]") {
   struct WaitWithTwoTimers {
     static bool start(tpc::Environment& env) {
       env.set_timer(1, 10, [](tpc::Environment& /*timer_env*/) { return true; });
@@ -571,16 +573,17 @@ TEST_CASE("NondeterministicVoteEnvironment rejects multiple simultaneous active 
 
   WaitWithTwoTimers protocol;
   ThreadTrace trace;
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0,
-                                      trace, /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/0, trace,
+                                      /*trace_offset=*/0);
 
   // The simplified timer adapter cannot represent multiple concurrent timers,
   // so this remains an infrastructure failure rather than an ErrorLabel.
   REQUIRE_THROWS_AS(run_and_capture(protocol, env), std::logic_error);
 }
 
-TEST_CASE("NondeterministicVoteEnvironment turns timer-callback protocol exceptions into error events",
-          "[two_phase_commit][simulation][timer]") {
+TEST_CASE(
+    "NondeterministicVoteEnvironment turns timer-callback protocol exceptions into error events",
+    "[two_phase_commit][simulation][timer]") {
   struct ThrowInTimer {
     static bool start(tpc::Environment& env) {
       env.set_timer(1, 10, [](tpc::Environment& /*timer_env*/) -> bool {
@@ -594,13 +597,17 @@ TEST_CASE("NondeterministicVoteEnvironment turns timer-callback protocol excepti
 
   ThrowInTimer protocol;
   ThreadTrace trace{ObservedValue::bottom()};
-  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/1,
-                                      trace, /*trace_offset=*/0);
+  NondeterministicVoteEnvironment env(participant_to_thread, /*target_io=*/1, trace,
+                                      /*trace_offset=*/0);
 
   const auto label = run_and_capture(protocol, env);
-  REQUIRE(label.has_value());
-  REQUIRE(std::holds_alternative<model::ErrorLabel>(*label));
-  REQUIRE(std::get<model::ErrorLabel>(*label).message == "protocol bug");
+  if (!label.has_value()) {
+    FAIL("expected error label");
+    return;
+  }
+  const auto& actual_label = *label;
+  REQUIRE(std::holds_alternative<model::ErrorLabel>(actual_label));
+  REQUIRE(std::get<model::ErrorLabel>(actual_label).message == "protocol bug");
 }
 
 // ---------------------------------------------------------------------------
@@ -842,19 +849,18 @@ static uint16_t allocate_ephemeral_port() {
   addr.sin_family = AF_INET;
   addr.sin_port = 0;
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  REQUIRE(::bind(fd,
-                 reinterpret_cast<sockaddr*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-                     &addr),
-                 sizeof(addr)) ==
-          0);
+  REQUIRE(
+      ::bind(fd,
+             reinterpret_cast<sockaddr*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                 &addr),
+             sizeof(addr)) == 0);
 
   socklen_t len = sizeof(addr);
   REQUIRE(::getsockname(
               fd,
               reinterpret_cast<sockaddr*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
                   &addr),
-              &len) ==
-          0);
+              &len) == 0);
   auto port = ntohs(addr.sin_port);
   ::close(fd);
   return port;

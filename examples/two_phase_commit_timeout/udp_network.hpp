@@ -8,24 +8,23 @@
 
 #include "protocol.hpp"
 
-#include <arpa/inet.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <algorithm>
+#include <arpa/inet.h>
 #include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <mutex>
-#include <limits>
 #include <optional>
+#include <poll.h>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 
@@ -33,11 +32,9 @@ namespace tpc {
 
 class UdpEnvironment : public Environment {
  public:
-  UdpEnvironment(
-      ParticipantId my_id,
-      std::unordered_map<ParticipantId, std::pair<std::string, uint16_t>>
-          port_map,
-      std::optional<Vote> vote = std::nullopt)
+  UdpEnvironment(ParticipantId my_id,
+                 std::unordered_map<ParticipantId, std::pair<std::string, uint16_t>> port_map,
+                 std::optional<Vote> vote = std::nullopt)
       : my_id_(my_id), port_map_(std::move(port_map)), vote_(vote) {
     socket_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (socket_fd_ < 0) {
@@ -81,17 +78,16 @@ class UdpEnvironment : public Environment {
     sockaddr_in dest_addr{};
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(it->second.second);
-    if (::inet_pton(AF_INET, it->second.first.c_str(), &dest_addr.sin_addr) !=
-        1) {
-      throw std::invalid_argument("invalid destination address: " +
-                                  it->second.first);
+    if (::inet_pton(AF_INET, it->second.first.c_str(), &dest_addr.sin_addr) != 1) {
+      throw std::invalid_argument("invalid destination address: " + it->second.first);
     }
 
     std::string data = serialize(msg);
-    if (::sendto(socket_fd_, data.data(), data.size(), 0,
-                 reinterpret_cast<sockaddr*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-                     &dest_addr),
-                 sizeof(dest_addr)) < 0) {
+    if (::sendto(
+            socket_fd_, data.data(), data.size(), 0,
+            reinterpret_cast<sockaddr*>(  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+                &dest_addr),
+            sizeof(dest_addr)) < 0) {
       throw std::runtime_error("sendto() failed");
     }
   }
@@ -105,19 +101,16 @@ class UdpEnvironment : public Environment {
     return dist(rng) ? Vote::Yes : Vote::No;
   }
 
-  void set_timer(TimerId id, std::size_t timeout_ms,
-                 TimerCallback callback) override {
+  void set_timer(TimerId id, std::size_t timeout_ms, TimerCallback callback) override {
     require_run_thread("set_timer");
-    auto deadline = std::chrono::steady_clock::now() +
-                    std::chrono::milliseconds(timeout_ms);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     auto it = active_timers_.find(id);
     if (it != active_timers_.end()) {
       timer_schedule_.erase(it->second.schedule_it);
       active_timers_.erase(it);
     }
     auto schedule_it = timer_schedule_.emplace(deadline, id);
-    active_timers_.emplace(id,
-                           ActiveTimer{schedule_it, std::move(callback)});
+    active_timers_.emplace(id, ActiveTimer{schedule_it, std::move(callback)});
   }
 
   void cancel_timer(TimerId id) override {
@@ -186,10 +179,8 @@ class UdpEnvironment : public Environment {
     auto now = std::chrono::steady_clock::now();
     auto delta = timer_schedule_.begin()->first - now;
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(delta);
-    auto count =
-        std::max(ms.count(), static_cast<std::chrono::milliseconds::rep>(0));
-    if (count > static_cast<std::chrono::milliseconds::rep>(
-                    std::numeric_limits<int>::max())) {
+    auto count = std::max(ms.count(), static_cast<std::chrono::milliseconds::rep>(0));
+    if (count > static_cast<std::chrono::milliseconds::rep>(std::numeric_limits<int>::max())) {
       return std::numeric_limits<int>::max();
     }
     return static_cast<int>(count);
@@ -204,8 +195,7 @@ class UdpEnvironment : public Environment {
       }
 
       auto active_it = active_timers_.find(schedule_it->second);
-      if (active_it == active_timers_.end() ||
-          active_it->second.schedule_it != schedule_it) {
+      if (active_it == active_timers_.end() || active_it->second.schedule_it != schedule_it) {
         timer_schedule_.erase(schedule_it);
         continue;
       }
@@ -230,17 +220,14 @@ class UdpEnvironment : public Environment {
         return true;
       }
       auto now = std::chrono::steady_clock::now();
-      auto elapsed =
-          std::chrono::duration_cast<std::chrono::milliseconds>(now - start)
-              .count();
+      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
       if (elapsed >= static_cast<std::chrono::milliseconds::rep>(timeout_ms)) {
         remaining_ms = 0;
         return false;
       }
-      auto remaining =
-          static_cast<std::chrono::milliseconds::rep>(timeout_ms) - elapsed;
-      if (remaining > static_cast<std::chrono::milliseconds::rep>(
-                          std::numeric_limits<int>::max())) {
+      auto remaining = static_cast<std::chrono::milliseconds::rep>(timeout_ms) - elapsed;
+      if (remaining >
+          static_cast<std::chrono::milliseconds::rep>(std::numeric_limits<int>::max())) {
         remaining_ms = std::numeric_limits<int>::max();
       } else {
         remaining_ms = static_cast<int>(remaining);
@@ -278,8 +265,7 @@ class UdpEnvironment : public Environment {
       }
 
       std::array<char, 1024> buf{};
-      auto n = ::recvfrom(socket_fd_, buf.data(), buf.size(), 0, nullptr,
-                          nullptr);
+      auto n = ::recvfrom(socket_fd_, buf.data(), buf.size(), 0, nullptr, nullptr);
       if (n < 0) {
         if (errno == EINTR) {
           if (!refresh_remaining_timeout()) {
@@ -313,8 +299,7 @@ class UdpEnvironment : public Environment {
 
   ParticipantId my_id_;
   int socket_fd_{-1};
-  std::unordered_map<ParticipantId, std::pair<std::string, uint16_t>>
-      port_map_;
+  std::unordered_map<ParticipantId, std::pair<std::string, uint16_t>> port_map_;
   std::optional<Vote> vote_;
 
   TimerSchedule timer_schedule_;

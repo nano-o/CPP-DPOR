@@ -1,15 +1,13 @@
 #pragma once
 
 #include "oracle_core.hpp"
-
 #include <catch2/catch_test_macros.hpp>
 
 namespace dpor::test_support {
 
 template <typename ValueT>
-inline void require_dpor_matches_oracle(
-    const algo::ProgramT<ValueT>& program,
-    const std::string& description) {
+inline void require_dpor_matches_oracle(const algo::ProgramT<ValueT>& program,
+                                        const std::string& description) {
   const auto comparison = compare_dpor_with_oracle(program);
 
   INFO("oracle program: " << description);

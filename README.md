@@ -49,6 +49,9 @@ cmake --build --preset lint
 The lint preset is self-contained (fetches Catch2 automatically). clang-tidy
 requires version 16+ for C++20 structured binding capture support; older
 versions are detected at configure time and skipped with a warning.
+For the header-only library itself, these checks run through the internal
+`dpor_header_check` target, which compiles a translation unit that includes the
+public headers.
 
 Individual tools can be enabled on any preset:
 
@@ -97,10 +100,10 @@ If installed to a non-default prefix, add it to `CMAKE_PREFIX_PATH`.
 `ExplorationGraphT` uses a lazy, shared vector-clock cache (`PorfCache`) to
 accelerate hot-path reachability and warm-cache cycle queries:
 
-| Operation | Without cache | With cache |
-|---|---|---|
+| Operation                 | Without cache   | With cache     |
+|---------------------------|-----------------|----------------|
 | `porf_contains(from, to)` | O(N+E) per call | O(1) amortized |
-| `has_causal_cycle()` | O(N+E) per call | O(1) amortized |
+| `has_causal_cycle()`      | O(N+E) per call | O(1) amortized |
 
 The cache is built on demand via Kahn's topological sort and stores a
 per-event vector clock (one entry per thread). Subsequent `porf_contains` calls
@@ -124,10 +127,10 @@ Key properties:
 
 ## Layout
 
-- `include/dpor/api`: public headers
 - `include/dpor/model`: core model types (events, relations, execution/exploration graphs)
-- `src`: implementation details
+- `include/dpor/algo`: DPOR engine and program representation
+- `src`: internal build helpers only (for example, the header-check translation unit)
 - `tests`: unit/integration tests with CTest
-- `examples`: `minimal/` and `two_phase_commit_timeout/`
+- `examples`: `two_phase_commit_timeout/`
 - `cmake`: packaging and build helper modules
 - `docs`: architecture notes
