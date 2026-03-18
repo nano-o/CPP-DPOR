@@ -8,9 +8,9 @@ than test harness overhead.
 ## Available benchmarks
 
 - `dpor_two_phase_commit_timeout_benchmark`
-  2PC model with timers, using the explicit scenario headers
-  `examples/two_phase_commit_timeout/sim/nominal.hpp` and
-  `examples/two_phase_commit_timeout/sim/crash_before_decision.hpp`.
+  2PC model with timers, using
+  `examples/two_phase_commit_timeout/sim/crash_before_decision.hpp` with
+  `Options::inject_crash` toggled by the CLI.
 
 The executable supports the following CLI:
 

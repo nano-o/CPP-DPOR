@@ -18,6 +18,7 @@ namespace tpc_sim::crash_before_decision {
 struct Options {
   std::size_t num_participants;
   bool bug_on_p1_no{false};
+  bool inject_crash{true};
 };
 
 namespace detail {
@@ -234,11 +235,12 @@ class ReplayState {
 class Environment : public tpc::Environment {
  public:
   Environment(std::function<dpor::model::ThreadId(tpc::ParticipantId)> id_map,
-              std::size_t target_io, const ThreadTrace& trace, std::size_t trace_offset)
-      : replay_(std::move(id_map), target_io, trace, trace_offset) {}
+              std::size_t target_io, const ThreadTrace& trace, std::size_t trace_offset,
+              bool inject_crash)
+      : replay_(std::move(id_map), target_io, trace, trace_offset), inject_crash_(inject_crash) {}
 
   void send(tpc::ParticipantId destination, const tpc::Message& msg) override {
-    if (!crash_injected_ && std::holds_alternative<tpc::DecisionMsg>(msg)) {
+    if (inject_crash_ && !crash_injected_ && std::holds_alternative<tpc::DecisionMsg>(msg)) {
       crash_injected_ = true;
       const auto choice =
           replay_.replay_choice_or_capture({crash_choice(false), crash_choice(true)});
@@ -268,6 +270,7 @@ class Environment : public tpc::Environment {
 
  private:
   detail::ReplayState replay_;
+  bool inject_crash_;
   bool crash_injected_{false};
 };
 
@@ -306,7 +309,7 @@ std::optional<EventLabel> run_and_capture(ProtocolObj& obj, Environment& env) {
 
 [[nodiscard]] inline ThreadFunction make_coordinator_function(Options options) {
   return [options](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
-    Environment env(participant_to_thread, step, trace, 0);
+    Environment env(participant_to_thread, step, trace, 0, options.inject_crash);
     std::optional<tpc::Coordinator> coordinator;
     if (const auto error = detail::try_emplace_protocol_object(
             coordinator, options.num_participants, options.bug_on_p1_no);
@@ -319,7 +322,7 @@ std::optional<EventLabel> run_and_capture(ProtocolObj& obj, Environment& env) {
 
 [[nodiscard]] inline ThreadFunction make_participant_function(tpc::ParticipantId pid) {
   return [pid](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
-    Environment env(participant_to_thread, step, trace, 0);
+    Environment env(participant_to_thread, step, trace, 0, /*inject_crash=*/false);
     std::optional<tpc::Participant> participant;
     if (const auto error = detail::try_emplace_protocol_object(participant, pid);
         error.has_value()) {

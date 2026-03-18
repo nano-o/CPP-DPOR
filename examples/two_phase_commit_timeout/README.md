@@ -12,8 +12,7 @@ adapter accommodates the protocol, not the other way around.
 | `udp_network.hpp` | Real UDP `Environment` implementation |
 | `sim/dpor_types.hpp` | DPOR-visible value type and graph/program aliases |
 | `sim/bridge.hpp` | Conversion between protocol messages/choices and DPOR values |
-| `sim/nominal.hpp` | Self-contained nominal scenario: replay helper, environment, thread builders, `make_program()` |
-| `sim/crash_before_decision.hpp` | Self-contained crash-before-decision scenario: replay helper, environment, thread builders, `make_program()` |
+| `sim/crash_before_decision.hpp` | Self-contained simulation module: replay helper, environment, thread builders, `make_program()` with optional crash injection |
 | `two_phase_commit_test.cpp` | Catch2 tests: DPOR invariants, protocol/timer checks, simulation checks, UDP checks |
 
 ## Design intent
@@ -23,14 +22,13 @@ existing, production-style code. The protocol has no awareness of model
 checking. It exposes an event-driven interface (`start()` + `receive()`) and
 uses a minimal abstract `Environment`.
 
-The simulation code is intentionally scenario-first:
+The simulation code is intentionally simple:
 
 - `sim/bridge.hpp` and `sim/dpor_types.hpp` are shared because they define the
   DPOR encoding.
-- Each scenario lives in one self-contained header, even if that means some
-  duplicated replay logic.
-- Callers include the exact scenario they want instead of depending on an
-  umbrella header or a boolean-driven factory.
+- `sim/crash_before_decision.hpp` is the only scenario header.
+- `make_program()` takes an `inject_crash` option, so the same module can model
+  both the no-crash executions and the crash-before-decision executions.
 
 ## Protocol interface
 
@@ -77,38 +75,38 @@ networking. It is a query to the external environment for a participant's vote.
 Timer callbacks return the same continuation flag as `receive()`: `true` means
 the protocol should keep waiting for input, `false` means it is done.
 
-## Scenario modules
+## Simulation module
 
-The two scenario headers expose explicit namespaces and builders:
+The simulation header exposes one namespace and one configurable builder:
 
 ```cpp
 #include "sim/crash_before_decision.hpp"
-#include "sim/nominal.hpp"
 
-auto nominal_program = tpc_sim::nominal::make_program({
+auto no_crash_program = tpc_sim::crash_before_decision::make_program({
     .num_participants = 3,
+    .inject_crash = false,
 });
 
 auto crash_program = tpc_sim::crash_before_decision::make_program({
     .num_participants = 3,
+    .inject_crash = true,
 });
 ```
 
-Each scenario header contains:
+The module contains:
 
 - an `Options` struct
-- a scenario-local `Environment`
-- a scenario-local `run_and_capture()`
+- an `Environment`
+- a `run_and_capture()`
 - coordinator and participant thread builders
 - a `make_program()` factory
 
 ### Votes
 
 The participant calls `env.get_vote()` after processing `Prepare`. In the
-simulation, `nominal::Environment` and
-`crash_before_decision::Environment` both intercept this call and produce a
-`NondeterministicChoiceLabel` with choices `{"YES", "NO"}`. DPOR then explores
-both branches.
+simulation, `crash_before_decision::Environment` intercepts this call and
+produces a `NondeterministicChoiceLabel` with choices `{"YES", "NO"}`. DPOR
+then explores both branches.
 
 ### Crashes
 
@@ -117,21 +115,21 @@ The coordinator knows nothing about crashes.
 the first `DecisionMsg`, injects a `NondeterministicChoiceLabel` with choices
 `{"no_crash", "crash"}` before allowing the send to proceed. If the choice
 resolves to `"crash"`, the coordinator thread terminates and phase 2 never
-happens.
+happens. This behavior is controlled by `Options::inject_crash`, so the same
+module can also run without the crash choice.
 
 ## Replay-from-scratch
 
 The DPOR engine may call each `ThreadFunction` non-linearly across exploration
-branches. Each scenario module handles this with a replay-from-scratch
+branches. The simulation module handles this with a replay-from-scratch
 strategy:
 
 1. Each `ThreadFunction` call creates a fresh protocol object and fresh
-   scenario environment.
-2. The scenario-local `run_and_capture()` drives the protocol via `start()` and
+   environment.
+2. `run_and_capture()` drives the protocol via `start()` and
    `receive()`.
-3. The scenario-local replay helper fast-forwards through past I/O operations
-   using the trace, then captures the current I/O operation as a DPOR
-   `EventLabel`.
+3. The replay helper fast-forwards through past I/O operations using the trace,
+   then captures the current I/O operation as a DPOR `EventLabel`.
 
 The cost is O(step) per call, which is acceptable for this example.
 
@@ -154,8 +152,8 @@ This timeout variant extends the environment with `set_timer()` and
 - Timer callbacks are replayed directly; the adapter does not fabricate timeout
   messages.
 - The simulation assumes at most one active timer per thread at a receive
-  point. The scenario environments enforce that assumption because plain bottom
-  does not encode timer identity.
+  point. The simulation environment enforces that assumption because plain
+  bottom does not encode timer identity.
 
 ## UDP runtime behavior
 
@@ -210,8 +208,8 @@ scenario adapter converts that uncaught protocol exception into a terminal
 `ErrorLabel`. DPOR then reports `VerifyResultKind::ErrorFound` instead of
 treating the problem as infrastructure failure.
 
-The known replay control-flow exceptions are handled internally by the scenario
-modules. Simulation failures still propagate as ordinary exceptions.
+The known replay control-flow exceptions are handled internally by the
+simulation module. Simulation failures still propagate as ordinary exceptions.
 
 The `Coordinator` constructor accepts a `bug_on_p1_no` flag that injects a
 deliberate bug when participant 1 votes No. This exists only to test the
