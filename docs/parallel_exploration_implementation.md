@@ -193,8 +193,10 @@ Current behavior differs by `sync_steps`.
 - `publish_complete_execution()` and `publish_error_execution()` serialize
   through `publication_mutex_`.
 - Exactly one error terminal is published.
-- No complete execution is counted or observed after the stop flag has been
-  committed by an error path.
+- No complete execution is counted after the stop flag has been committed by an
+  error path.
+- `on_execution` callbacks are still invoked outside `publication_mutex_`, so
+  observer callbacks may race with an error publication even in strict mode.
 
 This is the default.
 
