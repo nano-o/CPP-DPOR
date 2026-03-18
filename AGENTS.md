@@ -82,6 +82,10 @@ This is required to preserve DPOR soundness/completeness assumptions.
 
 ## Performance Smoke Tests
 
+`build/bench-release` is a manual benchmark-focused build directory, not a CMake preset.
+If it does not exist, configure it as documented in `benchmarks/README.md` before
+running the benchmark commands below.
+
 For a lightweight performance smoke test, run DPOR-only with 4 participants,
 1 iteration, and no crash injection:
 
@@ -110,6 +114,7 @@ include/dpor/
 src/        → internal build helpers only (`header_check.cpp` for warnings/analysis)
 tests/      → Catch2 test files
 examples/   → two_phase_commit_timeout/
+benchmarks/ → standalone benchmark targets and perf helpers
 ```
 
 - Most code is **header-only templates** in `include/dpor/model/` and `include/dpor/algo/`
@@ -148,7 +153,8 @@ Thread-function traces use `ObservedValueT` entries rather than raw payloads.
 | `exploration_graph_test.cpp` | ExplorationGraphT operations (restrict, with_rf, porf_contains, etc.) |
 | `dpor_test.cpp` | DPOR algorithm end-to-end (paper examples, non-blocking receive coverage, oracle cross-checks) |
 | `dpor_stress_test.cpp` | Randomized stress tests with multiple seeds, including oracle-backed coverage |
-| `tests/support/oracle.hpp` | Exhaustive async oracle shared by DPOR correctness tests |
+| `tests/support/oracle_core.hpp` | Core exhaustive async oracle implementation shared by DPOR correctness tests |
+| `tests/support/oracle.hpp` | Catch2-facing oracle helpers built on top of `oracle_core.hpp` |
 | `examples/two_phase_commit_timeout/two_phase_commit_test.cpp` | 2PC protocol + timer behavior example |
 
 ## Prototype Policy

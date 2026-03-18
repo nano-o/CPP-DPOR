@@ -6,18 +6,18 @@ model-checking adapter accommodates the protocol, not the other way around.
 
 ## File overview
 
-| File | Description |
-|------|-------------|
-| `protocol.hpp` | 2PC protocol: `Coordinator`, `Participant`, `Environment` interface |
-| `udp_network.hpp` | Real UDP `Environment` implementation |
-| `simulation.hpp` | Umbrella header for the DPOR-facing simulation modules |
-| `sim/dpor_types.hpp` | DPOR-visible value and graph/program aliases |
-| `sim/bridge.hpp` | Conversion between protocol messages/choices and DPOR values |
-| `sim/core.hpp` | Shared deterministic replay/capture helper |
-| `sim/nominal_environment.hpp` | Explicit nondeterministic-vote scenario environment |
-| `sim/crash_environment.hpp` | Explicit crash-before-decision scenario environment |
-| `sim/programs.hpp` | Scenario-specific thread-function and program builders |
-| `two_phase_commit_test.cpp` | Catch2 tests: DPOR invariant checks + UDP integration tests + timer behavior tests |
+| File                          | Description                                                                        |
+|-------------------------------|------------------------------------------------------------------------------------|
+| `protocol.hpp`                | 2PC protocol: `Coordinator`, `Participant`, `Environment` interface                |
+| `udp_network.hpp`             | Real UDP `Environment` implementation                                              |
+| `simulation.hpp`              | Umbrella header for the DPOR-facing simulation modules                             |
+| `sim/dpor_types.hpp`          | DPOR-visible value and graph/program aliases                                       |
+| `sim/bridge.hpp`              | Conversion between protocol messages/choices and DPOR values                       |
+| `sim/core.hpp`                | Shared deterministic replay/capture helper                                         |
+| `sim/nominal_environment.hpp` | Explicit nondeterministic-vote scenario environment                                |
+| `sim/crash_environment.hpp`   | Explicit crash-before-decision scenario environment                                |
+| `sim/programs.hpp`            | Scenario-specific thread-function and program builders                             |
+| `two_phase_commit_test.cpp`   | Catch2 tests: DPOR invariant checks + UDP integration tests + timer behavior tests |
 
 ## Design intent
 
