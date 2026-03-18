@@ -661,6 +661,8 @@ Phase 5.5 measurement result:
 
 ### Phase 6: Tackle Revisit-Specific Materialization
 
+Commits: `7f98c8f` (Landing 1); `06ce76b` (Landing 2)
+
 Only after the forward path is cheaper and the representation cleanups are done should revisit-heavy structure be attacked:
 
 1. reduce temporary `with_rf()` copies
@@ -746,6 +748,39 @@ Measurement rule for Phase 6:
 2. re-measure before starting Landing 2
 3. only continue to the masked/view-style work if the profile still points at revisit-specific materialization
 
+Phase 6 measurement result:
+
+- Landing 1 was implemented in commit `7f98c8f`.
+- Landing 2 was implemented in commit `06ce76b`.
+- On the same `participants=4`, `iterations=1`, `--no-crash` timeout benchmark used throughout this plan, Landing 2 produced a meaningful additional end-to-end win relative to the Landing 1 tree:
+  - `7f98c8f` (Phase 6 Landing 1): `67268.974 ms`
+  - `06ce76b` (Phase 6 Landing 2): `58006.204 ms`
+  - execution count stayed unchanged at `7262928`
+  - net improvement versus Landing 1: `9262.770 ms` (`13.8%`, about `1.16x` faster)
+- The preferred `perf` workflow could not be used in this environment because `perf` was unavailable, so a separate `RelWithDebInfo -pg` build was profiled with `gprof` on the same benchmark workload. Under that profiling build, the benchmark run was `105708.222 ms` with the same `7262928` executions.
+- The important result from that post-Landing-2 profile is that the targeted revisit-condition materialization no longer appears as a meaningful hotspot:
+  - `revisit_condition(...)`: `0.28%`
+  - `MaskedPorfContext(...)`: `0.19%`
+  - `compute_previous_set(...)`: `0.14%`
+  - `get_cons_tiebreaker_masked(...)`: `0.09%`
+- The larger remaining DPOR-specific self hotspots after Phase 6 shifted elsewhere:
+  - `validate_graph<false>()`: `8.67%`
+  - `thread_trace()`: `7.64%`
+  - `unread_send_event_ids()`: `7.50%`
+  - `build_porf_graph_structure()`: `5.63%`
+  - `for_each_backward_revisit_child(...)`: `4.74%`
+  - `porf_contains()`: `2.39%`
+  - `restrict_from_keep_mask()`: `2.34%`
+  - `add_event_with_index()`: `2.30%`
+  - `set_reads_from_source()`: `1.64%`
+- Conclusion: Phase 6 succeeded and should stop at Landing 2. Landing 3 no longer looks like the best next use of effort. If revisit-local work is revisited later, the remaining candidate is `restrict_from_keep_mask()` / blocked-receive materialization; but based on the current profile shape, the next priority should move to incremental derived-state work around `thread_trace()` and unread-send tracking rather than more `revisit_condition()`-specific optimization.
+
+Phase 6 closeout:
+
+1. keep Landing 1 and Landing 2 in tree
+2. defer Landing 3 unless a fresh profile makes `restrict()` / blocked-receive materialization dominant again
+3. move the next performance phase toward `thread_trace()`, unread-send tracking, and related repeatedly recomputed derived state
+
 ## Suggested Landing Order
 
 1. example-local structured `ValueT`
@@ -758,7 +793,7 @@ Measurement rule for Phase 6:
 8. Phase 5 Landing 1: worker-local checkpoint/rollback infrastructure, including rollback-focused tests and empty-history copy semantics for materialized graphs
 9. Phase 5 Landing 2: reference-based forward recursion in `visit()`, while leaving revisit materialization intentionally unchanged
 10. Phase 5.5: densify remaining hash maps and hash sets in PORF cache construction, `restrict()`, `revisit_condition()`, and `backward_revisit()`
-11. Phase 6: first remove the extra backward-revisit `with_rf()` copy, then only if measurement still justifies it move `revisit_condition()` toward a masked/view-style `G|Previous` tiebreaker path
+11. Phase 6: completed with the backward-revisit `with_rf()` copy removal and the masked `G|Previous` tiebreaker path; do not prioritize Landing 3 without a fresh profile
 12. reserve hot vectors and other minor adjacency-building cleanups where perf justifies them
 
 ## Why This Order
@@ -772,7 +807,7 @@ This order balances:
 
 It also avoids paying the complexity cost of a rollback-based redesign before the cheaper and more local wins have been measured.
 
-After Phase 2, the event-ID cleanup removed a large chunk of graph-copy overhead, so Phases 5 and 6 needed to stay perf-gated. After Phase 4, that gating pointed toward Phase 5: Phase 4 fixed the forward-path cycle/PORF structure cleanly, but the remaining profile was still too allocator-heavy for more PORF-local work. Phase 5 delivered the forward-path copy elimination. Phase 5.5 cleaned up the newly exposed hash-map and reallocation hotspots. The remaining profile now concentrates on revisit-specific materialization, making Phase 6 the natural next step.
+After Phase 2, the event-ID cleanup removed a large chunk of graph-copy overhead, so Phases 5 and 6 needed to stay perf-gated. After Phase 4, that gating pointed toward Phase 5: Phase 4 fixed the forward-path cycle/PORF structure cleanly, but the remaining profile was still too allocator-heavy for more PORF-local work. Phase 5 delivered the forward-path copy elimination. Phase 5.5 cleaned up the newly exposed hash-map and reallocation hotspots. Phase 6 then removed the obvious revisit-only extra materialization costs and paid off. The remaining profile shape no longer points first at `revisit_condition()` materialization; it now points more strongly at repeatedly recomputed derived state such as `thread_trace()`, unread-send discovery, and the remaining PORF / restriction work.
 
 ## Acceptance Criteria
 
@@ -953,4 +988,4 @@ The plan is:
 - structural second
 - explicit about the worker-local versus parallel-task boundary
 
-Phases 1–5.5 are complete. The remaining work (Phase 6: revisit-specific materialization) is the natural next target based on the current profile shape.
+Phases 1–6 are complete. The next likely target is incremental derived-state work, especially `thread_trace()` and unread-send tracking, with any further revisit-local materialization work kept perf-gated.
