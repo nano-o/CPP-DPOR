@@ -37,6 +37,11 @@ The FIFO checks should be implemented from the paper's clauses, not from ad-hoc 
 
 Here `so` is sender order for sends from the same sender thread, and `so|dst` further restricts that order to sends with the same destination.
 
+Expanded intuition from the paper:
+
+- clause (b): no receive may read from a send `s` if there exists an unread earlier same-sender same-destination send `s'` that matches that receive's predicate
+- clause (c): once a receive `r` reads from a later send `s`, an earlier matching same-sender same-destination send `s'` cannot be left to a program-order successor of `r`
+
 Selective receive remains allowed under FIFO p2p: an earlier send that does not match the receive predicate must not block consumption of a later matching send.
 
 ## Design Decisions
@@ -70,6 +75,10 @@ Add a communication-model enum and thread it through:
 - tests that compare DPOR with exhaustive enumeration
 
 This is a scoped prototype decision. The code should document that mixed-model graphs from the paper are intentionally out of scope.
+
+For this whole-program design, the checker should receive the model as constructor state rather than as a per-call argument, for example:
+
+- `ConsistencyCheckerT<ValueT> checker(config.communication_model)`
 
 ### Step 2: Refactor Consistency Into Shared and Model-Specific Layers
 
@@ -116,10 +125,22 @@ This includes:
 - `visit_if_consistent_impl`
 - any helper that tests consistency before recursing
 - test and oracle validation hooks that currently assume async semantics
+- both sequential and parallel exploration paths, since `ParallelExecutor` also recurses through `visit_if_consistent_impl` using the shared `DporConfigT`
 
 This step is mechanically straightforward compared to the tiebreaker/revisit changes below.
 
-### Step 5: Adapt the Tiebreaker and Revisit Path Conservatively
+### Step 5: Generalize RF-Rewrite Consistency Checks
+
+The current async helper reasons only about cycle creation when rewiring a receive's `rf`.
+
+Generalize this into a model-aware helper such as `rf_rewrite_is_consistent(model, graph, recv, send)`:
+
+- async can keep the current reachability-based cycle shortcut
+- FIFO p2p should reuse the model-aware consistency path
+
+This helper is a dependency for both forward candidate checks and the tiebreaker/revisit logic.
+
+### Step 6: Adapt the Tiebreaker and Revisit Path Conservatively
 
 The hardest part of the FIFO change is the `G|Previous` tiebreaker path used by:
 
@@ -137,7 +158,15 @@ The first implementation should choose correctness over preserving the current s
 - materialize `G|Previous` with `restrict_masked`
 - remap the receive id in the restricted graph
 - test each candidate send with the model-aware checker
-- when evaluating revisits on restricted prefixes, tolerate only `MissingReadsFromForReceive` on unrelated receives
+- require the target receive `e` itself to remain fully checked
+- allow other receives in the restricted graph to be temporarily missing `rf` only when their original source was deleted by the restriction
+
+That tolerance rule should be implemented structurally, not by loosely filtering final checker output:
+
+- validate the restricted graph with the surviving valid `rf` edges
+- keep cycle and FIFO checks active on those surviving edges
+- when testing a candidate source for `e`, temporarily assign it and re-run the model-aware check
+- treat `MissingReadsFromForReceive` as ignorable only for receives other than `e` whose source lies outside `G|Previous`
 
 This keeps the FIFO path simple and reviewable even if it is more expensive than the current async-only masked shortcut.
 
@@ -145,17 +174,6 @@ Future optimization target:
 
 - replace FIFO's conservative `restrict_masked` plus full-check approach with a masked model-aware tiebreaker check that avoids materializing `G|Previous`
 - if that is done, it should come with targeted regression tests for `get_cons_tiebreaker_masked` and `revisit_condition`
-
-### Step 6: Generalize RF-Rewrite Consistency Checks
-
-The current async helper reasons only about cycle creation when rewiring a receive's `rf`.
-
-Generalize this into a model-aware helper such as `rf_rewrite_is_consistent(model, graph, recv, send)`:
-
-- async can keep the current reachability-based cycle shortcut
-- FIFO p2p should reuse the model-aware consistency path
-
-This helper is needed both for forward candidate checks and for revisit/tiebreaker logic.
 
 ### Step 7: Keep Forward Receive Branching Correct Before Optimizing It
 
@@ -184,6 +202,7 @@ Add tests in [tests/consistency_test.cpp](/home/dev/project/tests/consistency_te
 - FIFO clause (b) violations
 - FIFO clause (c) violations
 - selective receive skipping earlier non-matching sends
+- different senders targeting the same destination, where cross-sender receive order remains valid under p2p
 - non-blocking receive reading bottom under FIFO p2p
 - self-send under FIFO p2p
 - tiebreaker cases where `FifoP2P` and `Async` choose different candidates
