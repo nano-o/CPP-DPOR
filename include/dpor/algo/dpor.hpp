@@ -872,7 +872,8 @@ inline void for_each_backward_revisit_child(
       continue;
     }
 
-    auto revisited = restricted.with_rf_preserving_known_acyclicity(new_recv_id, new_send_id);
+    restricted.rebind_rf_preserving_known_acyclicity(new_recv_id, new_send_id);
+    auto revisited = std::move(restricted);
     if (!emit_revisited(std::move(revisited))) {
       return;
     }

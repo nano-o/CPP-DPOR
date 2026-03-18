@@ -419,6 +419,43 @@ TEST_CASE("copies and materialized graphs start with empty rollback history",
   REQUIRE(bottomed.checkpoint().rf_undo_size == 0);
 }
 
+TEST_CASE("owned in-place rf rebind preserves clean history and known acyclicity",
+          "[model][exploration_graph][rollback][known_acyclic]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
+  const auto r = g.add_event(2, make_receive_label<Value>());
+  g.set_reads_from(r, s1);
+
+  auto owned = g.restrict({s1, s2, r});
+  REQUIRE(owned.checkpoint().event_undo_size == 0);
+  REQUIRE(owned.checkpoint().rf_undo_size == 0);
+  REQUIRE(owned.is_known_acyclic());
+
+  owned.rebind_rf_preserving_known_acyclicity(2, 1);
+
+  REQUIRE(owned.checkpoint().event_undo_size == 0);
+  REQUIRE(owned.checkpoint().rf_undo_size == 0);
+  REQUIRE(owned.is_known_acyclic());
+  const auto rf_it = owned.reads_from().find(2);
+  REQUIRE(rf_it != owned.reads_from().end());
+  REQUIRE(rf_it->second.is_send());
+  REQUIRE(rf_it->second.send_id() == 1);
+}
+
+TEST_CASE("owned in-place rf rebind rejects graphs with rollback history",
+          "[model][exploration_graph][rollback]") {
+  ExplorationGraph g;
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto s2 = g.add_event(1, SendLabel{.destination = 2, .value = "y"});
+  const auto r = g.add_event(2, make_receive_label<Value>());
+  g.set_reads_from(r, s1);
+
+  REQUIRE(g.checkpoint().event_undo_size > 0);
+  REQUIRE(g.checkpoint().rf_undo_size > 0);
+  REQUIRE_THROWS_AS(g.rebind_rf_preserving_known_acyclicity(r, s2), std::logic_error);
+}
+
 // --- known acyclic metadata ---
 
 TEST_CASE("known acyclicity is preserved on safe forward appends",

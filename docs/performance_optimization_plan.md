@@ -130,7 +130,7 @@ Implementation note:
 
 ### Phase 4: Incremental PORF Only In The Safe Narrow Case
 
-Commits: `705def0`, `46ea46a` (Landing 1); `dd60e24` implemented then reverted in `e889693` (Landing 2, skipped)
+Commits: `705def0`, `46ea46a` (Landing 1); `dd60e24` implemented then reverted in `e889693` (Landing 2, skipped); `70ed725` (Landing 1 follow-up on safe-copy acyclicity preservation)
 
 Incremental PORF maintenance is worth doing, but only for the common forward path:
 
@@ -246,6 +246,7 @@ Landing 1 measurement result:
   - `ensure_porf_cache()`: `1.50%`
   - `porf_contains()`: `0.66%`
 - Conclusion: Landing 1 appears structurally correct but not sufficient for end-to-end speedup on this workload. Landing 2 is now skipped in the mainline plan. The prototype notes below remain useful as justification for skipping it, but the next implementation work should move to Phase 5.
+- Follow-up: commit `70ed725` widened the meaning of `known_acyclic_` from the original append-only fast-path approximation to "this graph is known acyclic", and preserved that fact across safe graph-copy operations (`restrict()`, `with_bottom_rf()`, and proven-safe revisit rewires via `with_rf_preserving_known_acyclicity()`).
 
 #### Landing 2: Warm-Cache Incremental PORF Extension (Skipped)
 
@@ -668,6 +669,83 @@ Only after the forward path is cheaper and the representation cleanups are done 
 
 This phase is intentionally later because it is more complex and easier to get wrong.
 
+Current direction:
+
+- The most obvious remaining revisit-local waste is in `backward_revisit()`: it materializes `restricted = restrict_masked(...)` and then immediately pays a second whole-graph copy via `with_rf_preserving_known_acyclicity(...)`.
+- The receive branch of `revisit_condition()` still materializes `G|Previous` only to compute `get_cons_tiebreaker(G|Previous, e)`. That remains a good second target, but it is a broader semantic change than the extra `with_rf()` copy removal.
+- Therefore Phase 6 should start with the narrower backward-revisit copy elimination, and only then move to a masked/view-style tiebreaker path if perf still justifies it.
+
+#### Landing 1: Eliminate The Extra `with_rf()` Copy In `backward_revisit()`
+
+Goal:
+
+- keep the existing `restrict()`-style materialization for revisit children
+- remove the immediately-following full-graph copy that only rewires one receive's `rf`
+
+Implementation shape:
+
+1. add a dedicated in-place helper on an already-owned `ExplorationGraphT` child for rebinding one receive's `rf`
+2. preserve the existing acyclicity proof structure:
+   - `backward_revisit()` already proves the rewire safe via `!porf_contains(recv, send)`
+   - the child should keep `known_acyclic_` when this helper is used on the restricted graph
+3. keep the worker-local rollback rule intact:
+   - do not reuse plain `set_reads_from()` on the materialized child and leave its undo history behind
+   - the emitted revisit child must still have clean worker-local history, just like `restrict()` / `with_rf()` copies today
+4. leave `revisit_condition()` and blocked-receive rescheduling unchanged in this landing
+
+Why this should come first:
+
+- it is the narrowest remaining copy on the hot revisit path
+- it does not require changing the semantics of `G|Previous`
+- it should directly reduce the visible `with_rf()` / `ExecutionGraphT` copy cost that remained after Phase 5.5
+
+Landing 1 tests:
+
+- backward revisit still emits the same executions and preserves execution counts
+- emitted revisit children still have clean rollback history and can be explored independently
+- safe rewires performed by the new in-place helper preserve `known_acyclic_`
+- existing backward-revisit and consistency tests remain unchanged
+
+#### Landing 2: Compute Receive `revisit_condition()` Without Materializing `G|Previous`
+
+Goal:
+
+- remove owned `restrict_masked()` materialization from the receive-specific branch of `revisit_condition()`
+
+Implementation shape:
+
+1. keep `compute_previous_set()` as the source of the keep mask unless a better dense formulation naturally falls out
+2. replace the current "build restricted graph, remap ids, run `get_cons_tiebreaker()`" flow with a private masked helper that computes the same tiebreaker directly on the original graph plus the keep mask
+3. preserve the exact Must semantics:
+   - the tiebreaker must still be computed on `G|Previous`, not on the full graph
+   - deleted intermediate events must be skipped so the effective program-order predecessor inside the masked computation matches the restricted graph, not the original graph
+4. keep the non-receive and non-blocking receive branches unchanged unless the masked helper naturally subsumes them
+
+Why this is second:
+
+- it removes a larger revisit-local materialization cost, but it is easier to get wrong than Landing 1
+- the correctness burden is semantic, not just ownership-related: the masked helper must behave exactly like restricting the graph first
+
+Landing 2 tests:
+
+- existing `get_cons_tiebreaker()` and `revisit_condition()` regressions still pass unchanged
+- targeted regression where `Previous` omits intermediate same-thread events, proving the masked computation skips deleted PO predecessors correctly
+- targeted regression where the current `rf(e)` lies outside `Previous`, still returning false exactly as today
+
+#### Landing 3: Perf-Gated Follow-Ups Only If Needed
+
+If revisit-local materialization still dominates after Landings 1 and 2, then consider one of these narrower follow-ups:
+
+1. a one-pass restricted-child materializer that combines `restrict()` plus the final `rf` rebind in one build
+2. removing the `restrict_masked()` materialization in blocked-receive rescheduling
+3. a broader restricted-view design only if the smaller owned-child reductions are not enough
+
+Measurement rule for Phase 6:
+
+1. land Landing 1 and rerun focused DPOR tests plus `ctest --preset debug --output-on-failure`
+2. re-measure before starting Landing 2
+3. only continue to the masked/view-style work if the profile still points at revisit-specific materialization
+
 ## Suggested Landing Order
 
 1. example-local structured `ValueT`
@@ -680,7 +758,7 @@ This phase is intentionally later because it is more complex and easier to get w
 8. Phase 5 Landing 1: worker-local checkpoint/rollback infrastructure, including rollback-focused tests and empty-history copy semantics for materialized graphs
 9. Phase 5 Landing 2: reference-based forward recursion in `visit()`, while leaving revisit materialization intentionally unchanged
 10. Phase 5.5: densify remaining hash maps and hash sets in PORF cache construction, `restrict()`, `revisit_condition()`, and `backward_revisit()`
-11. Phase 6: revisit-specific restricted views or other deeper structural work only if revisit-heavy materialization still dominates after the representation cleanups
+11. Phase 6: first remove the extra backward-revisit `with_rf()` copy, then only if measurement still justifies it move `revisit_condition()` toward a masked/view-style `G|Previous` tiebreaker path
 12. reserve hot vectors and other minor adjacency-building cleanups where perf justifies them
 
 ## Why This Order

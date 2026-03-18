@@ -9,6 +9,8 @@
 // - with_rf_preserving_known_acyclicity(recv, send): returns a copy with rf
 //   assignment changed while preserving known acyclicity when the caller has
 //   already proved the rewrite safe
+// - rebind_rf_preserving_known_acyclicity(recv, send): rewires an already-owned
+//   graph in place without introducing rollback history
 // - with_nd_value(nd_event, value): returns a copy with ND choice value set
 // - checkpoint()/rollback(): worker-local temporary mutation support
 // - thread_trace(tid): extracts value sequence for a thread
@@ -372,6 +374,27 @@ class ExplorationGraphT {
     return copy_with_rf_source(recv, ReadsFromSource::bottom(),
                                known_acyclic_ && is_valid_event_id(recv) &&
                                    is_receive(event(recv)));
+  }
+
+  // Rebinds the rf assignment for recv to send in place. This is intended for
+  // freshly materialized owned graphs; worker-local graphs with active rollback
+  // history must continue using the undo-logging mutators.
+  void rebind_rf_preserving_known_acyclicity(EventId recv, EventId send) {
+    if (!event_undo_log_.empty() || !rf_undo_log_.empty()) {
+      throw std::logic_error(
+          "rebind_rf_preserving_known_acyclicity requires clean rollback history");
+    }
+
+    const bool preserve_known_acyclicity =
+        known_acyclic_ && is_valid_event_id(recv) && is_receive(event(recv)) &&
+        is_valid_event_id(send) && is_send(event(send));
+    graph_.set_reads_from_source(recv, ReadsFromSource::from_send(send));
+    porf_cache_ = nullptr;
+    if (preserve_known_acyclicity) {
+      mark_known_acyclic();
+    } else {
+      invalidate_known_acyclicity();
+    }
   }
 
   // Returns a copy with the ND choice value for nd_event changed.
