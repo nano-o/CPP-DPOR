@@ -339,7 +339,8 @@ template <typename ValueT>
   algo::DporConfigT<ValueT> config;
   config.program = program;
   config.on_execution = [&](const model::ExplorationGraphT<ValueT>& graph) {
-    const auto consistency = checker.check(graph);
+    auto checked_graph = graph;
+    const auto consistency = checker.check(checked_graph);
     if (!consistency.is_consistent()) {
       comparison.found_inconsistent_graph = true;
     }

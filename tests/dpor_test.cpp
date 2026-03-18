@@ -1507,6 +1507,28 @@ TEST_CASE("tiebreaker should not pick an already-consumed send", "[algo][dpor][r
   REQUIRE(chosen == s2);
 }
 
+TEST_CASE("tiebreaker should skip compatible sends that would create a cycle",
+          "[algo][dpor][regression]") {
+  ExplorationGraph graph;
+
+  const auto s_current = graph.add_event(4, SendLabel{.destination = 1, .value = "x"});
+  const auto receive = graph.add_event(1, make_receive_label_from_values<Value>({"x"}));
+  const auto s_mid = graph.add_event(1, SendLabel{.destination = 2, .value = "chain"});
+  const auto r_mid = graph.add_event(2, make_receive_label_from_values<Value>({"chain"}));
+  const auto s_bad = graph.add_event(2, SendLabel{.destination = 1, .value = "x"});
+  const auto s_good = graph.add_event(3, SendLabel{.destination = 1, .value = "x"});
+
+  graph.set_reads_from(receive, s_current);
+  graph.set_reads_from(r_mid, s_mid);
+
+  REQUIRE_FALSE(graph.has_causal_cycle());
+  REQUIRE(graph.porf_contains(receive, s_bad));
+  REQUIRE_FALSE(graph.porf_contains(receive, s_good));
+
+  const auto chosen = dpor::algo::detail::get_cons_tiebreaker(graph, receive);
+  REQUIRE(chosen == s_good);
+}
+
 TEST_CASE("receive revisit condition should use tiebreaker from G|Previous",
           "[algo][dpor][regression]") {
   ExplorationGraph graph;

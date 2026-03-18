@@ -408,8 +408,17 @@ class ExplorationGraphT {
   [[nodiscard]] bool has_porf_cache() const noexcept { return static_cast<bool>(porf_cache_); }
 
   // This tracks only the narrow append-only fast path. The checker still runs
-  // full endpoint/RF validation before using it.
+  // full endpoint/RF validation before using it, and may re-arm it after a
+  // graph has been fully validated as acyclic.
   [[nodiscard]] bool is_known_acyclic() const noexcept { return known_acyclic_; }
+
+  // Metadata-only hook for the consistency checker: once a graph has been
+  // fully validated as acyclic, later tail appends can use the append-only
+  // fast path again.
+  void mark_known_acyclic() noexcept {
+    known_acyclic_ = true;
+    pending_fresh_receive_id_.reset();
+  }
 
   // Returns receive event IDs in the destination thread of the given send.
   [[nodiscard]] std::vector<EventId> receives_in_destination(EventId send_id) const {

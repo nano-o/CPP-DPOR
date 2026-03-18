@@ -617,6 +617,59 @@ TEST_CASE("exploration-graph checker overload reuses warm porf cache",
   REQUIRE(graph.has_porf_cache());
 }
 
+TEST_CASE("exploration-graph checker re-arms known acyclicity for with_rf copies",
+          "[model][consistency][exploration_graph]") {
+  ExplorationGraph graph;
+  const auto s1 = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r1 = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
+  graph.set_reads_from(r1, s1);
+
+  auto revisited = graph.with_rf(r1, s1);
+  REQUIRE_FALSE(revisited.is_known_acyclic());
+  REQUIRE_FALSE(revisited.has_porf_cache());
+
+  const AsyncConsistencyChecker checker;
+  const auto result = checker.check(revisited);
+
+  REQUIRE(result.is_consistent());
+  REQUIRE(revisited.is_known_acyclic());
+  REQUIRE_FALSE(revisited.has_porf_cache());
+
+  const auto s2 = revisited.add_event(1, SendLabel{.destination = 2, .value = "y"});
+  REQUIRE(revisited.is_known_acyclic());
+  const auto r2 = revisited.add_event(2, make_receive_label_from_values<Value>({"y"}));
+  REQUIRE(revisited.is_known_acyclic());
+  revisited.set_reads_from(r2, s2);
+  REQUIRE(revisited.is_known_acyclic());
+}
+
+TEST_CASE("exploration-graph checker re-arms known acyclicity for restricted graphs",
+          "[model][consistency][exploration_graph]") {
+  ExplorationGraph graph;
+  const auto s1 = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto r1 = graph.add_event(2, make_receive_label_from_values<Value>({"x"}));
+  const auto s2 = graph.add_event(2, SendLabel{.destination = 3, .value = "side"});
+  graph.set_reads_from(r1, s1);
+
+  auto restricted = graph.restrict({s1, r1, s2});
+  REQUIRE_FALSE(restricted.is_known_acyclic());
+  REQUIRE_FALSE(restricted.has_porf_cache());
+
+  const AsyncConsistencyChecker checker;
+  const auto result = checker.check(restricted);
+
+  REQUIRE(result.is_consistent());
+  REQUIRE(restricted.is_known_acyclic());
+  REQUIRE_FALSE(restricted.has_porf_cache());
+
+  const auto s3 = restricted.add_event(1, SendLabel{.destination = 2, .value = "z"});
+  REQUIRE(restricted.is_known_acyclic());
+  const auto r2 = restricted.add_event(2, make_receive_label_from_values<Value>({"z"}));
+  REQUIRE(restricted.is_known_acyclic());
+  restricted.set_reads_from(r2, s3);
+  REQUIRE(restricted.is_known_acyclic());
+}
+
 TEST_CASE(
     "exploration-graph checker overload still detects cycles after with_rf clears known acyclicity",
     "[model][consistency][exploration_graph]") {
@@ -628,7 +681,7 @@ TEST_CASE(
 
   graph.set_reads_from(r2, s1);
 
-  const auto revisited = graph.with_rf(r1, s2);
+  auto revisited = graph.with_rf(r1, s2);
   REQUIRE_FALSE(revisited.is_known_acyclic());
   REQUIRE_FALSE(revisited.has_porf_cache());
 
@@ -638,6 +691,7 @@ TEST_CASE(
 
   REQUIRE(issue_codes(exploration_result) == issue_codes(execution_result));
   REQUIRE(has_issue(exploration_result, ConsistencyIssueCode::CausalCycle));
+  REQUIRE_FALSE(revisited.is_known_acyclic());
 }
 
 // --- Custom value type ---

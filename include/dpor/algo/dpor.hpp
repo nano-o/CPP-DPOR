@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -180,6 +181,23 @@ template <typename ValueT>
   return result;
 }
 
+template <typename ValueT>
+[[nodiscard]] inline bool rewiring_recv_creates_cycle(
+    const model::ExplorationGraphT<ValueT>& graph,
+    typename model::ExplorationGraphT<ValueT>::EventId recv,
+    typename model::ExplorationGraphT<ValueT>::EventId send) {
+  // get_cons_tiebreaker() is evaluated on G|Previous while exploring already
+  // consistent executions. restrict() clears the metadata bit, but removing
+  // events cannot introduce a new causal cycle.
+  assert(!graph.has_causal_cycle() && "get_cons_tiebreaker requires an acyclic graph");
+
+  // Rewiring recv replaces its single inbound rf edge with send -> recv.
+  // In an acyclic graph, removing the old inbound edge cannot create new
+  // reachability from recv, so the rewritten graph is cyclic iff recv already
+  // reaches send in the original graph.
+  return graph.porf_contains(recv, send);
+}
+
 // GETCONSTIEBREAKER: for async, the tid-minimal send that is consistent
 // (no cycle when assigned as rf source for recv).
 template <typename ValueT>
@@ -251,8 +269,7 @@ template <typename ValueT>
 
   // Return the first candidate that doesn't create a cycle.
   for (const auto& candidate : candidates) {
-    auto test_graph = graph.with_rf(recv, candidate.send_id);
-    if (!test_graph.has_causal_cycle()) {
+    if (!rewiring_recv_creates_cycle(graph, recv, candidate.send_id)) {
       return candidate.send_id;
     }
   }

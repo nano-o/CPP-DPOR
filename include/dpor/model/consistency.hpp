@@ -52,7 +52,7 @@ class AsyncConsistencyCheckerT {
     return validation.result;
   }
 
-  [[nodiscard]] ConsistencyResult check(const ExplorationGraphT<ValueT>& graph) const {
+  [[nodiscard]] ConsistencyResult check(ExplorationGraphT<ValueT>& graph) const {
     auto validation = validate_graph<false>(graph.execution_graph());
     if (!validation.cycle_query_safe) {
       // Malformed graphs are not on the DPOR hot path. Fall back to the
@@ -68,6 +68,10 @@ class AsyncConsistencyCheckerT {
         graph.has_porf_cache() ? graph.has_causal_cycle() : graph.has_causal_cycle_without_cache();
     if (has_cycle) {
       add_causal_cycle_issue(validation.result);
+      return validation.result;
+    }
+    if (validation.result.is_consistent()) {
+      graph.mark_known_acyclic();
     }
     return validation.result;
   }
