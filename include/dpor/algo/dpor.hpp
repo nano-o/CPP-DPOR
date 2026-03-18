@@ -346,7 +346,10 @@ template <typename ValueT>
     return !rewiring_recv_creates_cycle(graph, recv, send);
   }
 
-  auto rewritten = graph.with_rf(recv, send);
+  const bool preserves_acyclicity =
+      graph.is_known_acyclic() && !rewiring_recv_creates_cycle(graph, recv, send);
+  auto rewritten = preserves_acyclicity ? graph.with_rf_preserving_known_acyclicity(recv, send)
+                                        : graph.with_rf(recv, send);
   const auto consistency =
       allow_non_target_missing_reads
           ? check_consistency_allowing_missing_reads_except(rewritten, recv, communication_model)

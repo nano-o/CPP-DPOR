@@ -1525,6 +1525,21 @@ TEST_CASE("fifo p2p tiebreaker skips FIFO-inconsistent smaller-tid send",
           s20);
 }
 
+TEST_CASE("fifo rf rewrite helper accepts safe rewires on known-acyclic graphs",
+          "[algo][dpor][fifo_p2p][regression]") {
+  ExplorationGraph graph;
+
+  const auto s10 = graph.add_event(1, SendLabel{.destination = 3, .value = "a"});
+  const auto s20 = graph.add_event(2, SendLabel{.destination = 3, .value = "a"});
+  const auto r0 = graph.add_event(3, make_receive_label_from_values<Value>({"a"}));
+
+  graph.set_reads_from(r0, s10);
+  REQUIRE(graph.is_known_acyclic());
+
+  REQUIRE(dpor::algo::detail::rf_rewrite_is_consistent(graph, r0, s20,
+                                                       CommunicationModel::FifoP2P));
+}
+
 TEST_CASE("tiebreaker should skip compatible sends that would create a cycle",
           "[algo][dpor][regression]") {
   ExplorationGraph graph;
