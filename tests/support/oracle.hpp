@@ -7,8 +7,10 @@ namespace dpor::test_support {
 
 template <typename ValueT>
 inline void require_dpor_matches_oracle(const algo::ProgramT<ValueT>& program,
-                                        const std::string& description) {
-  const auto comparison = compare_dpor_with_oracle(program);
+                                        const std::string& description,
+                                        const model::CommunicationModel communication_model =
+                                            model::CommunicationModel::Async) {
+  const auto comparison = compare_dpor_with_oracle(program, communication_model);
 
   INFO("oracle program: " << description);
   INFO("oracle signatures: " << comparison.oracle_signatures.size());

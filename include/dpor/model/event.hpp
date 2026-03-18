@@ -31,6 +31,8 @@ using ThreadId = std::uint32_t;
 using EventIndex = std::uint32_t;
 using Value = std::string;
 
+enum class CommunicationModel : std::uint8_t { Async, FifoP2P };
+
 enum class ReceiveMode : std::uint8_t { Blocking, NonBlocking };
 
 struct BottomValue {

@@ -156,6 +156,99 @@ TEST_CASE("blocking receive reading bottom reports BlockingReceiveReadsBottom",
   REQUIRE(has_issue(result, ConsistencyIssueCode::BlockingReceiveReadsBottom));
 }
 
+TEST_CASE("fifo p2p rejects receive that skips unread earlier matching send",
+          "[model][consistency][fifo_p2p]") {
+  ExecutionGraph graph;
+  static_cast<void>(graph.add_event(1, SendLabel{.destination = 2, .value = "a"}));
+  const auto later_send = graph.add_event(1, SendLabel{.destination = 2, .value = "b"});
+  const auto receive = graph.add_event(2, make_receive_label<Value>());
+  graph.set_reads_from(receive, later_send);
+
+  const FifoP2PConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE_FALSE(result.is_consistent());
+  REQUIRE(has_issue(result, ConsistencyIssueCode::FifoP2PUnreadEarlierMatchingSend));
+  REQUIRE_FALSE(has_issue(result, ConsistencyIssueCode::FifoP2PReceiveOrderViolation));
+}
+
+TEST_CASE("fifo p2p allows selective receive to skip earlier non-matching send",
+          "[model][consistency][fifo_p2p]") {
+  ExecutionGraph graph;
+  static_cast<void>(graph.add_event(1, SendLabel{.destination = 2, .value = "stale"}));
+  const auto fresh_send = graph.add_event(1, SendLabel{.destination = 2, .value = "fresh"});
+  const auto receive = graph.add_event(2, make_receive_label_from_values<Value>({"fresh"}));
+  graph.set_reads_from(receive, fresh_send);
+
+  const FifoP2PConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE(result.is_consistent());
+}
+
+TEST_CASE("fifo p2p rejects out-of-order consumption across successive receives",
+          "[model][consistency][fifo_p2p]") {
+  ExecutionGraph graph;
+  const auto earlier_send = graph.add_event(1, SendLabel{.destination = 2, .value = "a"});
+  const auto later_send = graph.add_event(1, SendLabel{.destination = 2, .value = "b"});
+  const auto earlier_receive = graph.add_event(2, make_receive_label<Value>());
+  const auto later_receive = graph.add_event(2, make_receive_label_from_values<Value>({"a"}));
+  graph.set_reads_from(earlier_receive, later_send);
+  graph.set_reads_from(later_receive, earlier_send);
+
+  const FifoP2PConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE_FALSE(result.is_consistent());
+  REQUIRE(has_issue(result, ConsistencyIssueCode::FifoP2PReceiveOrderViolation));
+  REQUIRE_FALSE(has_issue(result, ConsistencyIssueCode::FifoP2PUnreadEarlierMatchingSend));
+}
+
+TEST_CASE("fifo p2p permits different senders to the same destination in either receive order",
+          "[model][consistency][fifo_p2p]") {
+  ExecutionGraph graph;
+  const auto send_a = graph.add_event(1, SendLabel{.destination = 3, .value = "a"});
+  const auto send_b = graph.add_event(2, SendLabel{.destination = 3, .value = "b"});
+  const auto receive_b = graph.add_event(3, make_receive_label_from_values<Value>({"b"}));
+  const auto receive_a = graph.add_event(3, make_receive_label_from_values<Value>({"a"}));
+  graph.set_reads_from(receive_b, send_b);
+  graph.set_reads_from(receive_a, send_a);
+
+  const FifoP2PConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE(result.is_consistent());
+}
+
+TEST_CASE("fifo p2p allows non-blocking receives to read bottom",
+          "[model][consistency][fifo_p2p]") {
+  ExecutionGraph graph;
+  static_cast<void>(graph.add_event(1, SendLabel{.destination = 2, .value = "a"}));
+  static_cast<void>(graph.add_event(1, SendLabel{.destination = 2, .value = "b"}));
+  const auto receive = graph.add_event(2, make_nonblocking_receive_label<Value>());
+  graph.set_reads_from_bottom(receive);
+
+  const FifoP2PConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE(result.is_consistent());
+}
+
+TEST_CASE("fifo p2p handles self-sends with sender order", "[model][consistency][fifo_p2p]") {
+  ExecutionGraph graph;
+  const auto first_send = graph.add_event(1, SendLabel{.destination = 1, .value = "a"});
+  const auto second_send = graph.add_event(1, SendLabel{.destination = 1, .value = "b"});
+  const auto first_receive = graph.add_event(1, make_receive_label_from_values<Value>({"a"}));
+  const auto second_receive = graph.add_event(1, make_receive_label_from_values<Value>({"b"}));
+  graph.set_reads_from(first_receive, first_send);
+  graph.set_reads_from(second_receive, second_send);
+
+  const FifoP2PConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE(result.is_consistent());
+}
+
 // --- InvalidEventReference ---
 
 TEST_CASE("reads-from with invalid receive id reports InvalidEventReference",

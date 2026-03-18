@@ -266,8 +266,9 @@ template <typename ValueT>
 template <typename ValueT>
 inline void enumerate_consistent_executions(const algo::ProgramT<ValueT>& program,
                                             const model::ExplorationGraphT<ValueT>& graph,
-                                            model::AsyncConsistencyCheckerT<ValueT>& checker,
+                                            const model::CommunicationModel communication_model,
                                             OracleExplorationStatsT<ValueT>& stats) {
+  model::ConsistencyCheckerT<ValueT> checker(communication_model);
   const auto transitions = enumerate_enabled_transitions(program, graph);
   if (!transitions.empty()) {
     for (const auto& transition : transitions) {
@@ -286,7 +287,7 @@ inline void enumerate_consistent_executions(const algo::ProgramT<ValueT>& progra
         continue;
       }
 
-      enumerate_consistent_executions(program, next_graph, checker, stats);
+      enumerate_consistent_executions(program, next_graph, communication_model, stats);
     }
     return;
   }
@@ -294,7 +295,7 @@ inline void enumerate_consistent_executions(const algo::ProgramT<ValueT>& progra
   const auto rescheduled = enumerate_reschedulable_graphs(program, graph);
   if (!rescheduled.empty()) {
     for (const auto& unblocked : rescheduled) {
-      enumerate_consistent_executions(program, unblocked, checker, stats);
+      enumerate_consistent_executions(program, unblocked, communication_model, stats);
     }
     return;
   }
@@ -305,17 +306,19 @@ inline void enumerate_consistent_executions(const algo::ProgramT<ValueT>& progra
 
 template <typename ValueT>
 [[nodiscard]] inline OracleExplorationStatsT<ValueT> collect_oracle_stats(
-    const algo::ProgramT<ValueT>& program) {
-  model::AsyncConsistencyCheckerT<ValueT> checker;
+    const algo::ProgramT<ValueT>& program,
+    const model::CommunicationModel communication_model = model::CommunicationModel::Async) {
   OracleExplorationStatsT<ValueT> stats;
-  enumerate_consistent_executions(program, model::ExplorationGraphT<ValueT>{}, checker, stats);
+  enumerate_consistent_executions(program, model::ExplorationGraphT<ValueT>{}, communication_model,
+                                  stats);
   return stats;
 }
 
 template <typename ValueT>
 [[nodiscard]] inline std::set<std::string> collect_oracle_signatures(
-    const algo::ProgramT<ValueT>& program) {
-  return collect_oracle_stats(program).signatures;
+    const algo::ProgramT<ValueT>& program,
+    const model::CommunicationModel communication_model = model::CommunicationModel::Async) {
+  return collect_oracle_stats(program, communication_model).signatures;
 }
 
 template <typename ValueT>
@@ -331,13 +334,15 @@ struct OracleComparisonT {
 
 template <typename ValueT>
 [[nodiscard]] inline OracleComparisonT<ValueT> compare_dpor_with_oracle(
-    const algo::ProgramT<ValueT>& program) {
+    const algo::ProgramT<ValueT>& program,
+    const model::CommunicationModel communication_model = model::CommunicationModel::Async) {
   OracleComparisonT<ValueT> comparison;
-  comparison.oracle_signatures = collect_oracle_stats(program).signatures;
+  comparison.oracle_signatures = collect_oracle_stats(program, communication_model).signatures;
 
-  model::AsyncConsistencyCheckerT<ValueT> checker;
+  model::ConsistencyCheckerT<ValueT> checker(communication_model);
   algo::DporConfigT<ValueT> config;
   config.program = program;
+  config.communication_model = communication_model;
   config.on_execution = [&](const model::ExplorationGraphT<ValueT>& graph) {
     auto checked_graph = graph;
     const auto consistency = checker.check(checked_graph);

@@ -1507,6 +1507,24 @@ TEST_CASE("tiebreaker should not pick an already-consumed send", "[algo][dpor][r
   REQUIRE(chosen == s2);
 }
 
+TEST_CASE("fifo p2p tiebreaker skips FIFO-inconsistent smaller-tid send",
+          "[algo][dpor][fifo_p2p][regression]") {
+  ExplorationGraph graph;
+
+  const auto s10 = graph.add_event(1, SendLabel{.destination = 3, .value = "a"});
+  const auto s11 = graph.add_event(1, SendLabel{.destination = 3, .value = "b"});
+  const auto s20 = graph.add_event(2, SendLabel{.destination = 3, .value = "c"});
+  const auto r0 = graph.add_event(3, make_receive_label<Value>());
+  const auto r1 = graph.add_event(3, make_receive_label_from_values<Value>({"a"}));
+
+  graph.set_reads_from(r0, s20);
+  graph.set_reads_from(r1, s10);
+
+  REQUIRE(dpor::algo::detail::get_cons_tiebreaker(graph, r0, CommunicationModel::Async) == s11);
+  REQUIRE(dpor::algo::detail::get_cons_tiebreaker(graph, r0, CommunicationModel::FifoP2P) ==
+          s20);
+}
+
 TEST_CASE("tiebreaker should skip compatible sends that would create a cycle",
           "[algo][dpor][regression]") {
   ExplorationGraph graph;
@@ -1819,6 +1837,134 @@ TEST_CASE("paper ex 2.8: receives can consume messages out of sender order with 
   require_dpor_matches_oracle(config.program, "T1=[S(2,1),S(2,2)]; T2=[Rb({2}),Rb({1})]");
 }
 
+TEST_CASE("fifo p2p enforces FIFO for same-sender receive choices", "[algo][dpor][fifo_p2p]") {
+  DporConfig config;
+  config.communication_model = CommunicationModel::FifoP2P;
+  std::set<std::string> observed_receive_values;
+
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 2, .value = "a"};
+    }
+    if (step == 1) {
+      return SendLabel{.destination = 2, .value = "b"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[2] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
+    if (trace.empty()) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&observed_receive_values](const ExplorationGraph& graph) {
+    const auto trace = graph.thread_trace(2);
+    if (!trace.empty() && !trace[0].is_bottom()) {
+      observed_receive_values.insert(trace[0].value());
+    }
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(observed_receive_values == std::set<std::string>{"a"});
+  require_dpor_matches_oracle(
+      config.program, "fifo_p2p: T1=[S(2,a),S(2,b)]; T2=[Rb(*)]", CommunicationModel::FifoP2P);
+}
+
+TEST_CASE("fifo p2p still allows selective receives to consume later matching sends",
+          "[algo][dpor][fifo_p2p]") {
+  DporConfig config;
+  config.communication_model = CommunicationModel::FifoP2P;
+  std::vector<std::string> observed_trace;
+
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 2, .value = "1"};
+    }
+    if (step == 1) {
+      return SendLabel{.destination = 2, .value = "2"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[2] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"2"});
+    }
+    if (step == 1 && trace.size() == 1) {
+      return make_receive_label_from_values<Value>({"1"});
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&observed_trace](const ExplorationGraph& graph) {
+    observed_trace.clear();
+    for (const auto& value : graph.thread_trace(2)) {
+      observed_trace.push_back(value.value());
+    }
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(observed_trace == std::vector<std::string>{"2", "1"});
+  require_dpor_matches_oracle(
+      config.program, "fifo_p2p: T1=[S(2,1),S(2,2)]; T2=[Rb({2}),Rb({1})]",
+      CommunicationModel::FifoP2P);
+}
+
+TEST_CASE("fifo p2p permits different senders to the same destination in cross-sender order",
+          "[algo][dpor][fifo_p2p]") {
+  DporConfig config;
+  config.communication_model = CommunicationModel::FifoP2P;
+  std::vector<std::string> observed_trace;
+
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 3, .value = "a"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 3, .value = "b"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[3] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"b"});
+    }
+    if (step == 1 && trace.size() == 1) {
+      return make_receive_label_from_values<Value>({"a"});
+    }
+    return std::nullopt;
+  };
+
+  config.on_execution = [&observed_trace](const ExplorationGraph& graph) {
+    observed_trace.clear();
+    for (const auto& value : graph.thread_trace(3)) {
+      observed_trace.push_back(value.value());
+    }
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(observed_trace == std::vector<std::string>{"b", "a"});
+  require_dpor_matches_oracle(
+      config.program, "fifo_p2p: T1=[S(3,a)]; T2=[S(3,b)]; T3=[Rb({b}),Rb({a})]",
+      CommunicationModel::FifoP2P);
+}
+
 TEST_CASE("paper ex 2.9: ns+r explores N executions (lazy ordering)", "[algo][dpor][paper]") {
   DporConfig config;
   std::set<std::string> first_receive_values;
@@ -1968,6 +2114,67 @@ TEST_CASE("paper ex 4.2: backward revisit recovers missed rf option", "[algo][dp
   REQUIRE(result.executions_explored == 2);
   REQUIRE(observed_receive_values == std::set<std::string>{"1", "2"});
   require_dpor_matches_oracle(config.program, "T1=[S(2,1)]; T2=[Rb(*)]; T3=[S(2,2)]");
+}
+
+TEST_CASE("fifo p2p prunes backward revisits that would skip an earlier same-sender send",
+          "[algo][dpor][fifo_p2p][regression]") {
+  Program program;
+
+  program.threads[1] = [](const ThreadTrace& trace,
+                          std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 2, .value = "a"};
+    }
+    if (step == 1 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"token"});
+    }
+    if (step == 2 && trace.size() == 1) {
+      return SendLabel{.destination = 2, .value = "b"};
+    }
+    return std::nullopt;
+  };
+  program.threads[2] = [](const ThreadTrace& trace,
+                          std::size_t) -> std::optional<EventLabel> {
+    if (trace.empty()) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+  program.threads[3] = [](const ThreadTrace&,
+                          std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "token"};
+    }
+    return std::nullopt;
+  };
+
+  DporConfig async_config;
+  async_config.program = program;
+  async_config.communication_model = CommunicationModel::Async;
+
+  DporConfig fifo_config;
+  fifo_config.program = program;
+  fifo_config.communication_model = CommunicationModel::FifoP2P;
+
+  std::set<std::string> fifo_observed_receive_values;
+  fifo_config.on_execution = [&fifo_observed_receive_values](const ExplorationGraph& graph) {
+    const auto trace = graph.thread_trace(2);
+    if (!trace.empty()) {
+      fifo_observed_receive_values.insert(trace[0].value());
+    }
+  };
+
+  const auto async_result = verify(async_config);
+  const auto fifo_result = verify(fifo_config);
+
+  REQUIRE(async_result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(async_result.executions_explored == 2);
+  REQUIRE(fifo_result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(fifo_result.executions_explored == 1);
+  REQUIRE(fifo_observed_receive_values == std::set<std::string>{"a"});
+  require_dpor_matches_oracle(
+      program, "fifo_p2p revisit prune: T1=[S(2,a),Rb({token}),S(2,b)]; T2=[Rb(*)]; T3=[S(1,token)]",
+      CommunicationModel::FifoP2P);
 }
 
 TEST_CASE("paper ex 4.3: revisiting condition avoids duplicate exploration in s+s+r-br",

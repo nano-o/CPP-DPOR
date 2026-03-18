@@ -3,8 +3,8 @@
 // DPOR exploration engine — Algorithm 1 from Enea et al., 2024.
 //
 // Given a program (collection of thread functions), explores all consistent
-// execution graphs in a complete and optimal manner for the async communication
-// model. Implements backward revisiting.
+// execution graphs in a complete and optimal manner for the configured
+// communication model. Implements backward revisiting.
 //
 // All functions are header-only and templated on ValueT.
 
@@ -49,6 +49,7 @@ template <typename ValueT>
 struct DporConfigT {
   ProgramT<ValueT> program;
   std::size_t max_depth{1000};
+  model::CommunicationModel communication_model{model::CommunicationModel::Async};
   ExecutionObserverT<ValueT> on_execution{};
 };
 
@@ -107,6 +108,25 @@ template <typename ValueT>
     return send != nullptr && send->destination == tid && receive.accepts(send->value);
   });
 }
+
+template <typename ValueT>
+[[nodiscard]] inline model::ConsistencyResult check_consistency(
+    model::ExplorationGraphT<ValueT>& graph,
+    const model::CommunicationModel communication_model) {
+  model::ConsistencyCheckerT<ValueT> checker(communication_model);
+  return checker.check(graph);
+}
+
+template <typename ValueT>
+struct AllowMissingReadsForNonTargetT {
+  using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
+
+  EvId target_receive{model::ExplorationGraphT<ValueT>::kNoSource};
+
+  [[nodiscard]] bool operator()(const EvId receive_id) const noexcept {
+    return receive_id != target_receive;
+  }
+};
 
 // Compute the next event to add to the graph, following Algorithm 1's next_P(G).
 // Iterates threads by ascending ThreadId, calls the thread function with the
@@ -181,8 +201,8 @@ template <typename ValueT>
   return result;
 }
 
-// Lightweight `(po ∪ rf)` view over a kept-event mask. This lets
-// revisit_condition() emulate `G|Previous` without materializing a child graph.
+// Lightweight `(po ∪ rf)` view over a kept-event mask. Async revisit/tiebreaker
+// checks use this to emulate `G|Previous` without materializing a child graph.
 template <typename ValueT>
 class MaskedPorfContext {
  public:
@@ -305,12 +325,43 @@ template <typename ValueT>
   return graph.porf_contains(recv, send);
 }
 
-// GETCONSTIEBREAKER: for async, the tid-minimal send that is consistent
-// (no cycle when assigned as rf source for recv).
+template <typename ValueT>
+[[nodiscard]] inline model::ConsistencyResult check_consistency_allowing_missing_reads_except(
+    model::ExplorationGraphT<ValueT>& graph,
+    const typename model::ExplorationGraphT<ValueT>::EventId target_receive,
+    const model::CommunicationModel communication_model) {
+  return model::detail::check_exploration_graph(
+      graph, communication_model, AllowMissingReadsForNonTargetT<ValueT>{target_receive});
+}
+
+template <typename ValueT>
+[[nodiscard]] inline bool rf_rewrite_is_consistent(
+    const model::ExplorationGraphT<ValueT>& graph,
+    const typename model::ExplorationGraphT<ValueT>::EventId recv,
+    const typename model::ExplorationGraphT<ValueT>::EventId send,
+    const model::CommunicationModel communication_model,
+    const bool allow_non_target_missing_reads = false) {
+  if (communication_model == model::CommunicationModel::Async &&
+      !allow_non_target_missing_reads) {
+    return !rewiring_recv_creates_cycle(graph, recv, send);
+  }
+
+  auto rewritten = graph.with_rf(recv, send);
+  const auto consistency =
+      allow_non_target_missing_reads
+          ? check_consistency_allowing_missing_reads_except(rewritten, recv, communication_model)
+          : check_consistency(rewritten, communication_model);
+  return consistency.is_consistent();
+}
+
+// GETCONSTIEBREAKER: the tid-minimal send that remains consistent for recv to
+// read from under the configured communication model.
 template <typename ValueT>
 [[nodiscard]] inline typename model::ExplorationGraphT<ValueT>::EventId get_cons_tiebreaker(
     const model::ExplorationGraphT<ValueT>& graph,
-    typename model::ExplorationGraphT<ValueT>::EventId recv) {
+    typename model::ExplorationGraphT<ValueT>::EventId recv,
+    const model::CommunicationModel communication_model = model::CommunicationModel::Async,
+    const bool allow_non_target_missing_reads = false) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
 
   const auto& recv_evt = graph.event(recv);
@@ -374,9 +425,11 @@ template <typename ValueT>
     return a.send_id < b.send_id;
   });
 
-  // Return the first candidate that doesn't create a cycle.
+  // Return the first candidate that remains consistent under the configured
+  // communication model.
   for (const auto& candidate : candidates) {
-    if (!rewiring_recv_creates_cycle(graph, recv, candidate.send_id)) {
+    if (rf_rewrite_is_consistent(graph, recv, candidate.send_id, communication_model,
+                                 allow_non_target_missing_reads)) {
       return candidate.send_id;
     }
   }
@@ -388,8 +441,40 @@ template <typename ValueT>
 [[nodiscard]] inline typename model::ExplorationGraphT<ValueT>::EventId
 get_cons_tiebreaker_masked(const model::ExplorationGraphT<ValueT>& graph,
                            const std::vector<std::uint8_t>& keep_mask,
-                           typename model::ExplorationGraphT<ValueT>::EventId recv) {
+                           typename model::ExplorationGraphT<ValueT>::EventId recv,
+                           const model::CommunicationModel communication_model =
+                               model::CommunicationModel::Async) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
+
+  if (communication_model != model::CommunicationModel::Async) {
+    auto restricted = model::detail::restrict_masked(graph, keep_mask);
+
+    std::vector<EvId> new_to_old;
+    new_to_old.reserve(restricted.event_count());
+    EvId remapped_recv = model::ExplorationGraphT<ValueT>::kNoSource;
+    for (const auto old_id : graph.insertion_order()) {
+      if (old_id >= keep_mask.size() || keep_mask[old_id] == 0U) {
+        continue;
+      }
+      if (old_id == recv) {
+        remapped_recv = static_cast<EvId>(new_to_old.size());
+      }
+      new_to_old.push_back(old_id);
+    }
+
+    if (remapped_recv == model::ExplorationGraphT<ValueT>::kNoSource) {
+      throw std::logic_error(
+          "get_cons_tiebreaker invariant violated: event missing from keep mask");
+    }
+
+    const auto remapped_send = get_cons_tiebreaker(restricted, remapped_recv, communication_model,
+                                                   true);
+    if (remapped_send >= new_to_old.size()) {
+      throw std::logic_error(
+          "get_cons_tiebreaker invariant violated: remapped send missing from restricted graph");
+    }
+    return new_to_old[remapped_send];
+  }
 
   const MaskedPorfContext<ValueT> masked_graph(graph, keep_mask);
   if (!masked_graph.keeps(recv)) {
@@ -477,7 +562,9 @@ get_cons_tiebreaker_masked(const model::ExplorationGraphT<ValueT>& graph,
 template <typename ValueT>
 [[nodiscard]] inline bool revisit_condition(const model::ExplorationGraphT<ValueT>& graph,
                                             typename model::ExplorationGraphT<ValueT>::EventId e,
-                                            typename model::ExplorationGraphT<ValueT>::EventId s) {
+                                            typename model::ExplorationGraphT<ValueT>::EventId s,
+                                            const model::CommunicationModel communication_model =
+                                                model::CommunicationModel::Async) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
   constexpr auto kNoSource = model::ExplorationGraphT<ValueT>::kNoSource;
 
@@ -548,7 +635,7 @@ template <typename ValueT>
     return false;
   }
 
-  const auto tiebreaker = get_cons_tiebreaker_masked(graph, previous, e);
+  const auto tiebreaker = get_cons_tiebreaker_masked(graph, previous, e, communication_model);
   return current_rf_original == tiebreaker;
 }
 
@@ -953,6 +1040,7 @@ template <typename ValueT, typename StopFn, typename EmitFn>
 inline void for_each_backward_revisit_child(
     const model::ExplorationGraphT<ValueT>& graph,
     const typename model::ExplorationGraphT<ValueT>::EventId send_id,
+    const model::CommunicationModel communication_model,
     StopFn&& should_stop,       // NOLINT(cppcoreguidelines-missing-std-forward)
     EmitFn&& emit_revisited) {  // NOLINT(cppcoreguidelines-missing-std-forward)
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
@@ -1000,7 +1088,7 @@ inline void for_each_backward_revisit_child(
       }
     }
 
-    if (!revisit_condition(graph, recv_id, send_id)) {
+    if (!revisit_condition(graph, recv_id, send_id, communication_model)) {
       continue;
     }
     bool all_pass = true;
@@ -1008,7 +1096,7 @@ inline void for_each_backward_revisit_child(
       if (deleted[ep] == 0U) {
         continue;
       }
-      if (!revisit_condition(graph, ep, send_id)) {
+      if (!revisit_condition(graph, ep, send_id, communication_model)) {
         all_pass = false;
         break;
       }
@@ -1118,8 +1206,7 @@ inline void visit_if_consistent_impl(const ProgramT<ValueT>& program,
     return;
   }
 
-  model::AsyncConsistencyCheckerT<ValueT> checker;
-  const auto consistency = checker.check(graph);
+  const auto consistency = check_consistency(graph, config.communication_model);
   if (!consistency.is_consistent()) {
     return;
   }
@@ -1223,7 +1310,8 @@ inline void visit_impl(const ProgramT<ValueT>& program, model::ExplorationGraphT
     const auto allow_enqueue = executor.can_spawn(depth + 1, 2);
 
     for_each_backward_revisit_child(
-        graph, send_id, [&executor]() { return executor.stop_requested(); },
+        graph, send_id, config.communication_model,
+        [&executor]() { return executor.stop_requested(); },
         [&](model::ExplorationGraphT<ValueT> revisited) {
           if (allow_enqueue &&
               try_enqueue_owned_task<ValueT>(executor, revisited, depth + 1,
@@ -1267,7 +1355,7 @@ inline void backward_revisit(const ProgramT<ValueT>& program,
                              std::size_t depth, const std::vector<model::ThreadId>& thread_ids) {
   SequentialExecutor<ValueT> executor(result, config);
   for_each_backward_revisit_child(
-      graph, send_id, [&executor]() { return executor.stop_requested(); },
+      graph, send_id, config.communication_model, [&executor]() { return executor.stop_requested(); },
       [&](model::ExplorationGraphT<ValueT> revisited) {
         process_owned_task(program, std::move(revisited), executor, config, depth, thread_ids,
                            ExplorationTaskMode::VisitIfConsistent);
