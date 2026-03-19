@@ -69,6 +69,7 @@ TEST_CASE("benchmark CLI defaults to async communication model", "[benchmarks][c
   const auto options = parse_options({});
 
   REQUIRE(options.communication_model == CommunicationModel::Async);
+  REQUIRE(options.progress_report_interval == std::chrono::seconds(1));
 }
 
 TEST_CASE("benchmark CLI accepts --fifo", "[benchmarks][cli]") {
@@ -88,6 +89,13 @@ TEST_CASE("benchmark CLI accepts --progress-counter-flush-interval", "[benchmark
 
   REQUIRE(options.parallel);
   REQUIRE(options.parallel_options.progress_counter_flush_interval == 4096);
+}
+
+TEST_CASE("benchmark CLI accepts --progress-poll-interval-steps", "[benchmarks][cli]") {
+  const auto options = parse_options({"--progress-poll-interval-steps", "128"});
+
+  REQUIRE(options.parallel);
+  REQUIRE(options.parallel_options.progress_poll_interval_steps == 128);
 }
 
 TEST_CASE("benchmark helper forwards communication model to DPOR and oracle",

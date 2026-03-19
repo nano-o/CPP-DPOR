@@ -80,6 +80,7 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
         " [--max-workers N] [--max-queued-tasks N]"
         " [--spawn-depth-cutoff N] [--min-fanout N]"
         " [--progress-counter-flush-interval N]"
+        " [--progress-poll-interval-steps N]"
         " [--progress-interval-ms N]\n";
   os << benchmark_label << '\n';
   std::exit(exit_code);
@@ -186,6 +187,11 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
     if (arg == "--progress-counter-flush-interval") {
       options.parallel = true;
       options.parallel_options.progress_counter_flush_interval = parse_nonnegative_int(value, arg);
+      continue;
+    }
+    if (arg == "--progress-poll-interval-steps") {
+      options.parallel = true;
+      options.parallel_options.progress_poll_interval_steps = parse_nonnegative_int(value, arg);
       continue;
     }
 
@@ -371,7 +377,9 @@ inline int run_two_phase_commit_benchmark(int argc, char** argv, std::string_vie
                 << " spawn_depth_cutoff=" << options.parallel_options.spawn_depth_cutoff
                 << " min_fanout=" << options.parallel_options.min_fanout
                 << " progress_counter_flush_interval="
-                << options.parallel_options.progress_counter_flush_interval;
+                << options.parallel_options.progress_counter_flush_interval
+                << " progress_poll_interval_steps="
+                << options.parallel_options.progress_poll_interval_steps;
     }
     if (options.mode != detail::Options::Mode::Oracle) {
       std::cout << " progress_interval_ms=" << options.progress_report_interval.count();

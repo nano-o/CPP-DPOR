@@ -30,6 +30,7 @@ struct ParallelVerifyOptions {
   std::size_t min_fanout{2};
   std::size_t sync_steps{512};
   std::size_t progress_counter_flush_interval{1024};
+  std::size_t progress_poll_interval_steps{64};
 };
 ```
 
@@ -47,6 +48,10 @@ Current option semantics:
 - `progress_counter_flush_interval == 0` resolves to a small default.
 - `progress_counter_flush_interval > 1` batches worker-local terminal counts
   before flushing them into shared progress counters.
+- `progress_poll_interval_steps == 0` and `== 1` both poll at every progress
+  checkpoint.
+- larger `progress_poll_interval_steps` values reduce clock reads and report
+  claim attempts for throttled progress reporting.
 
 ## High-Level Shape
 
@@ -212,6 +217,8 @@ This mode is available explicitly, but it is no longer the default.
 - workers cache stop-flag reads for `sync_steps` polling calls
 - worker-local terminal counts are flushed into shared progress counters only
   when the configured batching threshold is reached
+- workers only poll the clock for interval-throttled progress reporting every
+  `progress_poll_interval_steps` progress checkpoints
 - additional terminal executions may still be counted after the first callback
   requests stop
 

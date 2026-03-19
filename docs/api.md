@@ -184,6 +184,7 @@ struct ParallelVerifyOptions {
   std::size_t min_fanout{2};
   std::size_t sync_steps{512};
   std::size_t progress_counter_flush_interval{1024};
+  std::size_t progress_poll_interval_steps{64};
 };
 ```
 
@@ -207,7 +208,9 @@ unless the callback requests `Stop`.
 If `on_progress` is set, sequential exploration reports exact live counts.
 Parallel exploration reports exact final counts, and live snapshots may carry
 slightly stale terminal counts when `progress_counter_flush_interval > 1`; in
-that case `counts_exact` is `false`.
+that case `counts_exact` is `false`. When `progress_report_interval > 0`,
+parallel workers only poll the clock every `progress_poll_interval_steps`
+internal progress checkpoints to keep the hot path cheaper.
 
 ## Execution graphs
 

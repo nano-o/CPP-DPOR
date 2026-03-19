@@ -162,9 +162,43 @@ Oracle
 
 Use `--iterations N` to get repeated timings in a single process.
 Parallel runs print the selected `ParallelVerifyOptions` on the header line.
-Use `--progress-interval-ms N` to control DPOR progress output cadence. `0`
-disables benchmark progress lines.
+Use `--progress-interval-ms N` to control DPOR progress output cadence. The
+benchmark defaults to `1000`, and `0` disables benchmark progress lines.
+This is a benchmark-harness convention: the raw DPOR API treats
+`progress_report_interval == 0` as "report at every progress checkpoint", but
+the benchmark uses `0` to skip installing `on_progress` entirely.
+
 Use `--progress-counter-flush-interval N` to control how many terminal
 executions each worker accumulates before flushing live progress counts into the
 shared snapshot. `1` gives exact live counts; larger values reduce atomic
 overhead but make progress counts more stale.
+Use `--progress-poll-interval-steps N` to control how often workers poll the
+clock for interval-throttled progress reporting. `0` and `1` both mean poll at
+every progress checkpoint; larger values reduce progress overhead at the cost
+of coarser callback timing.
+
+For long-running runs where progress output is only occasional, these settings
+are good starting points:
+
+- About one update per minute with low overhead:
+
+```bash
+--progress-interval-ms 60000 \
+--progress-poll-interval-steps 4096 \
+--progress-counter-flush-interval 65536
+```
+
+This asks for at most one live callback per minute, only checks whether a
+report is due every 4096 progress checkpoints, and flushes worker-local live
+counts every 65536 terminal executions.
+
+- About one update per 30 minutes with even lower overhead:
+
+```bash
+--progress-interval-ms 1800000 \
+--progress-poll-interval-steps 16384 \
+--progress-counter-flush-interval 262144
+```
+
+This makes callback timing and live counts coarser, but further reduces clock
+polling and shared-counter flushing overhead.

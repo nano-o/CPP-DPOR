@@ -205,6 +205,12 @@ struct ParallelVerifyOptions {
   // accuracy; larger values reduce atomic-update overhead. A zero value uses a
   // small default.
   std::size_t progress_counter_flush_interval{1024};
+  // When interval-throttled progress reporting is enabled, workers only poll
+  // the clock and attempt to claim the next reporting window every
+  // progress_poll_interval_steps internal progress checkpoints. Zero and one
+  // both mean poll at every checkpoint; larger values reduce progress-polling
+  // overhead at the cost of coarser timing for live snapshots.
+  std::size_t progress_poll_interval_steps{64};
 };
 
 using DporConfig = DporConfigT<model::Value>;
@@ -928,6 +934,7 @@ template <typename ValueT>
 class ParallelExecutor {
  public:
   using Clock = std::chrono::steady_clock;
+  using ProgressTick = typename Clock::duration::rep;
 
   ParallelExecutor(const DporConfigT<ValueT>& config, ParallelVerifyOptions options,
                    std::vector<model::ThreadId> thread_ids)
@@ -940,10 +947,12 @@ class ParallelExecutor {
         sync_steps_(options.sync_steps),
         progress_counter_flush_interval_(
             resolve_progress_counter_flush_interval(options.progress_counter_flush_interval)),
+        progress_poll_interval_steps_(options.progress_poll_interval_steps),
         start_time_(Clock::now()),
-        next_progress_report_at_(start_time_) {
+        next_progress_report_tick_(tick_for(start_time_)) {
     if (config_.progress_report_interval > std::chrono::milliseconds::zero()) {
-      next_progress_report_at_ = start_time_ + config_.progress_report_interval;
+      next_progress_report_tick_.store(tick_for(start_time_ + config_.progress_report_interval),
+                                       std::memory_order_relaxed);
     }
   }
 
@@ -1005,20 +1014,37 @@ class ParallelExecutor {
     if (!config_.on_progress) {
       return;
     }
-    const auto now = Clock::now();
-    if (config_.progress_report_interval > std::chrono::milliseconds::zero()) {
-      {
-        std::lock_guard lock(progress_schedule_mutex_);
-        if (now < next_progress_report_at_) {
-          return;
-        }
-        next_progress_report_at_ = now + config_.progress_report_interval;
-      }
-      publish_progress_snapshot(ProgressState::Running, now, live_counts_exact());
+    if (config_.progress_report_interval <= std::chrono::milliseconds::zero()) {
+      publish_progress_snapshot(ProgressState::Running, Clock::now(), live_counts_exact());
       return;
     }
 
-    publish_progress_snapshot(ProgressState::Running, now, live_counts_exact());
+    if (progress_poll_interval_steps_ > 1) {
+      auto& state = worker_state();
+      if (++state.steps_since_progress_poll < progress_poll_interval_steps_) {
+        return;
+      }
+      state.steps_since_progress_poll = 0;
+    }
+
+    const auto now = Clock::now();
+    const auto now_tick = tick_for(now);
+    auto due_tick = next_progress_report_tick_.load(std::memory_order_relaxed);
+    if (now_tick < due_tick) {
+      return;
+    }
+
+    const auto next_due_tick = tick_for(now + config_.progress_report_interval);
+    while (true) {
+      if (now_tick < due_tick) {
+        return;
+      }
+      if (next_progress_report_tick_.compare_exchange_weak(
+              due_tick, next_due_tick, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        publish_progress_snapshot(ProgressState::Running, now, live_counts_exact());
+        return;
+      }
+    }
   }
 
   [[nodiscard]] bool publish_depth_limit_execution(
@@ -1202,6 +1228,7 @@ class ParallelExecutor {
     std::size_t local_depth_limit_executions{0};
     std::size_t pending_terminal_executions{0};
     std::size_t steps_since_sync{0};
+    std::size_t steps_since_progress_poll{0};
     bool cached_stop{false};
   };
 
@@ -1233,6 +1260,7 @@ class ParallelExecutor {
     flush_local_counts();
     auto& state = worker_state();
     state.steps_since_sync = 0;
+    state.steps_since_progress_poll = 0;
     state.cached_stop = false;
   }
 
@@ -1258,6 +1286,10 @@ class ParallelExecutor {
 
   [[nodiscard]] bool live_counts_exact() const noexcept {
     return progress_counter_flush_interval_ <= 1;
+  }
+
+  [[nodiscard]] static ProgressTick tick_for(const Clock::time_point time_point) noexcept {
+    return time_point.time_since_epoch().count();
   }
 
   void publish_progress_snapshot(const ProgressState state, const Clock::time_point now,
@@ -1322,8 +1354,9 @@ class ParallelExecutor {
   std::size_t min_fanout_{1};
   std::size_t sync_steps_{0};
   std::size_t progress_counter_flush_interval_{1024};
+  std::size_t progress_poll_interval_steps_{64};
   Clock::time_point start_time_;
-  Clock::time_point next_progress_report_at_;
+  std::atomic<ProgressTick> next_progress_report_tick_{0};
 
   std::atomic<bool> stop_requested_{false};
   std::atomic<std::size_t> full_executions_explored_{0};
@@ -1337,7 +1370,6 @@ class ParallelExecutor {
   bool search_complete_{false};
 
   mutable std::mutex publication_mutex_;
-  mutable std::mutex progress_schedule_mutex_;
   mutable std::mutex progress_callback_mutex_;
   std::exception_ptr first_exception_;
 };
@@ -1561,7 +1593,6 @@ inline void visit_if_consistent_impl(const ProgramT<ValueT>& program,
                                      model::ExplorationGraphT<ValueT>& graph, ExecutorT& executor,
                                      const DporConfigT<ValueT>& config, const std::size_t depth,
                                      const std::vector<model::ThreadId>& thread_ids) {
-  executor.maybe_report_progress();
   if (executor.stop_requested()) {
     return;
   }

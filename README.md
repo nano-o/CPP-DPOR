@@ -62,6 +62,13 @@ Shared `DporConfigT<ValueT>` parameters:
 - `progress_report_interval{1s}`: throttles live `on_progress` callbacks.
   `> 0` means at most one live snapshot per interval. `0` means report at
   every internal progress checkpoint, which can be expensive in parallel mode.
+  In parallel mode, this controls callback frequency, while
+  `progress_counter_flush_interval` controls how fresh the live execution
+  counts are when a snapshot is emitted, and
+  `progress_poll_interval_steps` controls how often workers even check whether
+  a throttled report is due. A progress checkpoint currently happens at entry
+  to `visit_impl()`, so it is roughly per explored execution prefix/state, not
+  per terminal execution found.
 
 Parallel exploration adds `ParallelVerifyOptions`:
 
@@ -86,6 +93,24 @@ Parallel exploration adds `ParallelVerifyOptions`:
   counters after this many local terminal publications. `0` uses the default
   (`1024`), `1` gives exact live progress counts, and larger values reduce
   overhead at the cost of staler live progress snapshots.
+- `progress_poll_interval_steps{64}`: progress-poll batching threshold for
+  interval-throttled progress reporting in parallel mode. `0` and `1` both
+  mean poll at every progress checkpoint; larger values reduce hot-path clock
+  checks and report-claim traffic at the cost of coarser callback timing.
+
+For long-running runs, a practical rule of thumb is:
+
+- leave `on_progress` unset if you want no progress overhead at all
+- use a large `progress_report_interval` together with larger
+  `progress_poll_interval_steps` and `progress_counter_flush_interval` values
+  if you only want occasional updates
+
+For example, minute-scale progress reporting can use values like
+`progress_report_interval = 60000ms`,
+`progress_poll_interval_steps = 4096`, and
+`progress_counter_flush_interval = 65536`. Thirty-minute reporting can push
+those batching values much higher. The benchmark CLI examples in
+`benchmarks/README.md` show concrete command lines.
 
 Result reporting:
 
