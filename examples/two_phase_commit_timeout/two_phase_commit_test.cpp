@@ -633,7 +633,7 @@ TEST_CASE("2PC basic exploration with 2 participants", "[two_phase_commit]") {
   // every timer-armed wait adds a bottom branch alongside message matches.
   // For 2 participants this timer-inclusive model explores 876 no-crash
   // executions, plus 20 additional crash branches at the decision boundary.
-  REQUIRE(result.executions_explored == 896);
+  REQUIRE(result.full_executions_explored == 896);
 }
 
 TEST_CASE("2PC DPOR explores participant local timeout executions", "[two_phase_commit]") {
@@ -647,7 +647,7 @@ TEST_CASE("2PC DPOR explores participant local timeout executions", "[two_phase_
 
   algo::DporConfigT<SimValue> config;
   config.program = std::move(prog);
-  config.on_execution = [&](const ExplorationGraph& graph) {
+  config.on_terminal_execution = [&](const ExplorationGraph& graph) {
     for (std::size_t pid = 1; pid <= kNumParticipants; ++pid) {
       if (participant_timed_out_locally(graph, pid)) {
         saw_local_timeout = true;
@@ -668,7 +668,7 @@ TEST_CASE("2PC agreement invariant: all decided participants agree", "[two_phase
 
   algo::DporConfigT<SimValue> config;
   config.program = std::move(prog);
-  config.on_execution = [&](const ExplorationGraph& graph) {
+  config.on_terminal_execution = [&](const ExplorationGraph& graph) {
     if (coordinator_crashed(graph, kNumParticipants)) {
       return;
     }
@@ -701,7 +701,7 @@ TEST_CASE("2PC validity invariant: Commit implies all voted Yes", "[two_phase_co
 
   algo::DporConfigT<SimValue> config;
   config.program = std::move(prog);
-  config.on_execution = [&](const ExplorationGraph& graph) {
+  config.on_terminal_execution = [&](const ExplorationGraph& graph) {
     if (coordinator_crashed(graph, kNumParticipants)) {
       return;
     }
@@ -742,7 +742,7 @@ TEST_CASE("2PC crash behavior: no participant decides after coordinator crash",
 
   algo::DporConfigT<SimValue> config;
   config.program = std::move(prog);
-  config.on_execution = [&](const ExplorationGraph& graph) {
+  config.on_terminal_execution = [&](const ExplorationGraph& graph) {
     if (!coordinator_crashed(graph, kNumParticipants)) {
       return;
     }
@@ -778,7 +778,7 @@ TEST_CASE("2PC without crashes explores timeout-inclusive executions for 2 parti
   const auto result = algo::verify(config);
   REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
   // Regression baseline for the timer-inclusive no-crash state space.
-  REQUIRE(result.executions_explored == 876);
+  REQUIRE(result.full_executions_explored == 876);
 }
 
 TEST_CASE("2PC scales to 3 participants", "[two_phase_commit]") {
@@ -789,7 +789,7 @@ TEST_CASE("2PC scales to 3 participants", "[two_phase_commit]") {
 
   const auto result = algo::verify(config);
   REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
-  REQUIRE(result.executions_explored > 0);
+  REQUIRE(result.full_executions_explored > 0);
 }
 
 TEST_CASE("2PC protocol bug surfaces as verification failure", "[two_phase_commit]") {
@@ -802,7 +802,7 @@ TEST_CASE("2PC protocol bug surfaces as verification failure", "[two_phase_commi
   bool saw_error_execution = false;
   algo::DporConfigT<SimValue> config;
   config.program = std::move(prog);
-  config.on_execution = [&](const ExplorationGraph& graph) {
+  config.on_terminal_execution = [&](const ExplorationGraph& graph) {
     for (std::size_t event_id = 0; event_id < graph.event_count(); ++event_id) {
       if (model::is_error(graph.event(event_id))) {
         saw_error_execution = true;
@@ -828,7 +828,7 @@ TEST_CASE("2PC false invariant is detected: Abort implies some voted No", "[two_
 
   algo::DporConfigT<SimValue> config;
   config.program = std::move(prog);
-  config.on_execution = [&](const ExplorationGraph& graph) {
+  config.on_terminal_execution = [&](const ExplorationGraph& graph) {
     // False invariant: "if the decision is Abort, then at least one
     // participant voted No."  This is actually true for 2PC, so let's
     // check the *opposite*: "Abort never happens."  Since participants

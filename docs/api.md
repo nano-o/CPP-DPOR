@@ -119,7 +119,19 @@ struct DporConfigT {
   ProgramT<ValueT> program;
   std::size_t max_depth{1000};
   model::CommunicationModel communication_model{model::CommunicationModel::Async};
-  ExecutionObserverT<ValueT> on_execution{};
+  TerminalExecutionObserverT<ValueT> on_terminal_execution{};
+};
+```
+
+The observer receives:
+
+```cpp
+enum class TerminalExecutionKind : std::uint8_t { Full, Error, DepthLimit };
+
+template <typename ValueT>
+struct TerminalExecutionT {
+  const model::ExplorationGraphT<ValueT>& graph;
+  TerminalExecutionKind kind;
 };
 ```
 
@@ -150,14 +162,14 @@ struct ParallelVerifyOptions {
 and also carries:
 
 - `message`: populated for error terminals
-- `executions_explored`: number of published complete or error executions
+- `executions_explored`: total number of published terminal executions
+- `full_executions_explored`: number of full executions
+- `error_executions_explored`: number of error executions
+- `depth_limit_executions_explored`: number of depth-limit executions
 
-If `on_execution` is set, DPOR calls it with each published
-`ExplorationGraphT<ValueT>`.
-Published executions are complete/quiescent executions and error terminals.
-Branches truncated by `max_depth` are not published and do not trigger
-`on_execution`, so the callback does not receive a per-execution depth-limit
-reason.
+If `on_terminal_execution` is set, DPOR calls it with each published terminal
+execution. Terminal executions are full executions, error executions, and
+branches truncated by `max_depth`.
 
 ## Execution graphs
 
@@ -263,8 +275,8 @@ These are useful when downstream code wants to inspect or derive relations from
 
 ## Practical notes
 
-- Prefer `ExplorationGraphT` in `on_execution` observers; it exposes the most
-  useful query surface for inspecting explored executions.
+- Prefer `execution.graph` in `on_terminal_execution` observers; it exposes the
+  most useful query surface for inspecting explored executions.
 - Prefer `ExecutionGraphT` when manually constructing a graph for tests or
   checking consistency outside the DPOR engine.
 - Predicate-based receives are part of the intended integration model for

@@ -25,8 +25,10 @@ high-level design.
   `dpor::algo::verify_parallel()`.
 - Programs are modeled as `dpor::algo::ProgramT<ValueT>` collections of
   deterministic thread functions.
-- Published executions are exposed to observers as
-  `dpor::model::ExplorationGraphT<ValueT>`.
+- Published terminal executions are exposed to observers as
+  `dpor::algo::TerminalExecutionT<ValueT>`, which carries an
+  `ExplorationGraphT<ValueT>` plus a terminal kind (`Full`, `Error`, or
+  `DepthLimit`).
 - Manual graph validation is available through
   `dpor::model::AsyncConsistencyCheckerT`, `FifoP2PConsistencyCheckerT`, and
   `ConsistencyCheckerT`.

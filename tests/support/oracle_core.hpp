@@ -343,7 +343,11 @@ template <typename ValueT>
   algo::DporConfigT<ValueT> config;
   config.program = program;
   config.communication_model = communication_model;
-  config.on_execution = [&](const model::ExplorationGraphT<ValueT>& graph) {
+  config.on_terminal_execution = [&](const algo::TerminalExecutionT<ValueT>& execution) {
+    if (!execution.is_full_execution()) {
+      return;
+    }
+    const auto& graph = execution.graph;
     auto checked_graph = graph;
     const auto consistency = checker.check(checked_graph);
     if (!consistency.is_consistent()) {

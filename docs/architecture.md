@@ -84,7 +84,7 @@ exploration engine.
 - **`dpor.hpp`** implements the exploration algorithm inspired by Must
   Algorithm 1.
 - **`DporConfigT`** carries the program, depth limit, whole-program
-  communication model, and optional execution observer.
+  communication model, and an optional terminal-execution observer.
 - **`verify()`** performs sequential exploration.
 - **`verify_parallel()`** is an experimental parallel executor built on the
   same DPOR core and configuration.
@@ -103,11 +103,10 @@ exploration engine.
 
 - Verification reports `AllExecutionsExplored`, `ErrorFound`, or
   `DepthLimitReached`.
-- Optional execution observers receive published
-  `ExplorationGraphT<ValueT>` values for each complete execution and error
-  terminal.
-- Depth-limited partial branches are not published, so they do not invoke
-  `on_execution`.
+- Optional terminal-execution observers receive `TerminalExecutionT<ValueT>`
+  values for each full execution, error execution, and depth-limit execution.
+- `VerifyResult` tracks total published terminal executions plus a split count
+  for each terminal-execution kind.
 
 ## 3. Public Entry Points
 

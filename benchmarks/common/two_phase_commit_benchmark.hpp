@@ -241,7 +241,7 @@ template <typename ProgramFactory>
     throw std::runtime_error("DPOR did not explore all executions");
   }
   return OracleRunResult{
-      .executions = result.executions_explored,
+      .executions = result.full_executions_explored,
       .paths_explored = 0,
   };
 }

@@ -190,22 +190,26 @@ Current behavior differs by `sync_steps`.
 
 ### Strict Mode: `sync_steps == 0`
 
-- `publish_complete_execution()` and `publish_error_execution()` serialize
+- `publish_full_execution()`, `publish_depth_limit_execution()`, and
+  `publish_error_execution()` serialize
   through `publication_mutex_`.
 - Exactly one error terminal is published.
-- No complete execution is counted after the stop flag has been committed by an
-  error path.
-- `on_execution` callbacks are still invoked outside `publication_mutex_`, so
-  observer callbacks may race with an error publication even in strict mode.
+- No full or depth-limit execution is counted after the stop flag has been
+  committed by an error path.
+- `on_terminal_execution` callbacks are still invoked outside
+  `publication_mutex_`, so observer callbacks may race with an error
+  publication even in strict mode.
 
 This is the default.
 
 ### Relaxed Mode: `sync_steps > 0`
 
 - workers cache stop-flag reads for `sync_steps` polling calls
-- execution counts are accumulated in thread-local state and flushed later
+- terminal-execution counts are accumulated in thread-local state and flushed
+  later
 - more than one worker may independently reach an error terminal
-- complete executions may still be counted after the first error is committed
+- full and depth-limit executions may still be counted after the first error is
+  committed
 
 This mode exists only to reduce synchronization overhead.
 
@@ -219,10 +223,10 @@ What is preserved:
 - explored execution sets, as validated by tests against sequential/oracle runs
 - exact sequential observation order when `max_workers == 1`
 
-`on_execution` may be invoked concurrently in parallel mode. Callback code must
-therefore be thread-safe in addition to being deterministic.
-As in sequential mode, only published complete executions and error terminals
-invoke `on_execution`; branches cut off by `max_depth` do not.
+`on_terminal_execution` may be invoked concurrently in parallel mode. Callback
+code must therefore be thread-safe in addition to being deterministic.
+As in sequential mode, published terminal executions include full executions,
+error executions, and branches cut off by `max_depth`.
 
 ## Worker / Callback Assumptions
 

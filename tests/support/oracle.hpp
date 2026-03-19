@@ -14,7 +14,10 @@ inline void require_dpor_matches_oracle(const algo::ProgramT<ValueT>& program,
 
   INFO("oracle program: " << description);
   INFO("oracle signatures: " << comparison.oracle_signatures.size());
-  INFO("dpor executions_explored: " << comparison.result.executions_explored);
+  INFO("dpor full_executions_explored: " << comparison.result.full_executions_explored);
+  INFO("dpor error_executions_explored: " << comparison.result.error_executions_explored);
+  INFO("dpor depth_limit_executions_explored: "
+       << comparison.result.depth_limit_executions_explored);
   INFO("dpor unique signatures: " << comparison.dpor_unique.size());
   INFO("missing signatures: " << comparison.missing_from_dpor.size());
   INFO("unexpected signatures: " << comparison.unexpected_in_dpor.size());

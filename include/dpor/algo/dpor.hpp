@@ -35,25 +35,58 @@
 namespace dpor::algo {
 
 enum class VerifyResultKind : std::uint8_t { AllExecutionsExplored, ErrorFound, DepthLimitReached };
+enum class TerminalExecutionKind : std::uint8_t { Full, Error, DepthLimit };
 
 struct VerifyResult {
   VerifyResultKind kind{VerifyResultKind::AllExecutionsExplored};
   std::string message;
   std::size_t executions_explored{0};
+  std::size_t full_executions_explored{0};
+  std::size_t error_executions_explored{0};
+  std::size_t depth_limit_executions_explored{0};
+
+  [[nodiscard]] std::size_t terminal_executions_explored() const noexcept {
+    return executions_explored;
+  }
 };
 
 template <typename ValueT>
-// Observers are called only for published executions: complete/quiescent
-// executions and error terminals. Branches truncated by max_depth are not
-// published and therefore do not trigger this hook.
-using ExecutionObserverT = std::function<void(const model::ExplorationGraphT<ValueT>&)>;
+struct TerminalExecutionT {
+  const model::ExplorationGraphT<ValueT>& graph;
+  TerminalExecutionKind kind;
+
+  [[nodiscard]] bool is_full_execution() const noexcept {
+    return kind == TerminalExecutionKind::Full;
+  }
+
+  [[nodiscard]] bool is_error_execution() const noexcept {
+    return kind == TerminalExecutionKind::Error;
+  }
+
+  [[nodiscard]] bool is_depth_limit_execution() const noexcept {
+    return kind == TerminalExecutionKind::DepthLimit;
+  }
+
+  operator const model::ExplorationGraphT<ValueT>&() const noexcept { return graph; }
+};
+
+template <typename ValueT>
+// Observers are called for every published terminal execution: full
+// executions, error executions, and branches truncated by max_depth.
+using TerminalExecutionObserverT = std::function<void(const TerminalExecutionT<ValueT>&)>;
+
+template <typename ValueT>
+// Compatibility alias; prefer TerminalExecutionObserverT.
+using ExecutionObserverT = TerminalExecutionObserverT<ValueT>;
 
 template <typename ValueT>
 struct DporConfigT {
   ProgramT<ValueT> program;
   std::size_t max_depth{1000};
   model::CommunicationModel communication_model{model::CommunicationModel::Async};
-  ExecutionObserverT<ValueT> on_execution{};
+  TerminalExecutionObserverT<ValueT> on_terminal_execution{};
+  // Compatibility alias; prefer on_terminal_execution.
+  TerminalExecutionObserverT<ValueT> on_execution{};
 };
 
 // Experimental options for verify_parallel(). A zero max_workers selects a
@@ -65,17 +98,20 @@ struct ParallelVerifyOptions {
   std::size_t spawn_depth_cutoff{0};
   std::size_t min_fanout{2};
   // When non-zero, workers read the shared stop flag only every sync_steps
-  // stop_requested() calls and batch execution counts in thread-local
+  // stop_requested() calls and batch terminal-execution counts in thread-local
   // accumulators.  This reduces contention at the cost of weaker error-stop
   // semantics: multiple workers may independently reach error terminals, and
-  // complete executions may be counted after an error has been committed.
-  // When zero (the default) the publication mutex serialises these paths so
-  // that exactly one error is observed and no work is done after the stop.
+  // full/depth-limit executions may be counted after an error has been
+  // committed.  When zero (the default) the publication mutex serialises these
+  // paths so that exactly one error is observed and no work is done after the
+  // stop.
   std::size_t sync_steps{0};
 };
 
 using DporConfig = DporConfigT<model::Value>;
-using ExecutionObserver = ExecutionObserverT<model::Value>;
+using TerminalExecution = TerminalExecutionT<model::Value>;
+using TerminalExecutionObserver = TerminalExecutionObserverT<model::Value>;
+using ExecutionObserver = TerminalExecutionObserver;
 
 namespace detail {
 
@@ -88,6 +124,25 @@ using EventId = typename model::ExplorationGraphT<model::Value>::EventId;
     message += ": " + error.message;
   }
   return message;
+}
+
+template <typename ValueT>
+inline void notify_terminal_execution(const DporConfigT<ValueT>& config,
+                                      const model::ExplorationGraphT<ValueT>& graph,
+                                      const TerminalExecutionKind kind) {
+  if (config.on_terminal_execution) {
+    config.on_terminal_execution(TerminalExecutionT<ValueT>{
+        .graph = graph,
+        .kind = kind,
+    });
+    return;
+  }
+  if (config.on_execution) {
+    config.on_execution(TerminalExecutionT<ValueT>{
+        .graph = graph,
+        .kind = kind,
+    });
+  }
 }
 
 template <typename ValueT>
@@ -675,10 +730,14 @@ class SequentialExecutor {
     return result_.kind == VerifyResultKind::ErrorFound;
   }
 
-  void note_depth_limit() {
+  [[nodiscard]] bool publish_depth_limit_execution(const model::ExplorationGraphT<ValueT>& graph) {
+    ++result_.executions_explored;
+    ++result_.depth_limit_executions_explored;
     if (result_.kind == VerifyResultKind::AllExecutionsExplored) {
       result_.kind = VerifyResultKind::DepthLimitReached;
     }
+    notify_terminal_execution(config_, graph, TerminalExecutionKind::DepthLimit);
+    return true;
   }
 
   [[nodiscard]] bool can_spawn(std::size_t /*depth*/, std::size_t /*fanout*/) const noexcept {
@@ -687,11 +746,10 @@ class SequentialExecutor {
 
   [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT>& /*task*/) const noexcept { return false; }
 
-  [[nodiscard]] bool publish_complete_execution(const model::ExplorationGraphT<ValueT>& graph) {
+  [[nodiscard]] bool publish_full_execution(const model::ExplorationGraphT<ValueT>& graph) {
     ++result_.executions_explored;
-    if (config_.on_execution) {
-      config_.on_execution(graph);
-    }
+    ++result_.full_executions_explored;
+    notify_terminal_execution(config_, graph, TerminalExecutionKind::Full);
     return true;
   }
 
@@ -699,11 +757,10 @@ class SequentialExecutor {
                                              const model::ThreadId tid,
                                              const model::ErrorLabel& error) {
     ++result_.executions_explored;
+    ++result_.error_executions_explored;
     result_.kind = VerifyResultKind::ErrorFound;
     result_.message = format_error_message(tid, error);
-    if (config_.on_execution) {
-      config_.on_execution(graph);
-    }
+    notify_terminal_execution(config_, graph, TerminalExecutionKind::Error);
     return true;
   }
 
@@ -753,7 +810,13 @@ class ParallelExecutor {
     }
 
     VerifyResult result;
-    result.executions_explored = executions_explored_.load(std::memory_order_relaxed);
+    result.full_executions_explored = full_executions_explored_.load(std::memory_order_relaxed);
+    result.error_executions_explored = error_executions_explored_.load(std::memory_order_relaxed);
+    result.depth_limit_executions_explored =
+        depth_limit_executions_explored_.load(std::memory_order_relaxed);
+    result.executions_explored = result.full_executions_explored +
+                                 result.error_executions_explored +
+                                 result.depth_limit_executions_explored;
     if (first_error_message_.has_value()) {
       result.kind = VerifyResultKind::ErrorFound;
       result.message = *first_error_message_;
@@ -775,7 +838,26 @@ class ParallelExecutor {
     return state.cached_stop;
   }
 
-  void note_depth_limit() noexcept { depth_limit_reached_.store(true, std::memory_order_relaxed); }
+  [[nodiscard]] bool publish_depth_limit_execution(
+      const model::ExplorationGraphT<ValueT>& graph) {
+    if (sync_steps_ == 0) {
+      std::lock_guard lock(publication_mutex_);
+      if (stop_requested_.load(std::memory_order_acquire)) {
+        return false;
+      }
+      ++worker_state().local_depth_limit_executions;
+      depth_limit_reached_.store(true, std::memory_order_relaxed);
+    } else {
+      if (stop_requested()) {
+        return false;
+      }
+      ++worker_state().local_depth_limit_executions;
+      depth_limit_reached_.store(true, std::memory_order_relaxed);
+    }
+
+    notify_terminal_execution(config_, graph, TerminalExecutionKind::DepthLimit);
+    return true;
+  }
 
   [[nodiscard]] bool can_spawn(const std::size_t child_depth, const std::size_t fanout) noexcept {
     if (max_workers_ <= 1 || stop_requested()) {
@@ -811,25 +893,23 @@ class ParallelExecutor {
     return enqueued;
   }
 
-  [[nodiscard]] bool publish_complete_execution(const model::ExplorationGraphT<ValueT>& graph) {
+  [[nodiscard]] bool publish_full_execution(const model::ExplorationGraphT<ValueT>& graph) {
     if (sync_steps_ == 0) {
-      // Serialise with publish_error_execution so that no complete execution
-      // is counted or observed after an error has been committed.
+      // Serialise with other terminal-publication paths so that no full
+      // execution is counted or observed after an error has been committed.
       std::lock_guard lock(publication_mutex_);
       if (stop_requested_.load(std::memory_order_acquire)) {
         return false;
       }
-      ++worker_state().local_executions;
+      ++worker_state().local_full_executions;
     } else {
       if (stop_requested()) {
         return false;
       }
-      ++worker_state().local_executions;
+      ++worker_state().local_full_executions;
     }
 
-    if (config_.on_execution) {
-      config_.on_execution(graph);
-    }
+    notify_terminal_execution(config_, graph, TerminalExecutionKind::Full);
     return true;
   }
 
@@ -844,14 +924,14 @@ class ParallelExecutor {
         if (stop_requested_.load(std::memory_order_acquire)) {
           return false;
         }
-        ++worker_state().local_executions;
+        ++worker_state().local_error_executions;
         first_error_message_ = format_error_message(tid, error);
         stop_requested_.store(true, std::memory_order_release);
         published = true;
       } else {
         // Relaxed mode: every worker that independently reaches an error
         // is counted and observed; only the first message is kept.
-        ++worker_state().local_executions;
+        ++worker_state().local_error_executions;
         if (!first_error_message_.has_value()) {
           first_error_message_ = format_error_message(tid, error);
         }
@@ -860,8 +940,8 @@ class ParallelExecutor {
       }
     }
 
-    if (published && config_.on_execution) {
-      config_.on_execution(graph);
+    if (published) {
+      notify_terminal_execution(config_, graph, TerminalExecutionKind::Error);
     }
     queue_cv_.notify_all();
     return published;
@@ -937,7 +1017,9 @@ class ParallelExecutor {
   }
 
   struct WorkerState {
-    std::size_t local_executions{0};
+    std::size_t local_full_executions{0};
+    std::size_t local_error_executions{0};
+    std::size_t local_depth_limit_executions{0};
     std::size_t steps_since_sync{0};
     bool cached_stop{false};
   };
@@ -949,8 +1031,16 @@ class ParallelExecutor {
 
   void flush_worker_state() {
     auto& state = worker_state();
-    if (state.local_executions > 0) {
-      executions_explored_.fetch_add(state.local_executions, std::memory_order_relaxed);
+    if (state.local_full_executions > 0) {
+      full_executions_explored_.fetch_add(state.local_full_executions, std::memory_order_relaxed);
+    }
+    if (state.local_error_executions > 0) {
+      error_executions_explored_.fetch_add(state.local_error_executions,
+                                           std::memory_order_relaxed);
+    }
+    if (state.local_depth_limit_executions > 0) {
+      depth_limit_executions_explored_.fetch_add(state.local_depth_limit_executions,
+                                                 std::memory_order_relaxed);
     }
     state = WorkerState{};
   }
@@ -976,7 +1066,9 @@ class ParallelExecutor {
 
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> depth_limit_reached_{false};
-  std::atomic<std::size_t> executions_explored_{0};
+  std::atomic<std::size_t> full_executions_explored_{0};
+  std::atomic<std::size_t> error_executions_explored_{0};
+  std::atomic<std::size_t> depth_limit_executions_explored_{0};
 
   mutable std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
@@ -1231,7 +1323,7 @@ inline void visit_impl(const ProgramT<ValueT>& program, model::ExplorationGraphT
   }
 
   if (depth >= config.max_depth) {
-    executor.note_depth_limit();
+    static_cast<void>(executor.publish_depth_limit_execution(graph));
     return;
   }
 
@@ -1242,7 +1334,7 @@ inline void visit_impl(const ProgramT<ValueT>& program, model::ExplorationGraphT
                                                    thread_ids)) {
       return;
     }
-    static_cast<void>(executor.publish_complete_execution(graph));
+    static_cast<void>(executor.publish_full_execution(graph));
     return;
   }
 
@@ -1393,9 +1485,10 @@ template <typename ValueT>
 [[nodiscard]] inline VerifyResult verify_parallel(const DporConfigT<ValueT>& config,
                                                   ParallelVerifyOptions options = {}) {
   // Experimental.  With sync_steps=0 (default), exactly one error terminal is
-  // counted and observed; callback order among successful executions is
+  // counted and observed; callback order among full/depth-limit executions is
   // unspecified.  With sync_steps>0, multiple workers may independently reach
-  // error terminals before the stop signal propagates.
+  // error terminals before the stop signal propagates, and full/depth-limit
+  // executions may still be published after the first error is committed.
   const auto thread_ids = detail::sorted_thread_ids(config.program);
   detail::ParallelExecutor<ValueT> executor(config, options, thread_ids);
   return executor.run();

@@ -91,7 +91,7 @@ ObservedRun collect_observed_executions(const Program& program, const RunFn& run
 
   DporConfig config;
   config.program = program;
-  config.on_execution = [&](const ExplorationGraph& graph) {
+  config.on_terminal_execution = [&](const ExplorationGraph& graph) {
     const auto signature = graph_signature(graph);
     std::lock_guard lock(observed_mutex);
     observed_run.observed.push_back(signature);
@@ -813,6 +813,13 @@ TEST_CASE("backward-revisit-heavy exploration does not produce duplicate executi
 TEST_CASE("max_depth limits exploration", "[algo][dpor]") {
   DporConfig config;
   config.max_depth = 2;
+  std::size_t observed_count = 0;
+  bool saw_depth_limit_execution = false;
+
+  config.on_terminal_execution = [&](const TerminalExecution& execution) {
+    ++observed_count;
+    saw_depth_limit_execution = execution.kind == TerminalExecutionKind::DepthLimit;
+  };
 
   // Thread that sends indefinitely.
   config.program.threads[1] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
@@ -821,16 +828,25 @@ TEST_CASE("max_depth limits exploration", "[algo][dpor]") {
 
   const auto result = verify(config);
   REQUIRE(result.kind == VerifyResultKind::DepthLimitReached);
+  REQUIRE(result.full_executions_explored == 0);
+  REQUIRE(result.error_executions_explored == 0);
+  REQUIRE(result.depth_limit_executions_explored == 1);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(observed_count == 1);
+  REQUIRE(saw_depth_limit_execution);
   // With max_depth=2, it should stop early rather than looping forever.
 }
 
-// --- Execution observer ---
+// --- Terminal execution observer ---
 
-TEST_CASE("execution observer is called for each complete execution", "[algo][dpor]") {
+TEST_CASE("terminal execution observer is called for each full execution", "[algo][dpor]") {
   DporConfig config;
   std::size_t observed_count = 0;
 
-  config.on_execution = [&observed_count](const ExplorationGraph&) { ++observed_count; };
+  config.on_terminal_execution = [&observed_count](const TerminalExecution& execution) {
+    REQUIRE(execution.kind == TerminalExecutionKind::Full);
+    ++observed_count;
+  };
 
   config.program.threads[1] = [](const ThreadTrace& trace,
                                  std::size_t) -> std::optional<EventLabel> {
@@ -844,11 +860,14 @@ TEST_CASE("execution observer is called for each complete execution", "[algo][dp
   };
 
   const auto result = verify(config);
+  REQUIRE(result.full_executions_explored == 2);
+  REQUIRE(result.error_executions_explored == 0);
+  REQUIRE(result.depth_limit_executions_explored == 0);
   REQUIRE(result.executions_explored == 2);
   REQUIRE(observed_count == 2);
 }
 
-TEST_CASE("detail visit shows a complete execution to the observer before rollback",
+TEST_CASE("detail visit shows a full execution to the observer before rollback",
           "[algo][dpor][rollback]") {
   Program program;
   program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
@@ -862,7 +881,9 @@ TEST_CASE("detail visit shows a complete execution to the observer before rollba
   config.program = program;
 
   std::size_t observed_count = 0;
-  config.on_execution = [&observed_count](const ExplorationGraph& graph) {
+  config.on_terminal_execution = [&observed_count](const TerminalExecution& execution) {
+    REQUIRE(execution.kind == TerminalExecutionKind::Full);
+    const auto& graph = execution.graph;
     ++observed_count;
     REQUIRE(graph.event_count() == 1);
     REQUIRE(is_send(graph.event(0)));
@@ -874,13 +895,14 @@ TEST_CASE("detail visit shows a complete execution to the observer before rollba
                             dpor::algo::detail::sorted_thread_ids(program));
 
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.full_executions_explored == 1);
   REQUIRE(result.executions_explored == 1);
   REQUIRE(observed_count == 1);
   REQUIRE(graph.event_count() == 0);
   REQUIRE(graph.insertion_order().empty());
 }
 
-TEST_CASE("detail visit shows the terminal error event to the observer before rollback",
+TEST_CASE("detail visit shows the error execution to the observer before rollback",
           "[algo][dpor][rollback]") {
   Program program;
   program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
@@ -894,7 +916,9 @@ TEST_CASE("detail visit shows the terminal error event to the observer before ro
   config.program = program;
 
   std::size_t observed_count = 0;
-  config.on_execution = [&observed_count](const ExplorationGraph& graph) {
+  config.on_terminal_execution = [&observed_count](const TerminalExecution& execution) {
+    REQUIRE(execution.kind == TerminalExecutionKind::Error);
+    const auto& graph = execution.graph;
     ++observed_count;
     REQUIRE(graph.event_count() == 1);
     REQUIRE(is_error(graph.event(0)));
@@ -907,6 +931,7 @@ TEST_CASE("detail visit shows the terminal error event to the observer before ro
                             dpor::algo::detail::sorted_thread_ids(program));
 
   REQUIRE(result.kind == VerifyResultKind::ErrorFound);
+  REQUIRE(result.error_executions_explored == 1);
   REQUIRE(result.executions_explored == 1);
   REQUIRE(observed_count == 1);
   REQUIRE(graph.event_count() == 0);
@@ -2351,6 +2376,9 @@ TEST_CASE("verify_parallel stops cleanly when sibling branches race to error",
 
   const auto result = verify_parallel(config, options);
   REQUIRE(result.kind == VerifyResultKind::ErrorFound);
+  REQUIRE(result.full_executions_explored == 0);
+  REQUIRE(result.error_executions_explored == 1);
+  REQUIRE(result.depth_limit_executions_explored == 0);
   REQUIRE(result.executions_explored == 1);
   REQUIRE(result.message == "error event reached in thread 1: parallel boom");
   REQUIRE(observed_count == 1);
@@ -2377,14 +2405,21 @@ TEST_CASE("verify_parallel reports depth limit when one branch exceeds max_depth
   };
 
   std::size_t observed_count = 0;
+  std::size_t full_observed_count = 0;
+  std::size_t depth_limit_observed_count = 0;
   std::mutex observed_mutex;
 
   DporConfig config;
   config.program = program;
   config.max_depth = 2;
-  config.on_execution = [&](const ExplorationGraph&) {
+  config.on_terminal_execution = [&](const TerminalExecution& execution) {
     std::lock_guard lock(observed_mutex);
     ++observed_count;
+    if (execution.kind == TerminalExecutionKind::Full) {
+      ++full_observed_count;
+    } else if (execution.kind == TerminalExecutionKind::DepthLimit) {
+      ++depth_limit_observed_count;
+    }
   };
 
   ParallelVerifyOptions options;
@@ -2393,8 +2428,13 @@ TEST_CASE("verify_parallel reports depth limit when one branch exceeds max_depth
 
   const auto result = verify_parallel(config, options);
   REQUIRE(result.kind == VerifyResultKind::DepthLimitReached);
-  REQUIRE(result.executions_explored == 1);
-  REQUIRE(observed_count == 1);
+  REQUIRE(result.full_executions_explored == 1);
+  REQUIRE(result.error_executions_explored == 0);
+  REQUIRE(result.depth_limit_executions_explored == 1);
+  REQUIRE(result.executions_explored == 2);
+  REQUIRE(observed_count == 2);
+  REQUIRE(full_observed_count == 1);
+  REQUIRE(depth_limit_observed_count == 1);
 }
 
 TEST_CASE("verify_parallel matches sequential under tiny queue budget and high fanout",
