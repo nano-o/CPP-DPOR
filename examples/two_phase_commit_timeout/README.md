@@ -205,7 +205,7 @@ The UDP tests also check:
 
 If protocol code throws an unexpected exception during DPOR exploration, the
 scenario adapter converts that uncaught protocol exception into a terminal
-`ErrorLabel`. DPOR then reports `VerifyResultKind::ErrorFound` instead of
+`ErrorLabel`. DPOR then publishes an error terminal execution instead of
 treating the problem as infrastructure failure.
 
 The known replay control-flow exceptions are handled internally by the
@@ -213,7 +213,7 @@ simulation module. Simulation failures still propagate as ordinary exceptions.
 
 The `Coordinator` constructor accepts a `bug_on_p1_no` flag that injects a
 deliberate bug when participant 1 votes No. This exists only to test the
-verification-failure path.
+error-execution path.
 
 ## Running
 

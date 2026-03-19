@@ -133,7 +133,13 @@ struct TerminalExecutionT {
   const model::ExplorationGraphT<ValueT>& graph;
   TerminalExecutionKind kind;
 };
+
+enum class TerminalExecutionAction : std::uint8_t { Continue, Stop };
 ```
+
+`on_terminal_execution` may accept either `TerminalExecutionT<ValueT>` or
+`ExplorationGraphT<ValueT>`. Returning `Stop` requests early termination; void
+callbacks are treated as `Continue`.
 
 Public entry points:
 
@@ -155,13 +161,11 @@ struct ParallelVerifyOptions {
 
 `VerifyResult` reports:
 
-- `VerifyResultKind::AllExecutionsExplored`
-- `VerifyResultKind::ErrorFound`
-- `VerifyResultKind::DepthLimitReached`
+- `VerifyResultKind::AllExplored`
+- `VerifyResultKind::Stopped`
 
 and also carries:
 
-- `message`: populated for error terminals
 - `executions_explored`: total number of published terminal executions
 - `full_executions_explored`: number of full executions
 - `error_executions_explored`: number of error executions
@@ -169,7 +173,8 @@ and also carries:
 
 If `on_terminal_execution` is set, DPOR calls it with each published terminal
 execution. Terminal executions are full executions, error executions, and
-branches truncated by `max_depth`.
+branches truncated by `max_depth`. DPOR keeps exploring after error terminals
+unless the callback requests `Stop`.
 
 ## Execution graphs
 

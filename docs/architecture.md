@@ -101,10 +101,10 @@ exploration engine.
 
 ### Results and Observers
 
-- Verification reports `AllExecutionsExplored`, `ErrorFound`, or
-  `DepthLimitReached`.
+- Verification reports `AllExplored` or `Stopped`.
 - Optional terminal-execution observers receive `TerminalExecutionT<ValueT>`
   values for each full execution, error execution, and depth-limit execution.
+- Observers may request early termination by returning `Stop`.
 - `VerifyResult` tracks total published terminal executions plus a split count
   for each terminal-execution kind.
 

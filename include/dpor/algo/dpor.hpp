@@ -29,21 +29,30 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace dpor::algo {
 
-enum class VerifyResultKind : std::uint8_t { AllExecutionsExplored, ErrorFound, DepthLimitReached };
+enum class VerifyResultKind : std::uint8_t {
+  AllExplored,
+  Stopped,
+  AllExecutionsExplored = AllExplored,
+};
 enum class TerminalExecutionKind : std::uint8_t { Full, Error, DepthLimit };
+enum class TerminalExecutionAction : std::uint8_t { Continue, Stop };
 
 struct VerifyResult {
-  VerifyResultKind kind{VerifyResultKind::AllExecutionsExplored};
-  std::string message;
+  VerifyResultKind kind{VerifyResultKind::AllExplored};
   std::size_t executions_explored{0};
   std::size_t full_executions_explored{0};
   std::size_t error_executions_explored{0};
   std::size_t depth_limit_executions_explored{0};
+
+  [[nodiscard]] bool all_explored() const noexcept { return kind == VerifyResultKind::AllExplored; }
+
+  [[nodiscard]] bool stopped() const noexcept { return kind == VerifyResultKind::Stopped; }
 
   [[nodiscard]] std::size_t terminal_executions_explored() const noexcept {
     return executions_explored;
@@ -72,8 +81,73 @@ struct TerminalExecutionT {
 
 template <typename ValueT>
 // Observers are called for every published terminal execution: full
-// executions, error executions, and branches truncated by max_depth.
-using TerminalExecutionObserverT = std::function<void(const TerminalExecutionT<ValueT>&)>;
+// executions, error executions, and branches truncated by max_depth. Returning
+// Stop requests early termination; void callbacks are treated as Continue.
+class TerminalExecutionObserverT {
+ public:
+  using Execution = TerminalExecutionT<ValueT>;
+  using Handler = std::function<TerminalExecutionAction(const Execution&)>;
+
+  TerminalExecutionObserverT() = default;
+  TerminalExecutionObserverT(std::nullptr_t) noexcept {}
+
+  template <typename Fn,
+            std::enable_if_t<!std::is_same_v<std::decay_t<Fn>, TerminalExecutionObserverT>, int> = 0>
+  TerminalExecutionObserverT(Fn&& fn) {
+    assign(std::forward<Fn>(fn));
+  }
+
+  TerminalExecutionObserverT& operator=(std::nullptr_t) noexcept {
+    handler_ = nullptr;
+    return *this;
+  }
+
+  template <typename Fn,
+            std::enable_if_t<!std::is_same_v<std::decay_t<Fn>, TerminalExecutionObserverT>, int> = 0>
+  TerminalExecutionObserverT& operator=(Fn&& fn) {
+    assign(std::forward<Fn>(fn));
+    return *this;
+  }
+
+  [[nodiscard]] explicit operator bool() const noexcept { return static_cast<bool>(handler_); }
+
+  [[nodiscard]] TerminalExecutionAction operator()(const Execution& execution) const {
+    if (!handler_) {
+      return TerminalExecutionAction::Continue;
+    }
+    return handler_(execution);
+  }
+
+ private:
+  template <typename Fn>
+  static constexpr bool kAlwaysFalse = false;
+
+  template <typename Fn>
+  void assign(Fn&& fn) {
+    using FnT = std::decay_t<Fn>;
+    handler_ = [fn = FnT(std::forward<Fn>(fn))](const Execution& execution) mutable {
+      if constexpr (std::is_invocable_r_v<TerminalExecutionAction, FnT&, const Execution&>) {
+        return std::invoke(fn, execution);
+      } else if constexpr (std::is_invocable_r_v<void, FnT&, const Execution&>) {
+        std::invoke(fn, execution);
+        return TerminalExecutionAction::Continue;
+      } else if constexpr (std::is_invocable_r_v<TerminalExecutionAction, FnT&,
+                                                 const model::ExplorationGraphT<ValueT>&>) {
+        return std::invoke(fn, execution.graph);
+      } else if constexpr (std::is_invocable_r_v<void, FnT&,
+                                                 const model::ExplorationGraphT<ValueT>&>) {
+        std::invoke(fn, execution.graph);
+        return TerminalExecutionAction::Continue;
+      } else {
+        static_assert(kAlwaysFalse<FnT>,
+                      "terminal execution observer must accept TerminalExecutionT or "
+                      "ExplorationGraphT and return void or TerminalExecutionAction");
+      }
+    };
+  }
+
+  Handler handler_;
+};
 
 template <typename ValueT>
 // Compatibility alias; prefer TerminalExecutionObserverT.
@@ -99,12 +173,12 @@ struct ParallelVerifyOptions {
   std::size_t min_fanout{2};
   // When non-zero, workers read the shared stop flag only every sync_steps
   // stop_requested() calls and batch terminal-execution counts in thread-local
-  // accumulators.  This reduces contention at the cost of weaker error-stop
-  // semantics: multiple workers may independently reach error terminals, and
-  // full/depth-limit executions may be counted after an error has been
-  // committed.  When zero (the default) the publication mutex serialises these
-  // paths so that exactly one error is observed and no work is done after the
-  // stop.
+  // accumulators. This reduces contention at the cost of weaker stop
+  // semantics: workers may publish additional terminal executions after a
+  // callback has requested stop. When zero (the default), stop checks are
+  // stricter, but callbacks still run outside publication_mutex_, so a terminal
+  // that already passed the stop check may still be published before the stop
+  // request is committed.
   std::size_t sync_steps{0};
 };
 
@@ -117,32 +191,23 @@ namespace detail {
 
 using EventId = typename model::ExplorationGraphT<model::Value>::EventId;
 
-[[nodiscard]] inline std::string format_error_message(const model::ThreadId tid,
-                                                      const model::ErrorLabel& error) {
-  auto message = "error event reached in thread " + std::to_string(tid);
-  if (!error.message.empty()) {
-    message += ": " + error.message;
-  }
-  return message;
-}
-
 template <typename ValueT>
-inline void notify_terminal_execution(const DporConfigT<ValueT>& config,
-                                      const model::ExplorationGraphT<ValueT>& graph,
-                                      const TerminalExecutionKind kind) {
+[[nodiscard]] inline TerminalExecutionAction notify_terminal_execution(
+    const DporConfigT<ValueT>& config, const model::ExplorationGraphT<ValueT>& graph,
+    const TerminalExecutionKind kind) {
   if (config.on_terminal_execution) {
-    config.on_terminal_execution(TerminalExecutionT<ValueT>{
+    return config.on_terminal_execution(TerminalExecutionT<ValueT>{
         .graph = graph,
         .kind = kind,
     });
-    return;
   }
   if (config.on_execution) {
-    config.on_execution(TerminalExecutionT<ValueT>{
+    return config.on_execution(TerminalExecutionT<ValueT>{
         .graph = graph,
         .kind = kind,
     });
   }
+  return TerminalExecutionAction::Continue;
 }
 
 template <typename ValueT>
@@ -727,16 +792,16 @@ class SequentialExecutor {
       : result_(result), config_(config) {}
 
   [[nodiscard]] bool stop_requested() const noexcept {
-    return result_.kind == VerifyResultKind::ErrorFound;
+    return result_.kind == VerifyResultKind::Stopped;
   }
 
   [[nodiscard]] bool publish_depth_limit_execution(const model::ExplorationGraphT<ValueT>& graph) {
     ++result_.executions_explored;
     ++result_.depth_limit_executions_explored;
-    if (result_.kind == VerifyResultKind::AllExecutionsExplored) {
-      result_.kind = VerifyResultKind::DepthLimitReached;
+    if (notify_terminal_execution(config_, graph, TerminalExecutionKind::DepthLimit) ==
+        TerminalExecutionAction::Stop) {
+      request_stop();
     }
-    notify_terminal_execution(config_, graph, TerminalExecutionKind::DepthLimit);
     return true;
   }
 
@@ -749,22 +814,28 @@ class SequentialExecutor {
   [[nodiscard]] bool publish_full_execution(const model::ExplorationGraphT<ValueT>& graph) {
     ++result_.executions_explored;
     ++result_.full_executions_explored;
-    notify_terminal_execution(config_, graph, TerminalExecutionKind::Full);
+    if (notify_terminal_execution(config_, graph, TerminalExecutionKind::Full) ==
+        TerminalExecutionAction::Stop) {
+      request_stop();
+    }
     return true;
   }
 
   [[nodiscard]] bool publish_error_execution(const model::ExplorationGraphT<ValueT>& graph,
-                                             const model::ThreadId tid,
-                                             const model::ErrorLabel& error) {
+                                             const model::ThreadId /*tid*/,
+                                             const model::ErrorLabel& /*error*/) {
     ++result_.executions_explored;
     ++result_.error_executions_explored;
-    result_.kind = VerifyResultKind::ErrorFound;
-    result_.message = format_error_message(tid, error);
-    notify_terminal_execution(config_, graph, TerminalExecutionKind::Error);
+    if (notify_terminal_execution(config_, graph, TerminalExecutionKind::Error) ==
+        TerminalExecutionAction::Stop) {
+      request_stop();
+    }
     return true;
   }
 
  private:
+  void request_stop() noexcept { result_.kind = VerifyResultKind::Stopped; }
+
   VerifyResult& result_;
   const DporConfigT<ValueT>& config_;
 };
@@ -817,11 +888,8 @@ class ParallelExecutor {
     result.executions_explored = result.full_executions_explored +
                                  result.error_executions_explored +
                                  result.depth_limit_executions_explored;
-    if (first_error_message_.has_value()) {
-      result.kind = VerifyResultKind::ErrorFound;
-      result.message = *first_error_message_;
-    } else if (depth_limit_reached_.load(std::memory_order_relaxed)) {
-      result.kind = VerifyResultKind::DepthLimitReached;
+    if (stop_requested_.load(std::memory_order_relaxed)) {
+      result.kind = VerifyResultKind::Stopped;
     }
     return result;
   }
@@ -846,16 +914,17 @@ class ParallelExecutor {
         return false;
       }
       ++worker_state().local_depth_limit_executions;
-      depth_limit_reached_.store(true, std::memory_order_relaxed);
     } else {
       if (stop_requested()) {
         return false;
       }
       ++worker_state().local_depth_limit_executions;
-      depth_limit_reached_.store(true, std::memory_order_relaxed);
     }
 
-    notify_terminal_execution(config_, graph, TerminalExecutionKind::DepthLimit);
+    if (notify_terminal_execution(config_, graph, TerminalExecutionKind::DepthLimit) ==
+        TerminalExecutionAction::Stop) {
+      request_stop();
+    }
     return true;
   }
 
@@ -895,8 +964,7 @@ class ParallelExecutor {
 
   [[nodiscard]] bool publish_full_execution(const model::ExplorationGraphT<ValueT>& graph) {
     if (sync_steps_ == 0) {
-      // Serialise with other terminal-publication paths so that no full
-      // execution is counted or observed after an error has been committed.
+      // Serialise terminal-count updates with stop checks.
       std::lock_guard lock(publication_mutex_);
       if (stop_requested_.load(std::memory_order_acquire)) {
         return false;
@@ -909,42 +977,34 @@ class ParallelExecutor {
       ++worker_state().local_full_executions;
     }
 
-    notify_terminal_execution(config_, graph, TerminalExecutionKind::Full);
+    if (notify_terminal_execution(config_, graph, TerminalExecutionKind::Full) ==
+        TerminalExecutionAction::Stop) {
+      request_stop();
+    }
     return true;
   }
 
   [[nodiscard]] bool publish_error_execution(const model::ExplorationGraphT<ValueT>& graph,
-                                             const model::ThreadId tid,
-                                             const model::ErrorLabel& error) {
-    bool published = false;
-    {
+                                             const model::ThreadId /*tid*/,
+                                             const model::ErrorLabel& /*error*/) {
+    if (sync_steps_ == 0) {
       std::lock_guard lock(publication_mutex_);
-      if (sync_steps_ == 0) {
-        // Strict mode: only the first error is counted and observed.
-        if (stop_requested_.load(std::memory_order_acquire)) {
-          return false;
-        }
-        ++worker_state().local_error_executions;
-        first_error_message_ = format_error_message(tid, error);
-        stop_requested_.store(true, std::memory_order_release);
-        published = true;
-      } else {
-        // Relaxed mode: every worker that independently reaches an error
-        // is counted and observed; only the first message is kept.
-        ++worker_state().local_error_executions;
-        if (!first_error_message_.has_value()) {
-          first_error_message_ = format_error_message(tid, error);
-        }
-        stop_requested_.store(true, std::memory_order_release);
-        published = true;
+      if (stop_requested_.load(std::memory_order_acquire)) {
+        return false;
       }
+      ++worker_state().local_error_executions;
+    } else {
+      if (stop_requested()) {
+        return false;
+      }
+      ++worker_state().local_error_executions;
     }
 
-    if (published) {
-      notify_terminal_execution(config_, graph, TerminalExecutionKind::Error);
+    if (notify_terminal_execution(config_, graph, TerminalExecutionKind::Error) ==
+        TerminalExecutionAction::Stop) {
+      request_stop();
     }
-    queue_cv_.notify_all();
-    return published;
+    return true;
   }
 
  private:
@@ -1045,6 +1105,12 @@ class ParallelExecutor {
     state = WorkerState{};
   }
 
+  void request_stop() noexcept {
+    stop_requested_.store(true, std::memory_order_release);
+    worker_state().cached_stop = true;
+    queue_cv_.notify_all();
+  }
+
   void record_exception(std::exception_ptr exception) {
     {
       std::lock_guard lock(publication_mutex_);
@@ -1065,7 +1131,6 @@ class ParallelExecutor {
   std::size_t sync_steps_{0};
 
   std::atomic<bool> stop_requested_{false};
-  std::atomic<bool> depth_limit_reached_{false};
   std::atomic<std::size_t> full_executions_explored_{0};
   std::atomic<std::size_t> error_executions_explored_{0};
   std::atomic<std::size_t> depth_limit_executions_explored_{0};
@@ -1077,7 +1142,6 @@ class ParallelExecutor {
   bool search_complete_{false};
 
   mutable std::mutex publication_mutex_;
-  std::optional<std::string> first_error_message_;
   std::exception_ptr first_exception_;
 };
 
@@ -1484,11 +1548,9 @@ template <typename ValueT>
 template <typename ValueT>
 [[nodiscard]] inline VerifyResult verify_parallel(const DporConfigT<ValueT>& config,
                                                   ParallelVerifyOptions options = {}) {
-  // Experimental.  With sync_steps=0 (default), exactly one error terminal is
-  // counted and observed; callback order among full/depth-limit executions is
-  // unspecified.  With sync_steps>0, multiple workers may independently reach
-  // error terminals before the stop signal propagates, and full/depth-limit
-  // executions may still be published after the first error is committed.
+  // Experimental. Callback order is unspecified across workers. With
+  // sync_steps>0, additional terminal executions may still be published after a
+  // callback has requested stop.
   const auto thread_ids = detail::sorted_thread_ids(config.program);
   detail::ParallelExecutor<ValueT> executor(config, options, thread_ids);
   return executor.run();

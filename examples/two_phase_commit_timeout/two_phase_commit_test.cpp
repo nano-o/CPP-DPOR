@@ -628,7 +628,7 @@ TEST_CASE("2PC basic exploration with 2 participants", "[two_phase_commit]") {
   config.program = std::move(prog);
 
   const auto result = algo::verify(config);
-  REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.kind == algo::VerifyResultKind::AllExplored);
   // The old 4 vote-combos * 4 delivery-orderings accounting no longer applies:
   // every timer-armed wait adds a bottom branch alongside message matches.
   // For 2 participants this timer-inclusive model explores 876 no-crash
@@ -656,7 +656,7 @@ TEST_CASE("2PC DPOR explores participant local timeout executions", "[two_phase_
   };
 
   const auto result = algo::verify(config);
-  REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.kind == algo::VerifyResultKind::AllExplored);
   REQUIRE(saw_local_timeout);
 }
 
@@ -689,7 +689,7 @@ TEST_CASE("2PC agreement invariant: all decided participants agree", "[two_phase
   };
 
   const auto result = algo::verify(config);
-  REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.kind == algo::VerifyResultKind::AllExplored);
   REQUIRE_FALSE(invariant_violated);
 }
 
@@ -728,7 +728,7 @@ TEST_CASE("2PC validity invariant: Commit implies all voted Yes", "[two_phase_co
   };
 
   const auto result = algo::verify(config);
-  REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.kind == algo::VerifyResultKind::AllExplored);
   REQUIRE_FALSE(invariant_violated);
 }
 
@@ -760,7 +760,7 @@ TEST_CASE("2PC crash behavior: no participant decides after coordinator crash",
   };
 
   const auto result = algo::verify(config);
-  REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.kind == algo::VerifyResultKind::AllExplored);
   REQUIRE(crash_executions > 0);
   REQUIRE_FALSE(invariant_violated);
 }
@@ -776,7 +776,7 @@ TEST_CASE("2PC without crashes explores timeout-inclusive executions for 2 parti
   config.program = std::move(prog);
 
   const auto result = algo::verify(config);
-  REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.kind == algo::VerifyResultKind::AllExplored);
   // Regression baseline for the timer-inclusive no-crash state space.
   REQUIRE(result.full_executions_explored == 876);
 }
@@ -788,11 +788,11 @@ TEST_CASE("2PC scales to 3 participants", "[two_phase_commit]") {
   config.program = std::move(prog);
 
   const auto result = algo::verify(config);
-  REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.kind == algo::VerifyResultKind::AllExplored);
   REQUIRE(result.full_executions_explored > 0);
 }
 
-TEST_CASE("2PC protocol bug surfaces as verification failure", "[two_phase_commit]") {
+TEST_CASE("2PC protocol bug surfaces as error executions", "[two_phase_commit]") {
   auto prog = sim::make_program({
       .num_participants = 2,
       .bug_on_p1_no = true,
@@ -811,9 +811,9 @@ TEST_CASE("2PC protocol bug surfaces as verification failure", "[two_phase_commi
   };
 
   const auto result = algo::verify(config);
-  REQUIRE(result.kind == algo::VerifyResultKind::ErrorFound);
-  REQUIRE(result.message.find("coordinator cannot handle No vote from participant 1") !=
-          std::string::npos);
+  REQUIRE(result.kind == algo::VerifyResultKind::AllExplored);
+  REQUIRE(result.full_executions_explored > 0);
+  REQUIRE(result.error_executions_explored > 0);
   REQUIRE(saw_error_execution);
 }
 
@@ -846,7 +846,7 @@ TEST_CASE("2PC false invariant is detected: Abort implies some voted No", "[two_
   };
 
   const auto result = algo::verify(config);
-  REQUIRE(result.kind == algo::VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.kind == algo::VerifyResultKind::AllExplored);
   // The false invariant ("Abort never happens") must be violated.
   REQUIRE(invariant_violated);
 }

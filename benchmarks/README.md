@@ -29,7 +29,7 @@ The executable supports the following CLI:
 
 - `--mode dpor` measures only DPOR exploration.
 - `--mode oracle` measures only the exhaustive oracle.
-- `--mode both` runs both and checks that they agree on the execution count.
+- `--mode both` runs both and checks that they agree on the full-execution count.
 - `--participants` defaults to `3`.
 - `--iterations` defaults to `1`.
 - `--no-crash` disables the coordinator crash choice so you can benchmark the
@@ -44,9 +44,13 @@ The executable supports the following CLI:
   these also enables `--parallel`.
 - Parallel flags are ignored in `--mode oracle`.
 
+Benchmark output reports `terminal_executions`, `full_executions`,
+`error_executions`, and `depth_limit_executions` for each run. Oracle runs only
+enumerate full executions, so their error and depth-limit counts remain zero.
+
 When the oracle runs, the benchmark also prints `paths_explored`, which counts
 raw oracle DFS terminal paths before deduplication. That number is typically
-much larger than the final `executions` count.
+much larger than the final `full_executions` count.
 
 ## Configure and build
 
@@ -148,11 +152,11 @@ Each benchmark prints per-run timings and a summary. Example shape:
 ```text
 Plain 2PC benchmark participants=2 communication_model=async inject_crash=true iterations=1 optimized_build=true
 DPOR
-  run 1: executions=24 elapsed_ms=...
-  summary: min_ms=... avg_ms=... max_ms=... executions=24
+  run 1: terminal_executions=24 full_executions=24 error_executions=0 depth_limit_executions=0 elapsed_ms=...
+  summary: min_ms=... avg_ms=... max_ms=... terminal_executions=24 full_executions=24 error_executions=0 depth_limit_executions=0
 Oracle
-  run 1: executions=24 paths_explored=... elapsed_ms=...
-  summary: min_ms=... avg_ms=... max_ms=... executions=24 paths_explored=...
+  run 1: terminal_executions=24 full_executions=24 error_executions=0 depth_limit_executions=0 paths_explored=... elapsed_ms=...
+  summary: min_ms=... avg_ms=... max_ms=... terminal_executions=24 full_executions=24 error_executions=0 depth_limit_executions=0 paths_explored=...
 ```
 
 Use `--iterations N` to get repeated timings in a single process.

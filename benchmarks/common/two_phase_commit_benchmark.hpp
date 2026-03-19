@@ -35,13 +35,19 @@ struct Options {
 };
 
 struct Measurement {
-  std::size_t executions{0};
+  std::size_t terminal_executions{0};
+  std::size_t full_executions{0};
+  std::size_t error_executions{0};
+  std::size_t depth_limit_executions{0};
   std::size_t paths_explored{0};
   double elapsed_ms{0.0};
 };
 
-struct OracleRunResult {
-  std::size_t executions{0};
+struct BenchmarkRunResult {
+  std::size_t terminal_executions{0};
+  std::size_t full_executions{0};
+  std::size_t error_executions{0};
+  std::size_t depth_limit_executions{0};
   std::size_t paths_explored{0};
 };
 
@@ -184,10 +190,20 @@ template <typename Fn>
   const auto elapsed =
       std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(end - start);
   return Measurement{
-      .executions = result.executions,
+      .terminal_executions = result.terminal_executions,
+      .full_executions = result.full_executions,
+      .error_executions = result.error_executions,
+      .depth_limit_executions = result.depth_limit_executions,
       .paths_explored = result.paths_explored,
       .elapsed_ms = elapsed.count(),
   };
+}
+
+inline void print_execution_counts(const Measurement& measurement) {
+  std::cout << " terminal_executions=" << measurement.terminal_executions
+            << " full_executions=" << measurement.full_executions
+            << " error_executions=" << measurement.error_executions
+            << " depth_limit_executions=" << measurement.depth_limit_executions;
 }
 
 inline void print_measurements(std::string_view label, const std::vector<Measurement>& measurements,
@@ -207,7 +223,8 @@ inline void print_measurements(std::string_view label, const std::vector<Measure
 
   std::cout << label << '\n';
   for (std::size_t i = 0; i < measurements.size(); ++i) {
-    std::cout << "  run " << (i + 1) << ": executions=" << measurements[i].executions;
+    std::cout << "  run " << (i + 1) << ":";
+    print_execution_counts(measurements[i]);
     if (show_paths) {
       std::cout << " paths_explored=" << measurements[i].paths_explored;
     }
@@ -216,8 +233,8 @@ inline void print_measurements(std::string_view label, const std::vector<Measure
   }
   std::cout << "  summary:" << " min_ms=" << std::fixed << std::setprecision(3)
             << minmax.first->elapsed_ms << " avg_ms=" << average_ms
-            << " max_ms=" << minmax.second->elapsed_ms
-            << " executions=" << measurements.front().executions;
+            << " max_ms=" << minmax.second->elapsed_ms;
+  print_execution_counts(measurements.front());
   if (show_paths) {
     std::cout << " paths_explored=" << measurements.front().paths_explored;
   }
@@ -225,8 +242,8 @@ inline void print_measurements(std::string_view label, const std::vector<Measure
 }
 
 template <typename ProgramFactory>
-[[nodiscard]] inline OracleRunResult run_dpor(const Options& options,
-                                              const ProgramFactory& make_program) {
+[[nodiscard]] inline BenchmarkRunResult run_dpor(const Options& options,
+                                                 const ProgramFactory& make_program) {
   auto program = make_program(options.participants, options.inject_crash);
   using ValueT = typename ProgramValueType<std::decay_t<decltype(program)>>::type;
   algo::DporConfigT<ValueT> config;
@@ -234,26 +251,29 @@ template <typename ProgramFactory>
   config.communication_model = options.communication_model;
   const auto result = options.parallel ? algo::verify_parallel(config, options.parallel_options)
                                        : algo::verify(config);
-  if (result.kind == algo::VerifyResultKind::ErrorFound) {
-    throw std::runtime_error("verification failed: " + result.message);
+  if (result.kind != algo::VerifyResultKind::AllExplored) {
+    throw std::runtime_error("DPOR was stopped before exploring all executions");
   }
-  if (result.kind != algo::VerifyResultKind::AllExecutionsExplored) {
-    throw std::runtime_error("DPOR did not explore all executions");
-  }
-  return OracleRunResult{
-      .executions = result.full_executions_explored,
+  return BenchmarkRunResult{
+      .terminal_executions = result.executions_explored,
+      .full_executions = result.full_executions_explored,
+      .error_executions = result.error_executions_explored,
+      .depth_limit_executions = result.depth_limit_executions_explored,
       .paths_explored = 0,
   };
 }
 
 template <typename ProgramFactory>
-[[nodiscard]] inline OracleRunResult run_oracle(std::size_t participants, bool inject_crash,
-                                                model::CommunicationModel communication_model,
-                                                const ProgramFactory& make_program) {
+[[nodiscard]] inline BenchmarkRunResult run_oracle(std::size_t participants, bool inject_crash,
+                                                   model::CommunicationModel communication_model,
+                                                   const ProgramFactory& make_program) {
   auto program = make_program(participants, inject_crash);
   const auto stats = test_support::collect_oracle_stats(program, communication_model);
-  return OracleRunResult{
-      .executions = stats.signatures.size(),
+  return BenchmarkRunResult{
+      .terminal_executions = stats.signatures.size(),
+      .full_executions = stats.signatures.size(),
+      .error_executions = 0,
+      .depth_limit_executions = 0,
       .paths_explored = stats.paths_explored,
   };
 }
@@ -271,8 +291,18 @@ template <typename ProgramFactory>
                             make_program);
         })
                    : measure_once([&] { return run_dpor(options, make_program); }));
-    if (measurements.back().executions != measurements.front().executions) {
-      throw std::runtime_error("execution count changed across iterations");
+    if (measurements.back().terminal_executions != measurements.front().terminal_executions) {
+      throw std::runtime_error("terminal execution count changed across iterations");
+    }
+    if (measurements.back().full_executions != measurements.front().full_executions) {
+      throw std::runtime_error("full execution count changed across iterations");
+    }
+    if (measurements.back().error_executions != measurements.front().error_executions) {
+      throw std::runtime_error("error execution count changed across iterations");
+    }
+    if (measurements.back().depth_limit_executions !=
+        measurements.front().depth_limit_executions) {
+      throw std::runtime_error("depth-limit execution count changed across iterations");
     }
     if (measurements.back().paths_explored != measurements.front().paths_explored) {
       throw std::runtime_error("path count changed across iterations");
@@ -327,9 +357,10 @@ inline int run_two_phase_commit_benchmark(int argc, char** argv, std::string_vie
     }
 
     if (!dpor_measurements.empty() && !oracle_measurements.empty() &&
-        dpor_measurements.front().executions != oracle_measurements.front().executions) {
-      std::cerr << "execution count mismatch: dpor=" << dpor_measurements.front().executions
-                << " oracle=" << oracle_measurements.front().executions << '\n';
+        dpor_measurements.front().full_executions != oracle_measurements.front().full_executions) {
+      std::cerr << "full execution count mismatch: dpor="
+                << dpor_measurements.front().full_executions
+                << " oracle=" << oracle_measurements.front().full_executions << '\n';
       return 2;
     }
 

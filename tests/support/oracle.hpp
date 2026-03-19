@@ -23,7 +23,7 @@ inline void require_dpor_matches_oracle(const algo::ProgramT<ValueT>& program,
   INFO("unexpected signatures: " << comparison.unexpected_in_dpor.size());
 
   REQUIRE_FALSE(comparison.found_inconsistent_graph);
-  REQUIRE(comparison.result.kind == algo::VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(comparison.result.kind == algo::VerifyResultKind::AllExplored);
   REQUIRE(comparison.dpor_unique.size() == comparison.dpor_observed.size());
   REQUIRE(comparison.dpor_unique == comparison.oracle_signatures);
 }

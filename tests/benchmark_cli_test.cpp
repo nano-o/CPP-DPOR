@@ -97,8 +97,23 @@ TEST_CASE("benchmark helper forwards communication model to DPOR and oracle",
       fifo_options.participants, fifo_options.inject_crash, fifo_options.communication_model,
       make_program);
 
-  REQUIRE(async_dpor.executions == 2);
-  REQUIRE(fifo_dpor.executions == 1);
-  REQUIRE(async_oracle.executions == 2);
-  REQUIRE(fifo_oracle.executions == 1);
+  REQUIRE(async_dpor.terminal_executions == 2);
+  REQUIRE(async_dpor.full_executions == 2);
+  REQUIRE(async_dpor.error_executions == 0);
+  REQUIRE(async_dpor.depth_limit_executions == 0);
+
+  REQUIRE(fifo_dpor.terminal_executions == 1);
+  REQUIRE(fifo_dpor.full_executions == 1);
+  REQUIRE(fifo_dpor.error_executions == 0);
+  REQUIRE(fifo_dpor.depth_limit_executions == 0);
+
+  REQUIRE(async_oracle.terminal_executions == 2);
+  REQUIRE(async_oracle.full_executions == 2);
+  REQUIRE(async_oracle.error_executions == 0);
+  REQUIRE(async_oracle.depth_limit_executions == 0);
+
+  REQUIRE(fifo_oracle.terminal_executions == 1);
+  REQUIRE(fifo_oracle.full_executions == 1);
+  REQUIRE(fifo_oracle.error_executions == 0);
+  REQUIRE(fifo_oracle.depth_limit_executions == 0);
 }

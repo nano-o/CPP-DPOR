@@ -182,9 +182,8 @@ on failure, which produced severe parallel-path regressions.
 
 `VerifyResultKind` is the same as in sequential mode:
 
-- `AllExecutionsExplored`
-- `ErrorFound`
-- `DepthLimitReached`
+- `AllExplored`
+- `Stopped`
 
 Current behavior differs by `sync_steps`.
 
@@ -193,12 +192,11 @@ Current behavior differs by `sync_steps`.
 - `publish_full_execution()`, `publish_depth_limit_execution()`, and
   `publish_error_execution()` serialize
   through `publication_mutex_`.
-- Exactly one error terminal is published.
-- No full or depth-limit execution is counted after the stop flag has been
-  committed by an error path.
+- Terminal-count updates are serialized against stop checks.
 - `on_terminal_execution` callbacks are still invoked outside
-  `publication_mutex_`, so observer callbacks may race with an error
-  publication even in strict mode.
+  `publication_mutex_`, so another worker may still publish a terminal that
+  already passed the stop check before a callback's `Stop` request is
+  committed.
 
 This is the default.
 
@@ -207,9 +205,8 @@ This is the default.
 - workers cache stop-flag reads for `sync_steps` polling calls
 - terminal-execution counts are accumulated in thread-local state and flushed
   later
-- more than one worker may independently reach an error terminal
-- full and depth-limit executions may still be counted after the first error is
-  committed
+- additional terminal executions may still be counted after the first callback
+  requests stop
 
 This mode exists only to reduce synchronization overhead.
 

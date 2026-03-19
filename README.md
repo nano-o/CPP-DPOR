@@ -58,8 +58,8 @@ Tests are written with Catch2 (v3). CMake uses a system Catch2 package if availa
 Paper-derived examples in current scope are in `tests/dpor_test.cpp` and tagged `[paper]`.
 `tests/dpor_test.cpp` and `tests/dpor_stress_test.cpp` also cross-check DPOR
 against an independent exhaustive async oracle in `tests/support/oracle.hpp`.
-When `max_depth` truncates exploration, `verify()` reports
-`DepthLimitReached`.
+When `max_depth` truncates exploration, DPOR publishes depth-limit terminal
+executions and counts them in `VerifyResult::depth_limit_executions_explored`.
 The current exploration code still uses recursive branch traversal, so very
 deep executions may also hit the process stack before reaching the configured
 depth limit.

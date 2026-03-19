@@ -252,7 +252,7 @@ TEST_CASE("two threads, one send-receive pair explores 1 execution", "[algo][dpo
 
 // --- Error events ---
 
-TEST_CASE("error event results in ErrorFound", "[algo][dpor]") {
+TEST_CASE("error event is counted as an error terminal execution", "[algo][dpor]") {
   DporConfig config;
 
   config.program.threads[1] = [](const ThreadTrace& trace,
@@ -264,9 +264,11 @@ TEST_CASE("error event results in ErrorFound", "[algo][dpor]") {
   };
 
   const auto result = verify(config);
-  REQUIRE(result.kind == VerifyResultKind::ErrorFound);
+  REQUIRE(result.kind == VerifyResultKind::AllExplored);
+  REQUIRE(result.full_executions_explored == 0);
+  REQUIRE(result.error_executions_explored == 1);
+  REQUIRE(result.depth_limit_executions_explored == 0);
   REQUIRE(result.executions_explored == 1);
-  REQUIRE(result.message == "error event reached in thread 1: boom");
 }
 
 // --- ND choices ---
@@ -827,7 +829,7 @@ TEST_CASE("max_depth limits exploration", "[algo][dpor]") {
   };
 
   const auto result = verify(config);
-  REQUIRE(result.kind == VerifyResultKind::DepthLimitReached);
+  REQUIRE(result.kind == VerifyResultKind::AllExplored);
   REQUIRE(result.full_executions_explored == 0);
   REQUIRE(result.error_executions_explored == 0);
   REQUIRE(result.depth_limit_executions_explored == 1);
@@ -865,6 +867,36 @@ TEST_CASE("terminal execution observer is called for each full execution", "[alg
   REQUIRE(result.depth_limit_executions_explored == 0);
   REQUIRE(result.executions_explored == 2);
   REQUIRE(observed_count == 2);
+}
+
+TEST_CASE("terminal execution observer can stop sequential exploration", "[algo][dpor]") {
+  DporConfig config;
+  std::size_t observed_count = 0;
+
+  config.on_terminal_execution = [&observed_count](const TerminalExecution& execution) {
+    REQUIRE(execution.kind == TerminalExecutionKind::Full);
+    ++observed_count;
+    return TerminalExecutionAction::Stop;
+  };
+
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
+    if (trace.empty()) {
+      return NondeterministicChoiceLabel{
+          .value = "a",
+          .choices = {"a", "b"},
+      };
+    }
+    return std::nullopt;
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::Stopped);
+  REQUIRE(result.full_executions_explored == 1);
+  REQUIRE(result.error_executions_explored == 0);
+  REQUIRE(result.depth_limit_executions_explored == 0);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(observed_count == 1);
 }
 
 TEST_CASE("detail visit shows a full execution to the observer before rollback",
@@ -930,7 +962,7 @@ TEST_CASE("detail visit shows the error execution to the observer before rollbac
   dpor::algo::detail::visit(program, graph, result, config, 0,
                             dpor::algo::detail::sorted_thread_ids(program));
 
-  REQUIRE(result.kind == VerifyResultKind::ErrorFound);
+  REQUIRE(result.kind == VerifyResultKind::AllExplored);
   REQUIRE(result.error_executions_explored == 1);
   REQUIRE(result.executions_explored == 1);
   REQUIRE(observed_count == 1);
@@ -2340,7 +2372,7 @@ TEST_CASE("verify_parallel matches sequential and oracle execution sets on mixed
   REQUIRE(parallel.unique.size() == parallel.observed.size());
 }
 
-TEST_CASE("verify_parallel stops cleanly when sibling branches race to error",
+TEST_CASE("verify_parallel reports error terminals when sibling branches race to error",
           "[algo][dpor][parallel]") {
   Program program;
   program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
@@ -2375,17 +2407,56 @@ TEST_CASE("verify_parallel stops cleanly when sibling branches race to error",
   options.max_queued_tasks = 4;
 
   const auto result = verify_parallel(config, options);
-  REQUIRE(result.kind == VerifyResultKind::ErrorFound);
+  REQUIRE(result.kind == VerifyResultKind::AllExplored);
   REQUIRE(result.full_executions_explored == 0);
-  REQUIRE(result.error_executions_explored == 1);
+  REQUIRE(result.error_executions_explored == 2);
   REQUIRE(result.depth_limit_executions_explored == 0);
-  REQUIRE(result.executions_explored == 1);
-  REQUIRE(result.message == "error event reached in thread 1: parallel boom");
-  REQUIRE(observed_count == 1);
+  REQUIRE(result.executions_explored == 2);
+  REQUIRE(observed_count == 2);
   REQUIRE_FALSE(saw_bad_error_graph);
 }
 
-TEST_CASE("verify_parallel reports depth limit when one branch exceeds max_depth",
+TEST_CASE("verify_parallel can stop when terminal observer requests stop",
+          "[algo][dpor][parallel]") {
+  Program program;
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return NondeterministicChoiceLabel{
+          .value = "left",
+          .choices = {"left", "right"},
+      };
+    }
+    return std::nullopt;
+  };
+
+  std::size_t observed_count = 0;
+  std::mutex observed_mutex;
+
+  DporConfig config;
+  config.program = program;
+  config.on_terminal_execution = [&](const TerminalExecution& execution) {
+    std::lock_guard lock(observed_mutex);
+    REQUIRE(execution.kind == TerminalExecutionKind::Full);
+    ++observed_count;
+    return TerminalExecutionAction::Stop;
+  };
+
+  ParallelVerifyOptions options;
+  options.max_workers = 2;
+  options.max_queued_tasks = 4;
+
+  const auto result = verify_parallel(config, options);
+  REQUIRE(result.kind == VerifyResultKind::Stopped);
+  REQUIRE(result.full_executions_explored >= 1);
+  REQUIRE(result.full_executions_explored <= 2);
+  REQUIRE(result.error_executions_explored == 0);
+  REQUIRE(result.depth_limit_executions_explored == 0);
+  REQUIRE(result.executions_explored == result.full_executions_explored);
+  REQUIRE(observed_count >= 1);
+  REQUIRE(observed_count <= 2);
+}
+
+TEST_CASE("verify_parallel reports depth-limit terminals when one branch exceeds max_depth",
           "[algo][dpor][parallel]") {
   Program program;
   program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
@@ -2427,7 +2498,7 @@ TEST_CASE("verify_parallel reports depth limit when one branch exceeds max_depth
   options.max_queued_tasks = 4;
 
   const auto result = verify_parallel(config, options);
-  REQUIRE(result.kind == VerifyResultKind::DepthLimitReached);
+  REQUIRE(result.kind == VerifyResultKind::AllExplored);
   REQUIRE(result.full_executions_explored == 1);
   REQUIRE(result.error_executions_explored == 0);
   REQUIRE(result.depth_limit_executions_explored == 1);
