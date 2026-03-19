@@ -58,6 +58,9 @@ Paper-derived examples in current scope are in `tests/dpor_test.cpp` and tagged 
 against an independent exhaustive async oracle in `tests/support/oracle.hpp`.
 When `max_depth` truncates exploration, `verify()` reports
 `DepthLimitReached`.
+The current exploration code still uses recursive branch traversal, so very
+deep executions may also hit the process stack before reaching the configured
+depth limit.
 
 If Catch2 is not installed and your environment has internet access, enable fetching:
 
