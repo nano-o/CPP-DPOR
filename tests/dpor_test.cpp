@@ -899,6 +899,55 @@ TEST_CASE("terminal execution observer can stop sequential exploration", "[algo]
   REQUIRE(observed_count == 1);
 }
 
+TEST_CASE("progress observer reports running and final sequential snapshots", "[algo][dpor]") {
+  DporConfig config;
+  std::vector<ProgressSnapshot> snapshots;
+
+  config.progress_report_interval = std::chrono::milliseconds::zero();
+  config.on_progress = [&snapshots](const ProgressSnapshot& snapshot) {
+    snapshots.push_back(snapshot);
+  };
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return NondeterministicChoiceLabel{
+          .value = "a",
+          .choices = {"a", "b", "c"},
+      };
+    }
+    return std::nullopt;
+  };
+
+  const auto result = verify(config);
+  REQUIRE_FALSE(snapshots.empty());
+
+  bool saw_running = false;
+  for (const auto& snapshot : snapshots) {
+    if (snapshot.state != ProgressState::Running) {
+      continue;
+    }
+    saw_running = true;
+    REQUIRE(snapshot.counts_exact);
+    REQUIRE(snapshot.active_workers == 1);
+    REQUIRE(snapshot.max_workers == 1);
+    REQUIRE(snapshot.queued_tasks == 0);
+    REQUIRE(snapshot.max_queued_tasks == 0);
+  }
+
+  REQUIRE(saw_running);
+  const auto& final_snapshot = snapshots.back();
+  REQUIRE(final_snapshot.state == ProgressState::AllExplored);
+  REQUIRE(final_snapshot.counts_exact);
+  REQUIRE(final_snapshot.terminal_executions == result.executions_explored);
+  REQUIRE(final_snapshot.full_executions == result.full_executions_explored);
+  REQUIRE(final_snapshot.error_executions == result.error_executions_explored);
+  REQUIRE(final_snapshot.depth_limit_executions == result.depth_limit_executions_explored);
+  REQUIRE(final_snapshot.active_workers == 0);
+  REQUIRE(final_snapshot.max_workers == 1);
+  REQUIRE(final_snapshot.queued_tasks == 0);
+  REQUIRE(final_snapshot.max_queued_tasks == 0);
+}
+
 TEST_CASE("detail visit shows a full execution to the observer before rollback",
           "[algo][dpor][rollback]") {
   Program program;
@@ -2454,6 +2503,70 @@ TEST_CASE("verify_parallel can stop when terminal observer requests stop",
   REQUIRE(result.executions_explored == result.full_executions_explored);
   REQUIRE(observed_count >= 1);
   REQUIRE(observed_count <= 2);
+}
+
+TEST_CASE("verify_parallel reports approximate running progress and exact final progress",
+          "[algo][dpor][parallel]") {
+  Program program;
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return NondeterministicChoiceLabel{
+          .value = "left",
+          .choices = {"left", "right", "up", "down"},
+      };
+    }
+    return std::nullopt;
+  };
+
+  std::vector<ProgressSnapshot> snapshots;
+  std::mutex snapshots_mutex;
+
+  DporConfig config;
+  config.program = program;
+  config.progress_report_interval = std::chrono::milliseconds::zero();
+  config.on_progress = [&](const ProgressSnapshot& snapshot) {
+    std::lock_guard lock(snapshots_mutex);
+    snapshots.push_back(snapshot);
+  };
+
+  ParallelVerifyOptions options;
+  options.max_workers = 2;
+  options.max_queued_tasks = 4;
+  options.progress_counter_flush_interval = 1000;
+
+  const auto result = verify_parallel(config, options);
+
+  REQUIRE_FALSE(snapshots.empty());
+  bool saw_running = false;
+  bool saw_inexact_running = false;
+  {
+    std::lock_guard lock(snapshots_mutex);
+    for (const auto& snapshot : snapshots) {
+      if (snapshot.state != ProgressState::Running) {
+        continue;
+      }
+      saw_running = true;
+      REQUIRE(snapshot.max_workers == 2);
+      REQUIRE(snapshot.max_queued_tasks == 4);
+      if (!snapshot.counts_exact) {
+        saw_inexact_running = true;
+      }
+    }
+
+    REQUIRE(saw_running);
+    REQUIRE(saw_inexact_running);
+    const auto& final_snapshot = snapshots.back();
+    REQUIRE(final_snapshot.state == ProgressState::AllExplored);
+    REQUIRE(final_snapshot.counts_exact);
+    REQUIRE(final_snapshot.terminal_executions == result.executions_explored);
+    REQUIRE(final_snapshot.full_executions == result.full_executions_explored);
+    REQUIRE(final_snapshot.error_executions == result.error_executions_explored);
+    REQUIRE(final_snapshot.depth_limit_executions == result.depth_limit_executions_explored);
+    REQUIRE(final_snapshot.active_workers == 0);
+    REQUIRE(final_snapshot.max_workers == 2);
+    REQUIRE(final_snapshot.queued_tasks == 0);
+    REQUIRE(final_snapshot.max_queued_tasks == 4);
+  }
 }
 
 TEST_CASE("verify_parallel reports depth-limit terminals when one branch exceeds max_depth",

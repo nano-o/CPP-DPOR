@@ -120,6 +120,8 @@ struct DporConfigT {
   std::size_t max_depth{1000};
   model::CommunicationModel communication_model{model::CommunicationModel::Async};
   TerminalExecutionObserverT<ValueT> on_terminal_execution{};
+  ProgressObserver on_progress{};
+  std::chrono::milliseconds progress_report_interval{std::chrono::seconds(1)};
 };
 ```
 
@@ -141,6 +143,31 @@ enum class TerminalExecutionAction : std::uint8_t { Continue, Stop };
 `ExplorationGraphT<ValueT>`. Returning `Stop` requests early termination; void
 callbacks are treated as `Continue`.
 
+Progress reporting is optional. If `on_progress` is set, DPOR may call it with:
+
+```cpp
+enum class ProgressState : std::uint8_t { Running, Stopped, AllExplored };
+
+struct ProgressSnapshot {
+  ProgressState state{ProgressState::Running};
+  std::chrono::steady_clock::duration elapsed{};
+  std::size_t terminal_executions{0};
+  std::size_t full_executions{0};
+  std::size_t error_executions{0};
+  std::size_t depth_limit_executions{0};
+  std::size_t active_workers{0};
+  std::size_t max_workers{1};
+  std::size_t queued_tasks{0};
+  std::size_t max_queued_tasks{0};
+  bool counts_exact{true};
+};
+```
+
+`progress_report_interval > 0` throttles live snapshots to at most one callback
+per interval. `progress_report_interval == 0` reports at every internal
+progress checkpoint. DPOR always emits one final snapshot with state
+`AllExplored` or `Stopped` when exploration returns normally.
+
 Public entry points:
 
 - `VerifyResult verify(const DporConfigT<ValueT>& config)`
@@ -156,6 +183,7 @@ struct ParallelVerifyOptions {
   std::size_t spawn_depth_cutoff{0};
   std::size_t min_fanout{2};
   std::size_t sync_steps{0};
+  std::size_t progress_counter_flush_interval{1024};
 };
 ```
 
@@ -175,6 +203,11 @@ If `on_terminal_execution` is set, DPOR calls it with each published terminal
 execution. Terminal executions are full executions, error executions, and
 branches truncated by `max_depth`. DPOR keeps exploring after error terminals
 unless the callback requests `Stop`.
+
+If `on_progress` is set, sequential exploration reports exact live counts.
+Parallel exploration reports exact final counts, and live snapshots may carry
+slightly stale terminal counts when `progress_counter_flush_interval > 1`; in
+that case `counts_exact` is `false`.
 
 ## Execution graphs
 

@@ -29,6 +29,7 @@ struct ParallelVerifyOptions {
   std::size_t spawn_depth_cutoff{0};
   std::size_t min_fanout{2};
   std::size_t sync_steps{0};
+  std::size_t progress_counter_flush_interval{1024};
 };
 ```
 
@@ -41,7 +42,10 @@ Current option semantics:
 - `min_fanout` gates whether a branch is even considered for remote execution.
 - `sync_steps == 0` enables the strict result-publication path.
 - `sync_steps > 0` reduces synchronization overhead but weakens early-stop
-  semantics after an error.
+  semantics after a callback requests stop.
+- `progress_counter_flush_interval == 0` resolves to a small default.
+- `progress_counter_flush_interval > 1` batches worker-local terminal counts
+  before flushing them into shared progress counters.
 
 ## High-Level Shape
 
@@ -193,6 +197,8 @@ Current behavior differs by `sync_steps`.
   `publish_error_execution()` serialize
   through `publication_mutex_`.
 - Terminal-count updates are serialized against stop checks.
+- Live progress snapshots can still lag worker-local terminal counts if
+  `progress_counter_flush_interval > 1`.
 - `on_terminal_execution` callbacks are still invoked outside
   `publication_mutex_`, so another worker may still publish a terminal that
   already passed the stop check before a callback's `Stop` request is
@@ -203,8 +209,8 @@ This is the default.
 ### Relaxed Mode: `sync_steps > 0`
 
 - workers cache stop-flag reads for `sync_steps` polling calls
-- terminal-execution counts are accumulated in thread-local state and flushed
-  later
+- worker-local terminal counts are flushed into shared progress counters only
+  when the configured batching threshold is reached
 - additional terminal executions may still be counted after the first callback
   requests stop
 
@@ -224,6 +230,14 @@ What is preserved:
 code must therefore be thread-safe in addition to being deterministic.
 As in sequential mode, published terminal executions include full executions,
 error executions, and branches cut off by `max_depth`.
+
+`on_progress` may also be invoked from worker threads. Its snapshots report:
+
+- elapsed time since exploration start
+- total/full/error/depth-limit terminal counts
+- current `active_workers` and queued-task count
+- configured worker and queue capacities
+- whether the live counts are exact
 
 ## Worker / Callback Assumptions
 

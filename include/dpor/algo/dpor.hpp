@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -40,6 +41,7 @@ enum class VerifyResultKind : std::uint8_t {
   Stopped,
   AllExecutionsExplored = AllExplored,
 };
+enum class ProgressState : std::uint8_t { Running, Stopped, AllExplored };
 enum class TerminalExecutionKind : std::uint8_t { Full, Error, DepthLimit };
 enum class TerminalExecutionAction : std::uint8_t { Continue, Stop };
 
@@ -58,6 +60,22 @@ struct VerifyResult {
     return executions_explored;
   }
 };
+
+struct ProgressSnapshot {
+  ProgressState state{ProgressState::Running};
+  std::chrono::steady_clock::duration elapsed{};
+  std::size_t terminal_executions{0};
+  std::size_t full_executions{0};
+  std::size_t error_executions{0};
+  std::size_t depth_limit_executions{0};
+  std::size_t active_workers{0};
+  std::size_t max_workers{1};
+  std::size_t queued_tasks{0};
+  std::size_t max_queued_tasks{0};
+  bool counts_exact{true};
+};
+
+using ProgressObserver = std::function<void(const ProgressSnapshot&)>;
 
 template <typename ValueT>
 struct TerminalExecutionT {
@@ -159,6 +177,8 @@ struct DporConfigT {
   std::size_t max_depth{1000};
   model::CommunicationModel communication_model{model::CommunicationModel::Async};
   TerminalExecutionObserverT<ValueT> on_terminal_execution{};
+  ProgressObserver on_progress{};
+  std::chrono::milliseconds progress_report_interval{std::chrono::seconds(1)};
   // Compatibility alias; prefer on_terminal_execution.
   TerminalExecutionObserverT<ValueT> on_execution{};
 };
@@ -172,14 +192,18 @@ struct ParallelVerifyOptions {
   std::size_t spawn_depth_cutoff{0};
   std::size_t min_fanout{2};
   // When non-zero, workers read the shared stop flag only every sync_steps
-  // stop_requested() calls and batch terminal-execution counts in thread-local
-  // accumulators. This reduces contention at the cost of weaker stop
-  // semantics: workers may publish additional terminal executions after a
-  // callback has requested stop. When zero (the default), stop checks are
-  // stricter, but callbacks still run outside publication_mutex_, so a terminal
-  // that already passed the stop check may still be published before the stop
-  // request is committed.
+  // stop_requested() calls. This reduces stop-check contention at the cost of
+  // weaker stop semantics: workers may publish additional terminal executions
+  // after a callback has requested stop. When zero (the default), stop checks
+  // are stricter, but callbacks still run outside publication_mutex_, so a
+  // terminal that already passed the stop check may still be published before
+  // the stop request is committed.
   std::size_t sync_steps{0};
+  // Flush thread-local terminal counters into shared progress counters after
+  // this many local terminal publications. Smaller values improve live progress
+  // accuracy; larger values reduce atomic-update overhead. A zero value uses a
+  // small default.
+  std::size_t progress_counter_flush_interval{1024};
 };
 
 using DporConfig = DporConfigT<model::Value>;
@@ -208,6 +232,18 @@ template <typename ValueT>
     });
   }
   return TerminalExecutionAction::Continue;
+}
+
+[[nodiscard]] inline ProgressState progress_state_from_result_kind(
+    const VerifyResultKind kind) noexcept {
+  return kind == VerifyResultKind::Stopped ? ProgressState::Stopped : ProgressState::AllExplored;
+}
+
+template <typename ValueT>
+inline void notify_progress(const DporConfigT<ValueT>& config, const ProgressSnapshot& snapshot) {
+  if (config.on_progress) {
+    config.on_progress(snapshot);
+  }
 }
 
 template <typename ValueT>
@@ -788,11 +824,35 @@ inline void visit_if_consistent_impl(const ProgramT<ValueT>& program,
 template <typename ValueT>
 class SequentialExecutor {
  public:
-  SequentialExecutor(VerifyResult& result, const DporConfigT<ValueT>& config)
-      : result_(result), config_(config) {}
+  using Clock = std::chrono::steady_clock;
+
+  SequentialExecutor(VerifyResult& result, const DporConfigT<ValueT>& config,
+                     Clock::time_point start_time = Clock::now())
+      : result_(result),
+        config_(config),
+        start_time_(start_time),
+        next_progress_report_at_(start_time_) {
+    if (config_.progress_report_interval > std::chrono::milliseconds::zero()) {
+      next_progress_report_at_ = start_time_ + config_.progress_report_interval;
+    }
+  }
 
   [[nodiscard]] bool stop_requested() const noexcept {
     return result_.kind == VerifyResultKind::Stopped;
+  }
+
+  void maybe_report_progress() {
+    if (!config_.on_progress) {
+      return;
+    }
+    const auto now = Clock::now();
+    if (config_.progress_report_interval > std::chrono::milliseconds::zero()) {
+      if (now < next_progress_report_at_) {
+        return;
+      }
+      next_progress_report_at_ = now + config_.progress_report_interval;
+    }
+    notify_progress(config_, make_progress_snapshot(ProgressState::Running, now));
   }
 
   [[nodiscard]] bool publish_depth_limit_execution(const model::ExplorationGraphT<ValueT>& graph) {
@@ -833,16 +893,41 @@ class SequentialExecutor {
     return true;
   }
 
+  void publish_final_progress() {
+    if (!config_.on_progress) {
+      return;
+    }
+    notify_progress(config_, make_progress_snapshot(progress_state_from_result_kind(result_.kind),
+                                                   Clock::now()));
+  }
+
  private:
+  [[nodiscard]] ProgressSnapshot make_progress_snapshot(const ProgressState state,
+                                                        const Clock::time_point now) const {
+    ProgressSnapshot snapshot;
+    snapshot.state = state;
+    snapshot.elapsed = now - start_time_;
+    snapshot.terminal_executions = result_.executions_explored;
+    snapshot.full_executions = result_.full_executions_explored;
+    snapshot.error_executions = result_.error_executions_explored;
+    snapshot.depth_limit_executions = result_.depth_limit_executions_explored;
+    snapshot.active_workers = state == ProgressState::Running ? 1 : 0;
+    return snapshot;
+  }
+
   void request_stop() noexcept { result_.kind = VerifyResultKind::Stopped; }
 
   VerifyResult& result_;
   const DporConfigT<ValueT>& config_;
+  Clock::time_point start_time_;
+  Clock::time_point next_progress_report_at_;
 };
 
 template <typename ValueT>
 class ParallelExecutor {
  public:
+  using Clock = std::chrono::steady_clock;
+
   ParallelExecutor(const DporConfigT<ValueT>& config, ParallelVerifyOptions options,
                    std::vector<model::ThreadId> thread_ids)
       : config_(config),
@@ -851,7 +936,15 @@ class ParallelExecutor {
         max_workers_(resolve_max_workers(options.max_workers)),
         max_queued_tasks_(resolve_max_queued_tasks(options.max_queued_tasks, max_workers_)),
         min_fanout_(std::max<std::size_t>(1, options.min_fanout)),
-        sync_steps_(options.sync_steps) {}
+        sync_steps_(options.sync_steps),
+        progress_counter_flush_interval_(
+            resolve_progress_counter_flush_interval(options.progress_counter_flush_interval)),
+        start_time_(Clock::now()),
+        next_progress_report_at_(start_time_) {
+    if (config_.progress_report_interval > std::chrono::milliseconds::zero()) {
+      next_progress_report_at_ = start_time_ + config_.progress_report_interval;
+    }
+  }
 
   [[nodiscard]] VerifyResult run() {
     {
@@ -891,6 +984,7 @@ class ParallelExecutor {
     if (stop_requested_.load(std::memory_order_relaxed)) {
       result.kind = VerifyResultKind::Stopped;
     }
+    publish_final_progress(result.kind);
     return result;
   }
 
@@ -906,6 +1000,26 @@ class ParallelExecutor {
     return state.cached_stop;
   }
 
+  void maybe_report_progress() {
+    if (!config_.on_progress) {
+      return;
+    }
+    const auto now = Clock::now();
+    if (config_.progress_report_interval > std::chrono::milliseconds::zero()) {
+      {
+        std::lock_guard lock(progress_schedule_mutex_);
+        if (now < next_progress_report_at_) {
+          return;
+        }
+        next_progress_report_at_ = now + config_.progress_report_interval;
+      }
+      publish_progress_snapshot(ProgressState::Running, now, live_counts_exact());
+      return;
+    }
+
+    publish_progress_snapshot(ProgressState::Running, now, live_counts_exact());
+  }
+
   [[nodiscard]] bool publish_depth_limit_execution(
       const model::ExplorationGraphT<ValueT>& graph) {
     if (sync_steps_ == 0) {
@@ -913,12 +1027,12 @@ class ParallelExecutor {
       if (stop_requested_.load(std::memory_order_acquire)) {
         return false;
       }
-      ++worker_state().local_depth_limit_executions;
+      increment_local_terminal_counts(TerminalExecutionKind::DepthLimit);
     } else {
       if (stop_requested()) {
         return false;
       }
-      ++worker_state().local_depth_limit_executions;
+      increment_local_terminal_counts(TerminalExecutionKind::DepthLimit);
     }
 
     if (notify_terminal_execution(config_, graph, TerminalExecutionKind::DepthLimit) ==
@@ -969,12 +1083,12 @@ class ParallelExecutor {
       if (stop_requested_.load(std::memory_order_acquire)) {
         return false;
       }
-      ++worker_state().local_full_executions;
+      increment_local_terminal_counts(TerminalExecutionKind::Full);
     } else {
       if (stop_requested()) {
         return false;
       }
-      ++worker_state().local_full_executions;
+      increment_local_terminal_counts(TerminalExecutionKind::Full);
     }
 
     if (notify_terminal_execution(config_, graph, TerminalExecutionKind::Full) ==
@@ -992,12 +1106,12 @@ class ParallelExecutor {
       if (stop_requested_.load(std::memory_order_acquire)) {
         return false;
       }
-      ++worker_state().local_error_executions;
+      increment_local_terminal_counts(TerminalExecutionKind::Error);
     } else {
       if (stop_requested()) {
         return false;
       }
-      ++worker_state().local_error_executions;
+      increment_local_terminal_counts(TerminalExecutionKind::Error);
     }
 
     if (notify_terminal_execution(config_, graph, TerminalExecutionKind::Error) ==
@@ -1022,6 +1136,11 @@ class ParallelExecutor {
       return requested;
     }
     return std::max<std::size_t>(1, max_workers * 2U);
+  }
+
+  [[nodiscard]] static std::size_t resolve_progress_counter_flush_interval(
+      const std::size_t requested) {
+    return requested == 0 ? 1024U : requested;
   }
 
   void worker_loop() {
@@ -1080,6 +1199,7 @@ class ParallelExecutor {
     std::size_t local_full_executions{0};
     std::size_t local_error_executions{0};
     std::size_t local_depth_limit_executions{0};
+    std::size_t pending_terminal_executions{0};
     std::size_t steps_since_sync{0};
     bool cached_stop{false};
   };
@@ -1089,8 +1209,35 @@ class ParallelExecutor {
     return state;
   }
 
-  void flush_worker_state() {
+  void increment_local_terminal_counts(const TerminalExecutionKind kind) {
     auto& state = worker_state();
+    switch (kind) {
+      case TerminalExecutionKind::Full:
+        ++state.local_full_executions;
+        break;
+      case TerminalExecutionKind::Error:
+        ++state.local_error_executions;
+        break;
+      case TerminalExecutionKind::DepthLimit:
+        ++state.local_depth_limit_executions;
+        break;
+    }
+    ++state.pending_terminal_executions;
+    if (config_.on_progress && state.pending_terminal_executions >= progress_counter_flush_interval_) {
+      flush_local_counts(state);
+    }
+  }
+
+  void flush_worker_state() {
+    flush_local_counts();
+    auto& state = worker_state();
+    state.steps_since_sync = 0;
+    state.cached_stop = false;
+  }
+
+  void flush_local_counts() { flush_local_counts(worker_state()); }
+
+  void flush_local_counts(WorkerState& state) {
     if (state.local_full_executions > 0) {
       full_executions_explored_.fetch_add(state.local_full_executions, std::memory_order_relaxed);
     }
@@ -1102,7 +1249,51 @@ class ParallelExecutor {
       depth_limit_executions_explored_.fetch_add(state.local_depth_limit_executions,
                                                  std::memory_order_relaxed);
     }
-    state = WorkerState{};
+    state.local_full_executions = 0;
+    state.local_error_executions = 0;
+    state.local_depth_limit_executions = 0;
+    state.pending_terminal_executions = 0;
+  }
+
+  [[nodiscard]] bool live_counts_exact() const noexcept {
+    return progress_counter_flush_interval_ <= 1;
+  }
+
+  void publish_progress_snapshot(const ProgressState state, const Clock::time_point now,
+                                 const bool counts_exact) {
+    std::lock_guard lock(progress_callback_mutex_);
+    flush_local_counts();
+    notify_progress(config_, make_progress_snapshot(state, now, counts_exact));
+  }
+
+  void publish_final_progress(const VerifyResultKind result_kind) {
+    if (!config_.on_progress) {
+      return;
+    }
+    publish_progress_snapshot(progress_state_from_result_kind(result_kind), Clock::now(), true);
+  }
+
+  [[nodiscard]] ProgressSnapshot make_progress_snapshot(const ProgressState state,
+                                                        const Clock::time_point now,
+                                                        const bool counts_exact) const {
+    ProgressSnapshot snapshot;
+    snapshot.state = state;
+    snapshot.elapsed = now - start_time_;
+    snapshot.full_executions = full_executions_explored_.load(std::memory_order_relaxed);
+    snapshot.error_executions = error_executions_explored_.load(std::memory_order_relaxed);
+    snapshot.depth_limit_executions =
+        depth_limit_executions_explored_.load(std::memory_order_relaxed);
+    snapshot.terminal_executions = snapshot.full_executions + snapshot.error_executions +
+                                   snapshot.depth_limit_executions;
+    snapshot.max_workers = max_workers_;
+    snapshot.max_queued_tasks = max_queued_tasks_;
+    snapshot.counts_exact = counts_exact;
+    {
+      std::lock_guard lock(queue_mutex_);
+      snapshot.active_workers = active_workers_;
+      snapshot.queued_tasks = task_queue_.size();
+    }
+    return snapshot;
   }
 
   void request_stop() noexcept {
@@ -1129,6 +1320,9 @@ class ParallelExecutor {
   std::size_t max_queued_tasks_{1};
   std::size_t min_fanout_{1};
   std::size_t sync_steps_{0};
+  std::size_t progress_counter_flush_interval_{1024};
+  Clock::time_point start_time_;
+  Clock::time_point next_progress_report_at_;
 
   std::atomic<bool> stop_requested_{false};
   std::atomic<std::size_t> full_executions_explored_{0};
@@ -1142,6 +1336,8 @@ class ParallelExecutor {
   bool search_complete_{false};
 
   mutable std::mutex publication_mutex_;
+  mutable std::mutex progress_schedule_mutex_;
+  mutable std::mutex progress_callback_mutex_;
   std::exception_ptr first_exception_;
 };
 
@@ -1364,6 +1560,7 @@ inline void visit_if_consistent_impl(const ProgramT<ValueT>& program,
                                      model::ExplorationGraphT<ValueT>& graph, ExecutorT& executor,
                                      const DporConfigT<ValueT>& config, const std::size_t depth,
                                      const std::vector<model::ThreadId>& thread_ids) {
+  executor.maybe_report_progress();
   if (executor.stop_requested()) {
     return;
   }
@@ -1382,6 +1579,7 @@ inline void visit_impl(const ProgramT<ValueT>& program, model::ExplorationGraphT
                        const std::size_t depth, const std::vector<model::ThreadId>& thread_ids) {
   using ScopedRollback = typename model::ExplorationGraphT<ValueT>::ScopedRollback;
 
+  executor.maybe_report_progress();
   if (executor.stop_requested()) {
     return;
   }
@@ -1541,7 +1739,9 @@ template <typename ValueT>
   VerifyResult result;
   model::ExplorationGraphT<ValueT> empty_graph;
   const auto thread_ids = detail::sorted_thread_ids(config.program);
-  detail::visit(config.program, empty_graph, result, config, 0, thread_ids);
+  detail::SequentialExecutor<ValueT> executor(result, config);
+  detail::visit_impl(config.program, empty_graph, executor, config, 0, thread_ids);
+  executor.publish_final_progress();
   return result;
 }
 
