@@ -44,15 +44,11 @@ that DPOR explores against.
   optimization: DPOR relies on these cached reachability queries in its hot
   path, while graph mutations invalidate the cache and copies can reuse it
   until they diverge.
-
-### Relations
-
-- The relation layer is intentionally generic. It exposes a compile-time
-  **`Relation`** concept plus concrete helpers such as
-  **`ProgramOrderRelation`**, **`ExplicitRelation`**, `compose(...)`, and
-  `transitive_closure(...)`.
-- In practice, the DPOR engine works primarily with program order (`po`),
-  reads-from (`rf`), and cached reachability over `(po ∪ rf)+`.
+- The model layer also includes lightweight relation helpers. The most
+  important production-facing pieces are **`ProgramOrderRelation`** and
+  **`ExplicitRelation`**, which provide views over `po` and `rf`. The generic
+  relation algebra (`Relation`, `compose(...)`, `transitive_closure(...)`,
+  etc.) is supporting infrastructure rather than a primary architectural axis.
 
 ### Consistency
 
