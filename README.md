@@ -34,6 +34,69 @@ high-level design.
   `ConsistencyCheckerT`.
 - The user-facing API is summarized in `docs/api.md`.
 
+## DPOR exploration parameters
+
+Both exploration entry points use the same base configuration:
+
+```cpp
+VerifyResult verify(const DporConfigT<ValueT>& config);
+VerifyResult verify_parallel(const DporConfigT<ValueT>& config,
+                             ParallelVerifyOptions options = {});
+```
+
+Shared `DporConfigT<ValueT>` parameters:
+
+- `program`: the modeled program. This is required.
+- `max_depth{1000}`: maximum explored execution depth. When DPOR reaches
+  `depth >= max_depth`, it publishes a `DepthLimit` terminal execution and
+  does not explore that branch further.
+- `communication_model{Async}`: communication semantics for consistency
+  checking and revisit generation. Supported values are `Async` and `FifoP2P`.
+- `on_terminal_execution{}`: optional callback invoked for each published
+  terminal execution (`Full`, `Error`, or `DepthLimit`). The callback may
+  return `TerminalExecutionAction::Continue` or `Stop`; `void` callbacks are
+  treated as `Continue`.
+- `on_progress{}`: optional progress callback that receives
+  `ProgressSnapshot`s. If this callback is not set, DPOR does not do
+  progress-related time checks or progress scheduling.
+- `progress_report_interval{1s}`: throttles live `on_progress` callbacks.
+  `> 0` means at most one live snapshot per interval. `0` means report at
+  every internal progress checkpoint, which can be expensive in parallel mode.
+
+Parallel exploration adds `ParallelVerifyOptions`:
+
+- `max_workers{0}`: worker-thread budget. `0` means use
+  `std::thread::hardware_concurrency()`, falling back to `1` if the platform
+  does not report a value.
+- `max_queued_tasks{0}`: maximum number of queued spawned tasks. `0` derives a
+  small default queue budget of `max_workers * 2`.
+- `spawn_depth_cutoff{0}`: depth gate for task spawning. `0` means no cutoff.
+  Otherwise, a branch is only considered for remote execution when
+  `child_depth <= spawn_depth_cutoff`.
+- `min_fanout{2}`: spawn threshold for branch fanout. If the current choice
+  point has fewer than `min_fanout` alternatives, DPOR keeps the work local.
+- `sync_steps{512}`: stop-polling interval. `0` enables the strict mode, where
+  terminal publication serializes stop checks more aggressively. `> 0` is a
+  relaxed mode where each worker refreshes the shared stop flag only every
+  `sync_steps` internal stop polls. This reduces synchronization overhead, but
+  workers may publish additional terminal executions after a callback has
+  requested `Stop`.
+- `progress_counter_flush_interval{1024}`: progress-counter batching threshold.
+  Workers keep terminal counters locally and flush them into shared progress
+  counters after this many local terminal publications. `0` uses the default
+  (`1024`), `1` gives exact live progress counts, and larger values reduce
+  overhead at the cost of staler live progress snapshots.
+
+Result reporting:
+
+- `VerifyResult.kind` is `AllExplored` or `Stopped`.
+- `VerifyResult` also reports aggregate terminal counts via
+  `executions_explored`, `full_executions_explored`,
+  `error_executions_explored`, and `depth_limit_executions_explored`.
+- Parallel callback order is unspecified across workers. Final `VerifyResult`
+  counts are exact; live `ProgressSnapshot` counts may lag local worker state
+  when `progress_counter_flush_interval > 1`.
+
 ## Build
 
 ```bash

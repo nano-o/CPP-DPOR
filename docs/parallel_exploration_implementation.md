@@ -28,7 +28,7 @@ struct ParallelVerifyOptions {
   std::size_t max_queued_tasks{0};
   std::size_t spawn_depth_cutoff{0};
   std::size_t min_fanout{2};
-  std::size_t sync_steps{0};
+  std::size_t sync_steps{512};
   std::size_t progress_counter_flush_interval{1024};
 };
 ```
@@ -43,6 +43,7 @@ Current option semantics:
 - `sync_steps == 0` enables the strict result-publication path.
 - `sync_steps > 0` reduces synchronization overhead but weakens early-stop
   semantics after a callback requests stop.
+- the default is `sync_steps == 512`
 - `progress_counter_flush_interval == 0` resolves to a small default.
 - `progress_counter_flush_interval > 1` batches worker-local terminal counts
   before flushing them into shared progress counters.
@@ -204,7 +205,7 @@ Current behavior differs by `sync_steps`.
   already passed the stop check before a callback's `Stop` request is
   committed.
 
-This is the default.
+This mode is available explicitly, but it is no longer the default.
 
 ### Relaxed Mode: `sync_steps > 0`
 

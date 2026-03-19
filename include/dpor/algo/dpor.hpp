@@ -191,14 +191,15 @@ struct ParallelVerifyOptions {
   std::size_t max_queued_tasks{0};
   std::size_t spawn_depth_cutoff{0};
   std::size_t min_fanout{2};
-  // When non-zero, workers read the shared stop flag only every sync_steps
-  // stop_requested() calls. This reduces stop-check contention at the cost of
-  // weaker stop semantics: workers may publish additional terminal executions
-  // after a callback has requested stop. When zero (the default), stop checks
-  // are stricter, but callbacks still run outside publication_mutex_, so a
-  // terminal that already passed the stop check may still be published before
-  // the stop request is committed.
-  std::size_t sync_steps{0};
+  // Workers read the shared stop flag only every sync_steps stop_requested()
+  // calls. This reduces stop-check contention at the cost of weaker stop
+  // semantics: workers may publish additional terminal executions after a
+  // callback has requested stop. A zero value enables the strictest stop
+  // checks, but the default uses a moderate batching value to reduce
+  // synchronization overhead. Callbacks still run outside publication_mutex_,
+  // so a terminal that already passed the stop check may still be published
+  // before the stop request is committed.
+  std::size_t sync_steps{512};
   // Flush thread-local terminal counters into shared progress counters after
   // this many local terminal publications. Smaller values improve live progress
   // accuracy; larger values reduce atomic-update overhead. A zero value uses a

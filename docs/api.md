@@ -182,7 +182,7 @@ struct ParallelVerifyOptions {
   std::size_t max_queued_tasks{0};
   std::size_t spawn_depth_cutoff{0};
   std::size_t min_fanout{2};
-  std::size_t sync_steps{0};
+  std::size_t sync_steps{512};
   std::size_t progress_counter_flush_interval{1024};
 };
 ```
