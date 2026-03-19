@@ -77,19 +77,33 @@ TEST_CASE("benchmark CLI accepts --fifo", "[benchmarks][cli]") {
   REQUIRE(options.communication_model == CommunicationModel::FifoP2P);
 }
 
+TEST_CASE("benchmark CLI accepts --progress-interval-ms", "[benchmarks][cli]") {
+  const auto options = parse_options({"--progress-interval-ms", "250"});
+
+  REQUIRE(options.progress_report_interval == std::chrono::milliseconds(250));
+}
+
+TEST_CASE("benchmark CLI accepts --progress-counter-flush-interval", "[benchmarks][cli]") {
+  const auto options = parse_options({"--progress-counter-flush-interval", "4096"});
+
+  REQUIRE(options.parallel);
+  REQUIRE(options.parallel_options.progress_counter_flush_interval == 4096);
+}
+
 TEST_CASE("benchmark helper forwards communication model to DPOR and oracle",
           "[benchmarks][cli]") {
   Options async_options;
   async_options.participants = 2;
   async_options.inject_crash = false;
+  async_options.progress_report_interval = std::chrono::milliseconds::zero();
 
   Options fifo_options = async_options;
   fifo_options.communication_model = CommunicationModel::FifoP2P;
 
   const auto make_program = [](std::size_t, bool) { return make_fifo_sensitive_program(); };
 
-  const auto async_dpor = dpor::benchmarks::detail::run_dpor(async_options, make_program);
-  const auto fifo_dpor = dpor::benchmarks::detail::run_dpor(fifo_options, make_program);
+  const auto async_dpor = dpor::benchmarks::detail::run_dpor(async_options, make_program, 1);
+  const auto fifo_dpor = dpor::benchmarks::detail::run_dpor(fifo_options, make_program, 1);
   const auto async_oracle = dpor::benchmarks::detail::run_oracle(
       async_options.participants, async_options.inject_crash, async_options.communication_model,
       make_program);

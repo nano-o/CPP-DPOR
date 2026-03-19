@@ -31,6 +31,7 @@ struct Options {
   std::size_t iterations{1};
   bool inject_crash{true};
   bool parallel{false};
+  std::chrono::milliseconds progress_report_interval{std::chrono::seconds(1)};
   algo::ParallelVerifyOptions parallel_options{};
 };
 
@@ -77,7 +78,9 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
      << " [--mode dpor|oracle|both] [--participants N] [--iterations N]"
         " [--no-crash] [--fifo] [--parallel]"
         " [--max-workers N] [--max-queued-tasks N]"
-        " [--spawn-depth-cutoff N] [--min-fanout N]\n";
+        " [--spawn-depth-cutoff N] [--min-fanout N]"
+        " [--progress-counter-flush-interval N]"
+        " [--progress-interval-ms N]\n";
   os << benchmark_label << '\n';
   std::exit(exit_code);
 }
@@ -175,6 +178,16 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
       options.parallel_options.min_fanout = parse_nonnegative_int(value, arg);
       continue;
     }
+    if (arg == "--progress-interval-ms") {
+      options.progress_report_interval =
+          std::chrono::milliseconds(parse_nonnegative_int(value, arg));
+      continue;
+    }
+    if (arg == "--progress-counter-flush-interval") {
+      options.parallel = true;
+      options.parallel_options.progress_counter_flush_interval = parse_nonnegative_int(value, arg);
+      continue;
+    }
 
     throw std::invalid_argument("unknown argument: " + std::string(arg));
   }
@@ -204,6 +217,26 @@ inline void print_execution_counts(const Measurement& measurement) {
             << " full_executions=" << measurement.full_executions
             << " error_executions=" << measurement.error_executions
             << " depth_limit_executions=" << measurement.depth_limit_executions;
+}
+
+inline void print_progress_snapshot(const std::size_t run_index,
+                                    const algo::ProgressSnapshot& snapshot) {
+  if (snapshot.state != algo::ProgressState::Running) {
+    return;
+  }
+
+  const auto elapsed_ms =
+      std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(snapshot.elapsed);
+  std::cout << "  progress run " << run_index << ":" << " elapsed_ms=" << std::fixed
+            << std::setprecision(3) << elapsed_ms.count()
+            << " terminal_executions=" << snapshot.terminal_executions
+            << " full_executions=" << snapshot.full_executions
+            << " error_executions=" << snapshot.error_executions
+            << " depth_limit_executions=" << snapshot.depth_limit_executions
+            << " active_workers=" << snapshot.active_workers << "/" << snapshot.max_workers
+            << " queued_tasks=" << snapshot.queued_tasks << "/" << snapshot.max_queued_tasks
+            << " counts_exact=" << std::boolalpha << snapshot.counts_exact << '\n'
+            << std::flush;
 }
 
 inline void print_measurements(std::string_view label, const std::vector<Measurement>& measurements,
@@ -243,12 +276,19 @@ inline void print_measurements(std::string_view label, const std::vector<Measure
 
 template <typename ProgramFactory>
 [[nodiscard]] inline BenchmarkRunResult run_dpor(const Options& options,
-                                                 const ProgramFactory& make_program) {
+                                                 const ProgramFactory& make_program,
+                                                 const std::size_t run_index) {
   auto program = make_program(options.participants, options.inject_crash);
   using ValueT = typename ProgramValueType<std::decay_t<decltype(program)>>::type;
   algo::DporConfigT<ValueT> config;
   config.program = std::move(program);
   config.communication_model = options.communication_model;
+  config.progress_report_interval = options.progress_report_interval;
+  if (options.progress_report_interval > std::chrono::milliseconds::zero()) {
+    config.on_progress = [run_index](const algo::ProgressSnapshot& snapshot) {
+      print_progress_snapshot(run_index, snapshot);
+    };
+  }
   const auto result = options.parallel ? algo::verify_parallel(config, options.parallel_options)
                                        : algo::verify(config);
   if (result.kind != algo::VerifyResultKind::AllExplored) {
@@ -290,7 +330,7 @@ template <typename ProgramFactory>
           return run_oracle(options.participants, options.inject_crash, options.communication_model,
                             make_program);
         })
-                   : measure_once([&] { return run_dpor(options, make_program); }));
+                   : measure_once([&] { return run_dpor(options, make_program, i + 1); }));
     if (measurements.back().terminal_executions != measurements.front().terminal_executions) {
       throw std::runtime_error("terminal execution count changed across iterations");
     }
@@ -329,7 +369,12 @@ inline int run_two_phase_commit_benchmark(int argc, char** argv, std::string_vie
       std::cout << " parallel=true" << " max_workers=" << options.parallel_options.max_workers
                 << " max_queued_tasks=" << options.parallel_options.max_queued_tasks
                 << " spawn_depth_cutoff=" << options.parallel_options.spawn_depth_cutoff
-                << " min_fanout=" << options.parallel_options.min_fanout;
+                << " min_fanout=" << options.parallel_options.min_fanout
+                << " progress_counter_flush_interval="
+                << options.parallel_options.progress_counter_flush_interval;
+    }
+    if (options.mode != detail::Options::Mode::Oracle) {
+      std::cout << " progress_interval_ms=" << options.progress_report_interval.count();
     }
 #ifdef NDEBUG
     std::cout << " optimized_build=true\n";

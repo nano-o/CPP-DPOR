@@ -150,8 +150,9 @@ build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_ti
 Each benchmark prints per-run timings and a summary. Example shape:
 
 ```text
-Plain 2PC benchmark participants=2 communication_model=async inject_crash=true iterations=1 optimized_build=true
+Plain 2PC benchmark participants=2 communication_model=async inject_crash=true iterations=1 progress_interval_ms=1000 optimized_build=true
 DPOR
+  progress run 1: elapsed_ms=1000.000 terminal_executions=12 full_executions=12 error_executions=0 depth_limit_executions=0 active_workers=1/1 queued_tasks=0/0 counts_exact=true
   run 1: terminal_executions=24 full_executions=24 error_executions=0 depth_limit_executions=0 elapsed_ms=...
   summary: min_ms=... avg_ms=... max_ms=... terminal_executions=24 full_executions=24 error_executions=0 depth_limit_executions=0
 Oracle
@@ -161,3 +162,9 @@ Oracle
 
 Use `--iterations N` to get repeated timings in a single process.
 Parallel runs print the selected `ParallelVerifyOptions` on the header line.
+Use `--progress-interval-ms N` to control DPOR progress output cadence. `0`
+disables benchmark progress lines.
+Use `--progress-counter-flush-interval N` to control how many terminal
+executions each worker accumulates before flushing live progress counts into the
+shared snapshot. `1` gives exact live counts; larger values reduce atomic
+overhead but make progress counts more stale.
