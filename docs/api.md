@@ -154,6 +154,10 @@ and also carries:
 
 If `on_execution` is set, DPOR calls it with each published
 `ExplorationGraphT<ValueT>`.
+Published executions are complete/quiescent executions and error terminals.
+Branches truncated by `max_depth` are not published and do not trigger
+`on_execution`, so the callback does not receive a per-execution depth-limit
+reason.
 
 ## Execution graphs
 

@@ -221,6 +221,8 @@ What is preserved:
 
 `on_execution` may be invoked concurrently in parallel mode. Callback code must
 therefore be thread-safe in addition to being deterministic.
+As in sequential mode, only published complete executions and error terminals
+invoke `on_execution`; branches cut off by `max_depth` do not.
 
 ## Worker / Callback Assumptions
 

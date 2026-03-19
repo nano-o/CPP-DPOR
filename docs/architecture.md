@@ -106,6 +106,8 @@ exploration engine.
 - Optional execution observers receive published
   `ExplorationGraphT<ValueT>` values for each complete execution and error
   terminal.
+- Depth-limited partial branches are not published, so they do not invoke
+  `on_execution`.
 
 ## 3. Public Entry Points
 

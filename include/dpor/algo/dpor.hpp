@@ -43,6 +43,9 @@ struct VerifyResult {
 };
 
 template <typename ValueT>
+// Observers are called only for published executions: complete/quiescent
+// executions and error terminals. Branches truncated by max_depth are not
+// published and therefore do not trigger this hook.
 using ExecutionObserverT = std::function<void(const model::ExplorationGraphT<ValueT>&)>;
 
 template <typename ValueT>
