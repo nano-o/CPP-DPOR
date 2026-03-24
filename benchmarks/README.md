@@ -25,6 +25,9 @@ The executable supports the following CLI:
 --max-queued-tasks N
 --spawn-depth-cutoff N
 --min-fanout N
+--progress-counter-flush-interval N
+--progress-poll-interval-steps N
+--progress-interval-ms N
 ```
 
 - `--mode dpor` measures only DPOR exploration.
@@ -40,9 +43,14 @@ The executable supports the following CLI:
   `--max-workers` is omitted, worker count falls back to the library's
   hardware-based default.
 - `--max-workers`, `--max-queued-tasks`, `--spawn-depth-cutoff`, and
-  `--min-fanout` pass through to `ParallelVerifyOptions`. Supplying any of
-  these also enables `--parallel`.
-- Parallel flags are ignored in `--mode oracle`.
+  `--min-fanout` pass through to `ParallelVerifyOptions`.
+- `--progress-counter-flush-interval` and `--progress-poll-interval-steps`
+  also pass through to `ParallelVerifyOptions`. Supplying any
+  `ParallelVerifyOptions` flag also enables `--parallel`.
+- `--progress-interval-ms` controls benchmark-installed DPOR progress
+  reporting. `0` disables benchmark progress lines entirely.
+- Parallel-only flags are ignored in `--mode oracle`. `--progress-interval-ms`
+  only affects DPOR runs.
 
 Benchmark output reports `terminal_executions`, `full_executions`,
 `error_executions`, and `depth_limit_executions` for each run. Oracle runs only

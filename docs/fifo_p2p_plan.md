@@ -1,6 +1,8 @@
-# FIFO p2p Plan
+# FIFO p2p Plan (Completed)
 
-This document is the single source of truth for adding FIFO peer-to-peer semantics to the current DPOR prototype.
+This document records the landed FIFO peer-to-peer semantics work for the current DPOR prototype.
+
+The semantic landing is complete in the current tree. The roadmap below is kept as an implementation record, and the only remaining items are optional performance follow-ups rather than correctness blockers.
 
 The semantic target is the Must paper in [docs/Enea et al. - 2024 - Model Checking Distributed Protocols in Must.pdf](/home/dev/project/docs/Enea%20et%20al.%20-%202024%20-%20Model%20Checking%20Distributed%20Protocols%20in%20Must.pdf), especially Definition 3.5 and the Algorithm 1 revisit/tiebreaker discussion.
 
@@ -63,9 +65,25 @@ Rejected for this patch:
 - expressing FIFO as an informal pair of ad-hoc rules instead of the formal Must clauses
 - preserving the current async-only masked tiebreaker shortcut for FIFO before a correct model-aware variant exists
 
-## Roadmap
+## Status
 
-### Step 1: Add a Whole-Program Communication Model
+Implemented in the current tree:
+
+- whole-program `CommunicationModel::{ Async, FifoP2P }` threading through DPOR, oracle, and regression tests
+- model-aware consistency checking with formal FIFO clause (b) and clause (c) helpers
+- model-aware RF rewrite, tiebreaker, and revisit logic for FIFO p2p
+- FIFO oracle parity and focused regression coverage
+
+Remaining optional follow-up work:
+
+- replace FIFO's conservative `restrict_masked` plus full-check tiebreaker path with a cheaper masked model-aware check
+- prefilter forward receive branches that are guaranteed FIFO-inconsistent before `VisitIfConsistent`
+
+## Implemented Roadmap
+
+Steps 1-9 below are all complete in the current tree.
+
+### Step 1: Add a Whole-Program Communication Model (Done)
 
 Add a communication-model enum and thread it through:
 
@@ -80,7 +98,7 @@ For this whole-program design, the checker should receive the model as construct
 
 - `ConsistencyCheckerT<ValueT> checker(config.communication_model)`
 
-### Step 2: Refactor Consistency Into Shared and Model-Specific Layers
+### Step 2: Refactor Consistency Into Shared and Model-Specific Layers (Done)
 
 Refactor [include/dpor/model/consistency.hpp](/home/dev/project/include/dpor/model/consistency.hpp) so that it cleanly separates:
 
@@ -98,7 +116,7 @@ Important constraint:
 
 No separate FIFO-valid cache should be added in the first implementation.
 
-### Step 3: Implement FIFO p2p Consistency From the Formal Definition
+### Step 3: Implement FIFO p2p Consistency From the Formal Definition (Done)
 
 Implement FIFO p2p checks directly from Must Definition 3.5 using explicit graph scans over:
 
@@ -116,7 +134,7 @@ Recommended helper structure:
 
 The implementation should name the helpers after the formal clauses where practical, so the mapping back to the paper is obvious during review.
 
-### Step 4: Make Top-Level DPOR Consistency Checks Model-Aware
+### Step 4: Make Top-Level DPOR Consistency Checks Model-Aware (Done)
 
 Update [include/dpor/algo/dpor.hpp](/home/dev/project/include/dpor/algo/dpor.hpp) so the DPOR hot path uses the model-aware checker instead of hardcoding async semantics.
 
@@ -129,7 +147,7 @@ This includes:
 
 This step is mechanically straightforward compared to the tiebreaker/revisit changes below.
 
-### Step 5: Generalize RF-Rewrite Consistency Checks
+### Step 5: Generalize RF-Rewrite Consistency Checks (Done)
 
 The current async helper reasons only about cycle creation when rewiring a receive's `rf`.
 
@@ -140,7 +158,7 @@ Generalize this into a model-aware helper such as `rf_rewrite_is_consistent(mode
 
 This helper is a dependency for both forward candidate checks and the tiebreaker/revisit logic.
 
-### Step 6: Adapt the Tiebreaker and Revisit Path Conservatively
+### Step 6: Adapt the Tiebreaker and Revisit Path Conservatively (Done)
 
 The hardest part of the FIFO change is the `G|Previous` tiebreaker path used by:
 
@@ -175,7 +193,7 @@ Future optimization target:
 - replace FIFO's conservative `restrict_masked` plus full-check approach with a masked model-aware tiebreaker check that avoids materializing `G|Previous`
 - if that is done, it should come with targeted regression tests for `get_cons_tiebreaker_masked` and `revisit_condition`
 
-### Step 7: Keep Forward Receive Branching Correct Before Optimizing It
+### Step 7: Keep Forward Receive Branching Correct Before Optimizing It (Done)
 
 In forward exploration, the receive brancher currently enumerates all unread compatible sends and relies on `VisitIfConsistent` to prune invalid children.
 
@@ -187,7 +205,7 @@ Possible follow-up optimization:
 
 That should be treated as a performance improvement, not as a correctness requirement.
 
-### Step 8: Update the Oracle to Use the Same Model
+### Step 8: Update the Oracle to Use the Same Model (Done)
 
 Update [tests/support/oracle_core.hpp](/home/dev/project/tests/support/oracle_core.hpp) and [tests/support/oracle.hpp](/home/dev/project/tests/support/oracle.hpp) so exhaustive enumeration runs under the configured communication model.
 
@@ -195,7 +213,7 @@ The oracle should remain the primary semantic cross-check for FIFO DPOR.
 
 As with forward DPOR branching, oracle transition prefiltering is optional in the first implementation. The correctness-critical change is making the oracle checker model-aware.
 
-### Step 9: Add Focused Regression Coverage
+### Step 9: Add Focused Regression Coverage (Done)
 
 Add tests in [tests/consistency_test.cpp](/home/dev/project/tests/consistency_test.cpp) and [tests/dpor_test.cpp](/home/dev/project/tests/dpor_test.cpp) covering:
 
@@ -217,9 +235,9 @@ Add tests in [tests/consistency_test.cpp](/home/dev/project/tests/consistency_te
 3. Reusing the async masked tiebreaker shortcut for FIFO without a formal argument would make revisit behavior hard to trust.
 4. Adding speculative API surface for future mixed-model support would widen the patch without improving current semantics.
 
-## First-Pass Success Criteria
+## First-Pass Success Criteria (Met)
 
-The FIFO p2p patch is complete when all of the following are true:
+The FIFO p2p patch is complete when all of the following are true. These conditions are now satisfied in the current tree:
 
 - model-aware consistency checking exists for `Async` and `FifoP2P`
 - FIFO checks implement the formal Must clauses

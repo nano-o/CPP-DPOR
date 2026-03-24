@@ -126,12 +126,12 @@ benchmarks/ → standalone benchmark targets and perf helpers
 
 The engine in `include/dpor/algo/dpor.hpp` implements **Algorithm 1** from the Must paper:
 
-- `verify()` — sequential DFS entry point, returns `VerifyResult` (AllExecutionsExplored / ErrorFound / DepthLimitReached)
+- `verify()` — sequential DFS entry point, returns `VerifyResult` (`AllExplored` / `Stopped`) plus counts for full, error, and depth-limit terminal executions
 - `verify_parallel()` — experimental parallel exploration with configurable worker threads
 - `visit()` — recursive exploration of consistent executions
 - `backward_revisit()` — identifies alternative interleavings or message matches
-- `DporConfigT` — configuration: program, max_depth, on_execution observer callback
-- `ParallelVerifyOptions` — parallel tuning: `max_workers`, `max_queued_tasks`, `spawn_depth_cutoff`, `min_fanout`, `sync_steps`
+- `DporConfigT` — configuration: program, max_depth, communication_model, terminal-execution observer callback (`on_terminal_execution`; legacy alias `on_execution`), and optional progress reporting
+- `ParallelVerifyOptions` — parallel tuning: `max_workers`, `max_queued_tasks`, `spawn_depth_cutoff`, `min_fanout`, `sync_steps`, `progress_counter_flush_interval`, `progress_poll_interval_steps`
 
 Programs are defined via `ProgramT` / `ThreadFunctionT` in `include/dpor/algo/program.hpp`.
 Thread-function traces use `ObservedValueT` entries rather than raw payloads.
@@ -151,12 +151,12 @@ Thread-function traces use `ObservedValueT` entries rather than raw payloads.
 |---|---|
 | `model_types_test.cpp` | Events, labels, ExecutionGraphT |
 | `relation_test.cpp` | Relation concept, ExplicitRelation, ProgramOrderRelation, compose, transitive_closure |
-| `consistency_test.cpp` | AsyncConsistencyCheckerT, all ConsistencyIssueCodes |
+| `consistency_test.cpp` | Async and FIFO p2p consistency checking, including all ConsistencyIssueCodes |
 | `exploration_graph_test.cpp` | ExplorationGraphT operations (restrict, with_rf, porf_contains, etc.) |
-| `dpor_test.cpp` | DPOR algorithm end-to-end (paper examples, non-blocking receive coverage, oracle cross-checks) |
+| `dpor_test.cpp` | DPOR algorithm end-to-end (paper examples, FIFO regressions, non-blocking receive coverage, oracle cross-checks, parallel coverage) |
 | `dpor_stress_test.cpp` | Randomized stress tests with multiple seeds, including oracle-backed coverage |
-| `tests/support/oracle_core.hpp` | Core exhaustive async oracle implementation shared by DPOR correctness tests |
-| `tests/support/oracle.hpp` | Catch2-facing oracle helpers built on top of `oracle_core.hpp` |
+| `tests/support/oracle_core.hpp` | Core exhaustive model-aware oracle implementation shared by DPOR correctness tests |
+| `tests/support/oracle.hpp` | Catch2-facing model-aware oracle helpers built on top of `oracle_core.hpp` |
 | `examples/two_phase_commit_timeout/two_phase_commit_test.cpp` | 2PC protocol + timer behavior example |
 
 ## Prototype Policy

@@ -859,15 +859,16 @@ build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_ti
 Output looks like:
 
 ```
-2PC timeout benchmark participants=4 inject_crash=false iterations=1 optimized_build=true
+2PC timeout benchmark participants=4 communication_model=async inject_crash=false iterations=1 progress_interval_ms=1000 optimized_build=true
 DPOR
-  run 1: executions=7262928 elapsed_ms=108440.546
-  summary: min_ms=108440.546 avg_ms=108440.546 max_ms=108440.546 executions=7262928
+  progress run 1: elapsed_ms=1000.000 terminal_executions=64021 full_executions=64021 error_executions=0 depth_limit_executions=0 active_workers=1/1 queued_tasks=0/0 counts_exact=true
+  run 1: terminal_executions=7262928 full_executions=7262928 error_executions=0 depth_limit_executions=0 elapsed_ms=108440.546
+  summary: min_ms=108440.546 avg_ms=108440.546 max_ms=108440.546 terminal_executions=7262928 full_executions=7262928 error_executions=0 depth_limit_executions=0
 ```
 
 Key values to record for each phase:
 - `elapsed_ms` (the `summary: min_ms` value when using `--iterations 1`)
-- `executions` (must stay constant across phases — a change means a correctness regression)
+- `terminal_executions`, `full_executions`, `error_executions`, and `depth_limit_executions` (these must stay constant across phases — a change means a correctness regression)
 
 For more stable numbers, use `--iterations 3` and compare `min_ms`.
 
