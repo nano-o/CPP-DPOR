@@ -2659,3 +2659,55 @@ TEST_CASE("verify_parallel matches sequential under tiny queue budget and high f
   REQUIRE(parallel.unique == oracle.signatures);
   REQUIRE(parallel.unique.size() == parallel.observed.size());
 }
+
+TEST_CASE("verify handles a deep linear execution without recursive stack growth",
+          "[algo][dpor][stack]") {
+  constexpr std::size_t kDepth = 12000;
+
+  Program program;
+  program.threads[1] = [](const ThreadTrace&, const std::size_t step) -> std::optional<EventLabel> {
+    if (step < kDepth) {
+      return SendLabel{.destination = 1, .value = "tick"};
+    }
+    return std::nullopt;
+  };
+
+  DporConfig config;
+  config.program = program;
+  config.max_depth = kDepth + 1U;
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExplored);
+  REQUIRE(result.full_executions_explored == 1);
+  REQUIRE(result.error_executions_explored == 0);
+  REQUIRE(result.depth_limit_executions_explored == 0);
+  REQUIRE(result.executions_explored == 1);
+}
+
+TEST_CASE("verify_parallel with one worker handles a deep linear execution without recursive stack growth",
+          "[algo][dpor][parallel][stack]") {
+  constexpr std::size_t kDepth = 12000;
+
+  Program program;
+  program.threads[1] = [](const ThreadTrace&, const std::size_t step) -> std::optional<EventLabel> {
+    if (step < kDepth) {
+      return SendLabel{.destination = 1, .value = "tick"};
+    }
+    return std::nullopt;
+  };
+
+  DporConfig config;
+  config.program = program;
+  config.max_depth = kDepth + 1U;
+
+  ParallelVerifyOptions options;
+  options.max_workers = 1;
+  options.max_queued_tasks = 4;
+
+  const auto result = verify_parallel(config, options);
+  REQUIRE(result.kind == VerifyResultKind::AllExplored);
+  REQUIRE(result.full_executions_explored == 1);
+  REQUIRE(result.error_executions_explored == 0);
+  REQUIRE(result.depth_limit_executions_explored == 0);
+  REQUIRE(result.executions_explored == 1);
+}

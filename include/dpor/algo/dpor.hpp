@@ -1375,27 +1375,6 @@ class ParallelExecutor {
 };
 
 template <typename ValueT, typename ExecutorT>
-inline void recurse_graph(const ProgramT<ValueT>& program, model::ExplorationGraphT<ValueT>& graph,
-                          ExecutorT& executor, const DporConfigT<ValueT>& config,
-                          const std::size_t depth, const std::vector<model::ThreadId>& thread_ids,
-                          const ExplorationTaskMode mode) {
-  if (mode == ExplorationTaskMode::VisitIfConsistent) {
-    visit_if_consistent_impl(program, graph, executor, config, depth, thread_ids);
-    return;
-  }
-  visit_impl(program, graph, executor, config, depth, thread_ids);
-}
-
-template <typename ValueT, typename ExecutorT>
-inline void process_owned_task(const ProgramT<ValueT>& program,
-                               model::ExplorationGraphT<ValueT> graph, ExecutorT& executor,
-                               const DporConfigT<ValueT>& config, const std::size_t depth,
-                               const std::vector<model::ThreadId>& thread_ids,
-                               const ExplorationTaskMode mode) {
-  recurse_graph(program, graph, executor, config, depth, thread_ids, mode);
-}
-
-template <typename ValueT, typename ExecutorT>
 [[nodiscard]] inline bool try_enqueue_owned_task(ExecutorT& executor,
                                                  model::ExplorationGraphT<ValueT>& graph,
                                                  const std::size_t depth,
@@ -1412,50 +1391,91 @@ template <typename ValueT, typename ExecutorT>
   return false;
 }
 
-// Explore a single child of an ND or receive branch locally.  The first child
-// reuses the parent graph via ScopedRollback; subsequent children do the same.
-template <typename ValueT, typename ExecutorT, typename MutateFn>
-inline void explore_branch(const ProgramT<ValueT>& program,
-                           model::ExplorationGraphT<ValueT>& parent_graph, ExecutorT& executor,
-                           const DporConfigT<ValueT>& config, const std::size_t depth,
-                           const std::vector<model::ThreadId>& thread_ids,
-                           const ExplorationTaskMode mode, MutateFn&& mutate_branch) {
-  using ScopedRollback = typename model::ExplorationGraphT<ValueT>::ScopedRollback;
+enum class ExplorationFrameKind : std::uint8_t {
+  Enter,
+  ExitLinearChild,
+  ResumeNd,
+  ResumeReceive,
+  ResumeSendRevisits,
+};
 
-  ScopedRollback rollback(parent_graph);
-  std::forward<MutateFn>(mutate_branch)(parent_graph);
-  recurse_graph(program, parent_graph, executor, config, depth, thread_ids, mode);
-}
+enum class BlockedReceiveRescheduleKind : std::uint8_t { None, Ready, StopRequested };
 
-template <typename ValueT, typename StopFn, typename EmitFn>
-inline void for_each_backward_revisit_child(
+template <typename ValueT>
+struct ExplorationFrame {
+  using Checkpoint = typename model::ExplorationGraphT<ValueT>::Checkpoint;
+  using EventId = typename model::ExplorationGraphT<ValueT>::EventId;
+
+  ExplorationFrameKind kind{ExplorationFrameKind::Enter};
+  std::size_t depth{0};
+  ExplorationTaskMode mode{ExplorationTaskMode::Visit};
+  Checkpoint checkpoint{};
+  std::size_t cursor{0};
+  EventId event_id{model::ExplorationGraphT<ValueT>::kNoSource};
+  bool flag{false};
+
+  [[nodiscard]] static ExplorationFrame enter(const std::size_t frame_depth,
+                                              const ExplorationTaskMode frame_mode) {
+    return ExplorationFrame{
+        .kind = ExplorationFrameKind::Enter,
+        .depth = frame_depth,
+        .mode = frame_mode,
+    };
+  }
+};
+
+template <typename ValueT>
+struct ExplorationContext {
+  model::ExplorationGraphT<ValueT>* borrowed_graph{nullptr};
+  std::optional<model::ExplorationGraphT<ValueT>> owned_graph{};
+  std::vector<ExplorationFrame<ValueT>> frames;
+
+  [[nodiscard]] model::ExplorationGraphT<ValueT>& graph() {
+    if (owned_graph.has_value()) {
+      return *owned_graph;
+    }
+    return *borrowed_graph;
+  }
+
+  [[nodiscard]] const model::ExplorationGraphT<ValueT>& graph() const {
+    if (owned_graph.has_value()) {
+      return *owned_graph;
+    }
+    return *borrowed_graph;
+  }
+};
+
+template <typename ValueT>
+struct BackwardRevisitChildResult {
+  std::size_t next_receive_index{0};
+  std::optional<model::ExplorationGraphT<ValueT>> child{};
+};
+
+template <typename ValueT>
+struct BlockedReceiveRescheduleResult {
+  BlockedReceiveRescheduleKind kind{BlockedReceiveRescheduleKind::None};
+  std::optional<model::ExplorationGraphT<ValueT>> graph{};
+};
+
+template <typename ValueT>
+[[nodiscard]] inline BackwardRevisitChildResult<ValueT> next_backward_revisit_child(
     const model::ExplorationGraphT<ValueT>& graph,
     const typename model::ExplorationGraphT<ValueT>::EventId send_id,
     const model::CommunicationModel communication_model,
-    StopFn&& should_stop,       // NOLINT(cppcoreguidelines-missing-std-forward)
-    EmitFn&& emit_revisited) {  // NOLINT(cppcoreguidelines-missing-std-forward)
+    const std::size_t start_receive_index) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
-
-  // Backward revisiting: Algorithm 1 lines 10-13. For each receive in the
-  // destination thread of the new send, check compatibility and revisit
-  // conditions, then emit an owned restricted+rewired child graph.
-  if (should_stop()) {
-    return;
-  }
 
   const auto& send_evt = graph.event(send_id);
   const auto* send_label = model::as_send(send_evt);
   if (send_label == nullptr) {
-    return;
+    return BackwardRevisitChildResult<ValueT>{};
   }
 
   const auto receives = graph.receives_in_destination(send_id);
 
-  for (const auto recv_id : receives) {
-    if (should_stop()) {
-      return;
-    }
-
+  for (std::size_t receive_index = start_receive_index; receive_index < receives.size();
+       ++receive_index) {
+    const auto recv_id = receives[receive_index];
     const auto& recv_evt = graph.event(recv_id);
     const auto* recv_label = model::as_receive(recv_evt);
     if (recv_label == nullptr || !recv_label->accepts(send_label->value)) {
@@ -1527,23 +1547,52 @@ inline void for_each_backward_revisit_child(
     }
 
     restricted.rebind_rf_preserving_known_acyclicity(new_recv_id, new_send_id);
-    auto revisited = std::move(restricted);
-    if (!emit_revisited(std::move(revisited))) {
+    return BackwardRevisitChildResult<ValueT>{
+        .next_receive_index = receive_index + 1U,
+        .child = std::move(restricted),
+    };
+  }
+
+  return BackwardRevisitChildResult<ValueT>{
+      .next_receive_index = receives.size(),
+      .child = std::nullopt,
+  };
+}
+
+template <typename ValueT, typename StopFn, typename EmitFn>
+inline void for_each_backward_revisit_child(
+    const model::ExplorationGraphT<ValueT>& graph,
+    const typename model::ExplorationGraphT<ValueT>::EventId send_id,
+    const model::CommunicationModel communication_model,
+    StopFn&& should_stop,       // NOLINT(cppcoreguidelines-missing-std-forward)
+    EmitFn&& emit_revisited) {  // NOLINT(cppcoreguidelines-missing-std-forward)
+  std::size_t receive_index = 0;
+  while (!should_stop()) {
+    auto next =
+        next_backward_revisit_child(graph, send_id, communication_model, receive_index);
+    receive_index = next.next_receive_index;
+    if (!next.child.has_value()) {
+      return;
+    }
+    if (!emit_revisited(std::move(*next.child))) {
       return;
     }
   }
 }
 
 template <typename ValueT, typename ExecutorT>
-[[nodiscard]] inline bool reschedule_blocked_receive_if_enabled_impl(
+[[nodiscard]] inline BlockedReceiveRescheduleResult<ValueT>
+find_blocked_receive_reschedule_child(
     const ProgramT<ValueT>& program, const model::ExplorationGraphT<ValueT>& graph,
-    ExecutorT& executor, const DporConfigT<ValueT>& config, const std::size_t depth,
+    ExecutorT& executor, const DporConfigT<ValueT>& config,
     const std::vector<model::ThreadId>& thread_ids) {
   constexpr auto kNoSource = model::ExplorationGraphT<ValueT>::kNoSource;
 
   for (const auto tid : thread_ids) {
     if (executor.stop_requested()) {
-      return true;
+      return BlockedReceiveRescheduleResult<ValueT>{
+          .kind = BlockedReceiveRescheduleKind::StopRequested,
+      };
     }
 
     const auto last_id = graph.last_event_id(tid);
@@ -1580,154 +1629,374 @@ template <typename ValueT, typename ExecutorT>
       continue;
     }
 
-    process_owned_task(program, std::move(unblocked_graph), executor, config, depth, thread_ids,
-                       ExplorationTaskMode::Visit);
-    return true;
+    return BlockedReceiveRescheduleResult<ValueT>{
+        .kind = BlockedReceiveRescheduleKind::Ready,
+        .graph = std::move(unblocked_graph),
+    };
   }
 
-  return false;
+  return BlockedReceiveRescheduleResult<ValueT>{};
 }
+
+template <typename ValueT, typename ExecutorT>
+class DepthFirstExplorer {
+ public:
+  using Graph = model::ExplorationGraphT<ValueT>;
+  using EventId = typename Graph::EventId;
+
+  DepthFirstExplorer(const ProgramT<ValueT>& program, ExecutorT& executor,
+                     const DporConfigT<ValueT>& config,
+                     const std::vector<model::ThreadId>& thread_ids)
+      : program_(program), executor_(executor), config_(config), thread_ids_(thread_ids) {}
+
+  void run(Graph& graph, const std::size_t depth, const ExplorationTaskMode mode) {
+    contexts_.clear();
+    contexts_.push_back(ExplorationContext<ValueT>{
+        .borrowed_graph = &graph,
+        .owned_graph = std::nullopt,
+        .frames = {ExplorationFrame<ValueT>::enter(depth, mode)},
+    });
+    run_loop();
+  }
+
+ private:
+  [[nodiscard]] ExplorationContext<ValueT>& current_context() { return contexts_.back(); }
+
+  [[nodiscard]] Graph& current_graph() { return current_context().graph(); }
+
+  static void pop_context_if_empty(std::vector<ExplorationContext<ValueT>>& contexts) {
+    if (!contexts.empty() && contexts.back().frames.empty()) {
+      contexts.pop_back();
+    }
+  }
+
+  void pop_top_frame() {
+    auto& frames = current_context().frames;
+    frames.pop_back();
+    pop_context_if_empty(contexts_);
+  }
+
+  void rollback_and_pop_top_frame() {
+    auto& context = current_context();
+    const auto checkpoint = context.frames.back().checkpoint;
+    context.graph().rollback(checkpoint);
+    context.frames.pop_back();
+    pop_context_if_empty(contexts_);
+  }
+
+  void push_owned_context(Graph graph, const std::size_t depth, const ExplorationTaskMode mode) {
+    contexts_.push_back(ExplorationContext<ValueT>{
+        .borrowed_graph = nullptr,
+        .owned_graph = std::move(graph),
+        .frames = {ExplorationFrame<ValueT>::enter(depth, mode)},
+    });
+  }
+
+  void unwind_one_step() {
+    if (contexts_.empty()) {
+      return;
+    }
+    if (current_context().frames.empty()) {
+      contexts_.pop_back();
+      return;
+    }
+
+    const auto kind = current_context().frames.back().kind;
+    switch (kind) {
+      case ExplorationFrameKind::Enter:
+        pop_top_frame();
+        return;
+      case ExplorationFrameKind::ExitLinearChild:
+      case ExplorationFrameKind::ResumeNd:
+      case ExplorationFrameKind::ResumeReceive:
+      case ExplorationFrameKind::ResumeSendRevisits:
+        rollback_and_pop_top_frame();
+        return;
+    }
+  }
+
+  void run_loop() {
+    try {
+      while (!contexts_.empty()) {
+        if (executor_.stop_requested()) {
+          unwind_one_step();
+          continue;
+        }
+        if (current_context().frames.empty()) {
+          contexts_.pop_back();
+          continue;
+        }
+
+        switch (current_context().frames.back().kind) {
+          case ExplorationFrameKind::Enter:
+            handle_enter_frame();
+            break;
+          case ExplorationFrameKind::ExitLinearChild:
+            rollback_and_pop_top_frame();
+            break;
+          case ExplorationFrameKind::ResumeNd:
+            handle_resume_nd_frame();
+            break;
+          case ExplorationFrameKind::ResumeReceive:
+            handle_resume_receive_frame();
+            break;
+          case ExplorationFrameKind::ResumeSendRevisits:
+            handle_resume_send_revisits_frame();
+            break;
+        }
+      }
+    } catch (...) {
+      while (!contexts_.empty()) {
+        unwind_one_step();
+      }
+      throw;
+    }
+  }
+
+  void handle_enter_frame() {
+    auto& context = current_context();
+    auto& graph = context.graph();
+    auto& frame = context.frames.back();
+
+    if (frame.mode == ExplorationTaskMode::VisitIfConsistent) {
+      if (executor_.stop_requested()) {
+        pop_top_frame();
+        return;
+      }
+
+      const auto consistency = check_consistency(graph, config_.communication_model);
+      if (!consistency.is_consistent()) {
+        pop_top_frame();
+        return;
+      }
+
+      frame.mode = ExplorationTaskMode::Visit;
+    }
+
+    executor_.maybe_report_progress();
+    if (executor_.stop_requested()) {
+      return;
+    }
+
+    if (frame.depth >= config_.max_depth) {
+      static_cast<void>(executor_.publish_depth_limit_execution(graph));
+      pop_top_frame();
+      return;
+    }
+
+    const auto next = compute_next_event(program_, graph, thread_ids_);
+    if (!next.has_value()) {
+      auto reschedule =
+          find_blocked_receive_reschedule_child(program_, graph, executor_, config_, thread_ids_);
+      if (reschedule.kind == BlockedReceiveRescheduleKind::StopRequested) {
+        return;
+      }
+      if (reschedule.kind == BlockedReceiveRescheduleKind::Ready) {
+        const auto depth = frame.depth;
+        pop_top_frame();
+        push_owned_context(std::move(*reschedule.graph), depth, ExplorationTaskMode::Visit);
+        return;
+      }
+
+      static_cast<void>(executor_.publish_full_execution(graph));
+      pop_top_frame();
+      return;
+    }
+
+    const auto [tid, label] = *next;
+
+    if (const auto* error = std::get_if<model::ErrorLabel>(&label)) {
+      const auto checkpoint = graph.checkpoint();
+      static_cast<void>(graph.add_event(tid, label));
+      static_cast<void>(executor_.publish_error_execution(graph, tid, *error));
+      graph.rollback(checkpoint);
+      pop_top_frame();
+      return;
+    }
+
+    if (const auto* nd = std::get_if<model::NondeterministicChoiceLabelT<ValueT>>(&label)) {
+      if (nd->choices.empty()) {
+        const auto checkpoint = graph.checkpoint();
+        static_cast<void>(graph.add_event(tid, label));
+        frame.kind = ExplorationFrameKind::ExitLinearChild;
+        frame.checkpoint = checkpoint;
+        context.frames.push_back(
+            ExplorationFrame<ValueT>::enter(frame.depth + 1U, ExplorationTaskMode::Visit));
+        return;
+      }
+
+      frame.kind = ExplorationFrameKind::ResumeNd;
+      frame.checkpoint = graph.checkpoint();
+      frame.cursor = 0;
+      frame.event_id = Graph::kNoSource;
+      frame.flag = false;
+      return;
+    }
+
+    if (const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&label)) {
+      frame.kind = ExplorationFrameKind::ResumeReceive;
+      frame.checkpoint = graph.checkpoint();
+      frame.cursor = 0;
+      frame.event_id = Graph::kNoSource;
+      frame.flag = recv->is_nonblocking();
+      return;
+    }
+
+    if (std::holds_alternative<model::SendLabelT<ValueT>>(label)) {
+      const auto checkpoint = graph.checkpoint();
+      const auto send_id = graph.add_event(tid, label);
+      frame.kind = ExplorationFrameKind::ResumeSendRevisits;
+      frame.checkpoint = checkpoint;
+      frame.cursor = 0;
+      frame.event_id = send_id;
+      frame.flag = executor_.can_spawn(frame.depth + 1U, 2);
+      return;
+    }
+
+    if (std::holds_alternative<model::BlockLabel>(label)) {
+      const auto checkpoint = graph.checkpoint();
+      static_cast<void>(graph.add_event(tid, label));
+      frame.kind = ExplorationFrameKind::ExitLinearChild;
+      frame.checkpoint = checkpoint;
+      context.frames.push_back(
+          ExplorationFrame<ValueT>::enter(frame.depth + 1U, ExplorationTaskMode::Visit));
+      return;
+    }
+  }
+
+  void handle_resume_nd_frame() {
+    auto& context = current_context();
+    auto& graph = context.graph();
+    auto& frame = context.frames.back();
+
+    graph.rollback(frame.checkpoint);
+
+    const auto next = compute_next_event(program_, graph, thread_ids_);
+    if (!next.has_value()) {
+      throw std::logic_error("ND resume frame lost its next event");
+    }
+    const auto [tid, label] = *next;
+    const auto* nd = std::get_if<model::NondeterministicChoiceLabelT<ValueT>>(&label);
+    if (nd == nullptr || nd->choices.empty()) {
+      throw std::logic_error("ND resume frame expected a non-empty ND choice");
+    }
+
+    if (frame.cursor >= nd->choices.size()) {
+      pop_top_frame();
+      return;
+    }
+
+    auto nd_label = *nd;
+    nd_label.value = nd->choices[frame.cursor];
+    ++frame.cursor;
+    const auto child_depth = frame.depth + 1U;
+    static_cast<void>(graph.add_event(tid, model::EventLabelT<ValueT>{std::move(nd_label)}));
+    context.frames.push_back(
+        ExplorationFrame<ValueT>::enter(child_depth, ExplorationTaskMode::Visit));
+  }
+
+  void handle_resume_receive_frame() {
+    auto& context = current_context();
+    auto& graph = context.graph();
+    auto& frame = context.frames.back();
+
+    graph.rollback(frame.checkpoint);
+
+    const auto next = compute_next_event(program_, graph, thread_ids_);
+    if (!next.has_value()) {
+      throw std::logic_error("receive resume frame lost its next event");
+    }
+    const auto [tid, label] = *next;
+    const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&label);
+    if (recv == nullptr) {
+      throw std::logic_error("receive resume frame expected a receive");
+    }
+
+    std::size_t compatible_index = 0;
+    for (const auto send_id : graph.unread_send_event_ids()) {
+      const auto* send = model::as_send(graph.event(send_id));
+      if (send == nullptr || send->destination != tid || !recv->accepts(send->value)) {
+        continue;
+      }
+      if (compatible_index == frame.cursor) {
+        ++frame.cursor;
+        const auto child_depth = frame.depth + 1U;
+        const auto recv_id = graph.add_event(tid, label);
+        graph.set_reads_from(recv_id, send_id);
+        context.frames.push_back(
+            ExplorationFrame<ValueT>::enter(child_depth, ExplorationTaskMode::VisitIfConsistent));
+        return;
+      }
+      ++compatible_index;
+    }
+
+    if (frame.flag && recv->is_nonblocking()) {
+      frame.flag = false;
+      const auto child_depth = frame.depth + 1U;
+      const auto recv_id = graph.add_event(tid, label);
+      graph.set_reads_from_bottom(recv_id);
+      context.frames.push_back(
+          ExplorationFrame<ValueT>::enter(child_depth, ExplorationTaskMode::VisitIfConsistent));
+      return;
+    }
+
+    pop_top_frame();
+  }
+
+  void handle_resume_send_revisits_frame() {
+    auto& context = current_context();
+    auto& graph = context.graph();
+    auto& frame = context.frames.back();
+
+    if (frame.event_id == Graph::kNoSource || !graph.is_valid_event_id(frame.event_id) ||
+        !model::is_send(graph.event(frame.event_id))) {
+      throw std::logic_error("send resume frame expected a live send event");
+    }
+
+    auto next = next_backward_revisit_child(graph, frame.event_id, config_.communication_model,
+                                            frame.cursor);
+    frame.cursor = next.next_receive_index;
+
+    if (next.child.has_value()) {
+      const auto child_depth = frame.depth + 1U;
+      auto revisited = std::move(*next.child);
+      if (frame.flag &&
+          try_enqueue_owned_task<ValueT>(executor_, revisited, child_depth,
+                                         ExplorationTaskMode::VisitIfConsistent)) {
+        return;
+      }
+      push_owned_context(std::move(revisited), child_depth,
+                         ExplorationTaskMode::VisitIfConsistent);
+      return;
+    }
+
+    frame.kind = ExplorationFrameKind::ExitLinearChild;
+    context.frames.push_back(
+        ExplorationFrame<ValueT>::enter(frame.depth + 1U, ExplorationTaskMode::Visit));
+  }
+
+  const ProgramT<ValueT>& program_;
+  ExecutorT& executor_;
+  const DporConfigT<ValueT>& config_;
+  const std::vector<model::ThreadId>& thread_ids_;
+  std::vector<ExplorationContext<ValueT>> contexts_;
+};
 
 template <typename ValueT, typename ExecutorT>
 inline void visit_if_consistent_impl(const ProgramT<ValueT>& program,
                                      model::ExplorationGraphT<ValueT>& graph, ExecutorT& executor,
                                      const DporConfigT<ValueT>& config, const std::size_t depth,
                                      const std::vector<model::ThreadId>& thread_ids) {
-  if (executor.stop_requested()) {
-    return;
-  }
-
-  const auto consistency = check_consistency(graph, config.communication_model);
-  if (!consistency.is_consistent()) {
-    return;
-  }
-
-  visit_impl(program, graph, executor, config, depth, thread_ids);
+  DepthFirstExplorer<ValueT, ExecutorT> explorer(program, executor, config, thread_ids);
+  explorer.run(graph, depth, ExplorationTaskMode::VisitIfConsistent);
 }
 
 template <typename ValueT, typename ExecutorT>
 inline void visit_impl(const ProgramT<ValueT>& program, model::ExplorationGraphT<ValueT>& graph,
                        ExecutorT& executor, const DporConfigT<ValueT>& config,
                        const std::size_t depth, const std::vector<model::ThreadId>& thread_ids) {
-  using ScopedRollback = typename model::ExplorationGraphT<ValueT>::ScopedRollback;
-
-  executor.maybe_report_progress();
-  if (executor.stop_requested()) {
-    return;
-  }
-
-  if (depth >= config.max_depth) {
-    static_cast<void>(executor.publish_depth_limit_execution(graph));
-    return;
-  }
-
-  const auto next = compute_next_event(program, graph, thread_ids);
-
-  if (!next.has_value()) {
-    if (reschedule_blocked_receive_if_enabled_impl(program, graph, executor, config, depth,
-                                                   thread_ids)) {
-      return;
-    }
-    static_cast<void>(executor.publish_full_execution(graph));
-    return;
-  }
-
-  const auto& [tid, label] = *next;
-
-  if (const auto* error = std::get_if<model::ErrorLabel>(&label)) {
-    ScopedRollback rollback(graph);
-    static_cast<void>(graph.add_event(tid, label));
-    static_cast<void>(executor.publish_error_execution(graph, tid, *error));
-    return;
-  }
-
-  if (const auto* nd = std::get_if<model::NondeterministicChoiceLabelT<ValueT>>(&label)) {
-    if (nd->choices.empty()) {
-      ScopedRollback rollback(graph);
-      static_cast<void>(graph.add_event(tid, label));
-      visit_impl(program, graph, executor, config, depth + 1, thread_ids);
-      return;
-    }
-
-    for (const auto& choice : nd->choices) {
-      if (executor.stop_requested()) {
-        return;
-      }
-      auto nd_label = *nd;
-      nd_label.value = choice;
-      explore_branch(
-          program, graph, executor, config, depth + 1, thread_ids, ExplorationTaskMode::Visit,
-          [tid, nd_label = std::move(nd_label)](auto& branch_graph) {
-            static_cast<void>(branch_graph.add_event(tid, model::EventLabelT<ValueT>{nd_label}));
-          });
-    }
-    return;
-  }
-
-  if (const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&label)) {
-    std::vector<typename model::ExplorationGraphT<ValueT>::EventId> compatible_sends;
-    for (const auto send_id : graph.unread_send_event_ids()) {
-      const auto* send = model::as_send(graph.event(send_id));
-      if (send != nullptr && send->destination == tid && recv->accepts(send->value)) {
-        compatible_sends.push_back(send_id);
-      }
-    }
-
-    for (const auto send_id : compatible_sends) {
-      if (executor.stop_requested()) {
-        return;
-      }
-      explore_branch(program, graph, executor, config, depth + 1, thread_ids,
-                     ExplorationTaskMode::VisitIfConsistent,
-                     [tid, &label, send_id](auto& branch_graph) {
-                       const auto recv_id = branch_graph.add_event(tid, label);
-                       branch_graph.set_reads_from(recv_id, send_id);
-                     });
-    }
-
-    if (recv->is_nonblocking() && !executor.stop_requested()) {
-      explore_branch(program, graph, executor, config, depth + 1, thread_ids,
-                     ExplorationTaskMode::VisitIfConsistent, [tid, &label](auto& branch_graph) {
-                       const auto recv_id = branch_graph.add_event(
-                           tid, label);  // NOLINT(clang-analyzer-core.NullDereference)
-                       branch_graph.set_reads_from_bottom(recv_id);
-                     });
-    }
-    return;
-  }
-
-  if (std::holds_alternative<model::SendLabelT<ValueT>>(label)) {
-    ScopedRollback rollback(graph);
-    const auto send_id = graph.add_event(tid, label);
-    const auto allow_enqueue = executor.can_spawn(depth + 1, 2);
-
-    for_each_backward_revisit_child(
-        graph, send_id, config.communication_model,
-        [&executor]() { return executor.stop_requested(); },
-        [&](model::ExplorationGraphT<ValueT> revisited) {
-          if (allow_enqueue &&
-              try_enqueue_owned_task<ValueT>(executor, revisited, depth + 1,
-                                             ExplorationTaskMode::VisitIfConsistent)) {
-            return true;
-          }
-
-          process_owned_task(program, std::move(revisited), executor, config, depth + 1, thread_ids,
-                             ExplorationTaskMode::VisitIfConsistent);
-          return !executor.stop_requested();
-        });
-
-    if (!executor.stop_requested()) {
-      visit_impl(program, graph, executor, config, depth + 1, thread_ids);
-    }
-    return;
-  }
-
-  if (std::holds_alternative<model::BlockLabel>(label)) {
-    ScopedRollback rollback(graph);
-    static_cast<void>(graph.add_event(tid, label));
-    visit_impl(program, graph, executor, config, depth + 1, thread_ids);
-    return;
-  }
+  DepthFirstExplorer<ValueT, ExecutorT> explorer(program, executor, config, thread_ids);
+  explorer.run(graph, depth, ExplorationTaskMode::Visit);
 }
 
 template <typename ValueT>
@@ -1746,11 +2015,12 @@ inline void backward_revisit(const ProgramT<ValueT>& program,
                              VerifyResult& result, const DporConfigT<ValueT>& config,
                              std::size_t depth, const std::vector<model::ThreadId>& thread_ids) {
   SequentialExecutor<ValueT> executor(result, config);
+  DepthFirstExplorer<ValueT, SequentialExecutor<ValueT>> explorer(program, executor, config,
+                                                                  thread_ids);
   for_each_backward_revisit_child(
       graph, send_id, config.communication_model, [&executor]() { return executor.stop_requested(); },
       [&](model::ExplorationGraphT<ValueT> revisited) {
-        process_owned_task(program, std::move(revisited), executor, config, depth, thread_ids,
-                           ExplorationTaskMode::VisitIfConsistent);
+        explorer.run(revisited, depth, ExplorationTaskMode::VisitIfConsistent);
         return !executor.stop_requested();
       });
 }

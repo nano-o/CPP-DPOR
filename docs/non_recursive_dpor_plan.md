@@ -62,13 +62,20 @@ Therefore:
 - a generic stack of copied graphs for every branch is not
 
 This plan keeps the normal in-place DFS path on one mutable graph and uses
-small continuation frames. The only place where multiple owned graphs remain
-live is local backward-revisit fallback. That is a conscious compromise for the
-first landing, because it preserves current control flow and reviewability.
+small continuation frames. The places where multiple owned graphs may remain
+live are:
+
+- local backward-revisit fallback
+- blocked-receive reschedule after popping the current `Enter` frame
+
+The latter is necessary because replacing the current graph in place would
+invalidate any parent checkpoints still live in the same context. That is a
+conscious compromise for the first landing, because it preserves correctness
+and reviewability.
 
 If stricter "memory proportional to the currently active graph only" behavior
 becomes mandatory, the follow-up work should attack local backward revisits
-specifically, not the whole frame design.
+and blocked-reschedule replay specifically, not the whole frame design.
 
 ## High-Level Design
 
@@ -113,14 +120,14 @@ Why a context exists at all:
 - backward-revisit children are materialized as restricted+rewired owned graphs
 - if a revisit child is explored locally, the parent send continuation still
   has to survive until that child returns
+- blocked-reschedule children are materialized as restricted owned graphs, and
+  replacing the current graph in place would invalidate parent rollback
+  checkpoints when the current `Enter` frame is not the only frame in the
+  context
 
 What should not use a new context:
 
 - ordinary ND / receive / block / send-forward recursion
-- blocked-receive reschedule in this landing
-
-Blocked-receive reschedule is tail-like and should be implemented as
-"replace current graph and continue" rather than "push a new context".
 
 ### 3. One driver shared by sequential and parallel
 
@@ -175,8 +182,8 @@ At frame entry:
 If there is no next event:
 
 1. try blocked-receive reschedule
-2. if reschedule succeeds, replace the current context graph with the
-   `unblocked_graph` and restart the same frame in `Visit` mode at the same
+2. if reschedule succeeds, pop the current `Enter` frame and push an owned
+   child context rooted at the `unblocked_graph` in `Visit` mode at the same
    `depth`
 3. otherwise publish a full execution and pop
 
@@ -353,16 +360,16 @@ Guardrails:
 - recompute siblings from the graph on resume
 - preserve sibling order exactly
 
-### Step 5: Port blocked-reschedule without a new context
+### Step 5: Port blocked-reschedule as a tail-like owned child
 
 Replace the current recursive reschedule path with:
 
 - build `unblocked_graph`
-- move it into the current context
-- restart the same frame
+- pop the current `Enter` frame
+- push the unblocked graph as a new owned context at the same depth
 
-This should eliminate one whole class of "smaller graph, deeper stack"
-behavior without introducing extra owned contexts.
+This still removes recursion, but it does not eliminate all "smaller graph,
+deeper context stack" behavior yet.
 
 ### Step 6: Port send handling and narrow local owned-context use to revisit children
 
@@ -370,8 +377,8 @@ Convert the send branch to the explicit send frame phases described above.
 
 At the end of this step:
 
-- local backward-revisit fallback is the only place that still needs a new
-  context
+- local backward-revisit fallback and blocked-reschedule tail branches are the
+  only places that still need a new owned context
 - ordinary forward DFS should no longer recurse anywhere
 
 ### Step 7: Switch all entry points to the new driver
