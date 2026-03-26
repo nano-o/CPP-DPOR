@@ -270,11 +270,26 @@ template <typename ValueT>
 [[nodiscard]] inline bool has_compatible_unread_send(const model::ExplorationGraphT<ValueT>& graph,
                                                      model::ThreadId tid,
                                                      const model::ReceiveLabelT<ValueT>& receive) {
-  const auto unread_sends = graph.unread_send_event_ids();
-  return std::ranges::any_of(unread_sends, [&](const auto send_id) {
+  return graph.any_unread_send([&](const auto send_id) {
     const auto* send = model::as_send(graph.event(send_id));
     return send != nullptr && send->destination == tid && receive.accepts(send->value);
   });
+}
+
+template <typename ValueT>
+[[nodiscard]] inline std::vector<typename model::ExplorationGraphT<ValueT>::EventId>
+compatible_unread_send_ids(const model::ExplorationGraphT<ValueT>& graph, const model::ThreadId tid,
+                           const model::ReceiveLabelT<ValueT>& receive) {
+  using EventId = typename model::ExplorationGraphT<ValueT>::EventId;
+
+  std::vector<EventId> compatible_sends;
+  graph.for_each_unread_send([&](const EventId send_id) {
+    const auto* send = model::as_send(graph.event(send_id));
+    if (send != nullptr && send->destination == tid && receive.accepts(send->value)) {
+      compatible_sends.push_back(send_id);
+    }
+  });
+  return compatible_sends;
 }
 
 template <typename ValueT>
@@ -1415,6 +1430,7 @@ template <typename ValueT>
 struct ExplorationFrame {
   using Checkpoint = typename model::ExplorationGraphT<ValueT>::Checkpoint;
   using EventId = typename model::ExplorationGraphT<ValueT>::EventId;
+  using Label = model::EventLabelT<ValueT>;
 
   ExplorationFrameKind kind{ExplorationFrameKind::Enter};
   std::size_t dpor_tree_depth{0};
@@ -1422,6 +1438,9 @@ struct ExplorationFrame {
   Checkpoint checkpoint{};
   std::size_t cursor{0};
   EventId event_id{model::ExplorationGraphT<ValueT>::kNoSource};
+  model::ThreadId thread_id{0};
+  std::optional<Label> label{};
+  std::vector<EventId> candidate_event_ids{};
   bool flag{false};
 
   [[nodiscard]] static ExplorationFrame enter(const std::size_t frame_dpor_tree_depth,
@@ -1472,6 +1491,7 @@ template <typename ValueT>
     const model::ExplorationGraphT<ValueT>& graph,
     const typename model::ExplorationGraphT<ValueT>::EventId send_id,
     const model::CommunicationModel communication_model,
+    const std::vector<typename model::ExplorationGraphT<ValueT>::EventId>& receives,
     const std::size_t start_receive_index) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
 
@@ -1480,8 +1500,6 @@ template <typename ValueT>
   if (send_label == nullptr) {
     return BackwardRevisitChildResult<ValueT>{};
   }
-
-  const auto receives = graph.receives_in_destination(send_id);
 
   for (std::size_t receive_index = start_receive_index; receive_index < receives.size();
        ++receive_index) {
@@ -1576,10 +1594,11 @@ inline void for_each_backward_revisit_child(
     const model::CommunicationModel communication_model,
     StopFn&& should_stop,       // NOLINT(cppcoreguidelines-missing-std-forward)
     EmitFn&& emit_revisited) {  // NOLINT(cppcoreguidelines-missing-std-forward)
+  const auto receives = graph.receives_in_destination(send_id);
   std::size_t receive_index = 0;
   while (!should_stop()) {
-    auto next =
-        next_backward_revisit_child(graph, send_id, communication_model, receive_index);
+    auto next = next_backward_revisit_child(graph, send_id, communication_model, receives,
+                                            receive_index);
     receive_index = next.next_receive_index;
     if (!next.child.has_value()) {
       return;
@@ -1795,7 +1814,7 @@ class DepthFirstExplorer {
       return;
     }
 
-    const auto next = compute_next_event(program_, graph, thread_ids_);
+    auto next = compute_next_event(program_, graph, thread_ids_);
     if (!next.has_value()) {
       auto reschedule =
           find_blocked_receive_reschedule_child(program_, graph, executor_, config_, thread_ids_);
@@ -1815,7 +1834,7 @@ class DepthFirstExplorer {
       return;
     }
 
-    const auto [tid, label] = *next;
+    auto [tid, label] = std::move(*next);
 
     if (const auto* error = std::get_if<model::ErrorLabel>(&label)) {
       const auto checkpoint = graph.checkpoint();
@@ -1842,6 +1861,9 @@ class DepthFirstExplorer {
       frame.checkpoint = graph.checkpoint();
       frame.cursor = 0;
       frame.event_id = Graph::kNoSource;
+      frame.thread_id = tid;
+      frame.label = std::move(label);
+      frame.candidate_event_ids.clear();
       frame.flag = false;
       return;
     }
@@ -1851,6 +1873,9 @@ class DepthFirstExplorer {
       frame.checkpoint = graph.checkpoint();
       frame.cursor = 0;
       frame.event_id = Graph::kNoSource;
+      frame.thread_id = tid;
+      frame.candidate_event_ids = compatible_unread_send_ids(graph, tid, *recv);
+      frame.label = std::move(label);
       frame.flag = recv->is_nonblocking();
       return;
     }
@@ -1862,6 +1887,8 @@ class DepthFirstExplorer {
       frame.checkpoint = checkpoint;
       frame.cursor = 0;
       frame.event_id = send_id;
+      frame.label.reset();
+      frame.candidate_event_ids = graph.receives_in_destination(send_id);
       frame.flag = executor_.can_spawn(frame.dpor_tree_depth + 1U, 2);
       return;
     }
@@ -1885,12 +1912,10 @@ class DepthFirstExplorer {
 
     graph.rollback(frame.checkpoint);
 
-    const auto next = compute_next_event(program_, graph, thread_ids_);
-    if (!next.has_value()) {
-      throw std::logic_error("ND resume frame lost its next event");
+    if (!frame.label.has_value()) {
+      throw std::logic_error("ND resume frame lost its cached label");
     }
-    const auto [tid, label] = *next;
-    const auto* nd = std::get_if<model::NondeterministicChoiceLabelT<ValueT>>(&label);
+    const auto* nd = std::get_if<model::NondeterministicChoiceLabelT<ValueT>>(&*frame.label);
     if (nd == nullptr || nd->choices.empty()) {
       throw std::logic_error("ND resume frame expected a non-empty ND choice");
     }
@@ -1904,7 +1929,8 @@ class DepthFirstExplorer {
     nd_label.value = nd->choices[frame.cursor];
     ++frame.cursor;
     const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
-    static_cast<void>(graph.add_event(tid, model::EventLabelT<ValueT>{std::move(nd_label)}));
+    static_cast<void>(
+        graph.add_event(frame.thread_id, model::EventLabelT<ValueT>{std::move(nd_label)}));
     context.frames.push_back(
         ExplorationFrame<ValueT>::enter(child_dpor_tree_depth, ExplorationTaskMode::Visit));
   }
@@ -1916,39 +1942,29 @@ class DepthFirstExplorer {
 
     graph.rollback(frame.checkpoint);
 
-    const auto next = compute_next_event(program_, graph, thread_ids_);
-    if (!next.has_value()) {
-      throw std::logic_error("receive resume frame lost its next event");
+    if (!frame.label.has_value()) {
+      throw std::logic_error("receive resume frame lost its cached label");
     }
-    const auto [tid, label] = *next;
-    const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&label);
+    const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&*frame.label);
     if (recv == nullptr) {
       throw std::logic_error("receive resume frame expected a receive");
     }
 
-    std::size_t compatible_index = 0;
-    for (const auto send_id : graph.unread_send_event_ids()) {
-      const auto* send = model::as_send(graph.event(send_id));
-      if (send == nullptr || send->destination != tid || !recv->accepts(send->value)) {
-        continue;
-      }
-      if (compatible_index == frame.cursor) {
-        ++frame.cursor;
-        const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
-        const auto recv_id = graph.add_event(tid, label);
-        graph.set_reads_from(recv_id, send_id);
-        context.frames.push_back(
-            ExplorationFrame<ValueT>::enter(child_dpor_tree_depth,
-                                            ExplorationTaskMode::VisitIfConsistent));
-        return;
-      }
-      ++compatible_index;
+    if (frame.cursor < frame.candidate_event_ids.size()) {
+      const auto send_id = frame.candidate_event_ids[frame.cursor++];
+      const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
+      const auto recv_id = graph.add_event(frame.thread_id, *frame.label);
+      graph.set_reads_from(recv_id, send_id);
+      context.frames.push_back(
+          ExplorationFrame<ValueT>::enter(child_dpor_tree_depth,
+                                          ExplorationTaskMode::VisitIfConsistent));
+      return;
     }
 
     if (frame.flag && recv->is_nonblocking()) {
       frame.flag = false;
       const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
-      const auto recv_id = graph.add_event(tid, label);
+      const auto recv_id = graph.add_event(frame.thread_id, *frame.label);
       graph.set_reads_from_bottom(recv_id);
       context.frames.push_back(
           ExplorationFrame<ValueT>::enter(child_dpor_tree_depth,
@@ -1970,7 +1986,7 @@ class DepthFirstExplorer {
     }
 
     auto next = next_backward_revisit_child(graph, frame.event_id, config_.communication_model,
-                                            frame.cursor);
+                                            frame.candidate_event_ids, frame.cursor);
     frame.cursor = next.next_receive_index;
 
     if (next.child.has_value()) {

@@ -86,6 +86,11 @@ class ExplorationGraphT {
         insertion_order_(other.insertion_order_),
         insertion_position_(other.insertion_position_),
         thread_state_(other.thread_state_),
+        thread_event_ids_(other.thread_event_ids_),
+        receive_event_ids_by_thread_(other.receive_event_ids_by_thread_),
+        send_event_ids_(other.send_event_ids_),
+        send_reader_counts_(other.send_reader_counts_),
+        unread_send_mask_(other.unread_send_mask_),
         known_acyclic_(other.known_acyclic_),
         pending_fresh_receive_id_(other.pending_fresh_receive_id_),
         porf_cache_(other.porf_cache_) {}
@@ -100,6 +105,11 @@ class ExplorationGraphT {
     insertion_order_ = other.insertion_order_;
     insertion_position_ = other.insertion_position_;
     thread_state_ = other.thread_state_;
+    thread_event_ids_ = other.thread_event_ids_;
+    receive_event_ids_by_thread_ = other.receive_event_ids_by_thread_;
+    send_event_ids_ = other.send_event_ids_;
+    send_reader_counts_ = other.send_reader_counts_;
+    unread_send_mask_ = other.unread_send_mask_;
     known_acyclic_ = other.known_acyclic_;
     pending_fresh_receive_id_ = other.pending_fresh_receive_id_;
     porf_cache_ = other.porf_cache_;
@@ -209,6 +219,28 @@ class ExplorationGraphT {
     assert(ts.last_event_id == kNoSource || event(id).index > event(ts.last_event_id).index);
     ts.event_count++;
     ts.last_event_id = id;
+
+    if (thread_index >= thread_event_ids_.size()) {
+      thread_event_ids_.resize(thread_index + 1U);
+    }
+    thread_event_ids_[thread_index].push_back(id);
+
+    if (thread_index >= receive_event_ids_by_thread_.size()) {
+      receive_event_ids_by_thread_.resize(thread_index + 1U);
+    }
+
+    send_reader_counts_.resize(id + 1U, 0U);
+    unread_send_mask_.resize(id + 1U, 0U);
+
+    const auto& added_event = event(id);
+    if (is_receive(added_event)) {
+      receive_event_ids_by_thread_[thread_index].push_back(id);
+    }
+    if (is_send(added_event)) {
+      send_event_ids_.push_back(id);
+      unread_send_mask_[id] = 1U;
+    }
+
     update_acyclicity_after_add_event(id);
     return id;
   }
@@ -226,6 +258,7 @@ class ExplorationGraphT {
         .previous_source = previous_source,
     });
     porf_cache_ = nullptr;
+    update_send_reader_state(previous_source, source_copy);
     update_acyclicity_after_rf_assignment(receive_id, source_copy);
   }
 
@@ -268,10 +301,33 @@ class ExplorationGraphT {
     return graph_.receive_event_ids();
   }
 
-  [[nodiscard]] std::vector<EventId> send_event_ids() const { return graph_.send_event_ids(); }
+  [[nodiscard]] std::vector<EventId> send_event_ids() const { return send_event_ids_; }
 
   [[nodiscard]] std::vector<EventId> unread_send_event_ids() const {
-    return graph_.unread_send_event_ids();
+    std::vector<EventId> unread;
+    unread.reserve(send_event_ids_.size());
+    for_each_unread_send([&](const EventId send_id) { unread.push_back(send_id); });
+    return unread;
+  }
+
+  template <typename Callback>
+  void for_each_unread_send(Callback&& callback) const {
+    for (const auto send_id : send_event_ids_) {
+      if (send_id < unread_send_mask_.size() && unread_send_mask_[send_id] != 0U) {
+        callback(send_id);
+      }
+    }
+  }
+
+  template <typename Predicate>
+  [[nodiscard]] bool any_unread_send(Predicate&& predicate) const {
+    for (const auto send_id : send_event_ids_) {
+      if (send_id < unread_send_mask_.size() && unread_send_mask_[send_id] != 0U &&
+          predicate(send_id)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // Returns true if the thread's last event is a BlockLabel or ErrorLabel.
@@ -310,14 +366,17 @@ class ExplorationGraphT {
   // (guaranteed by add_event's auto-indexing), so no sort is needed.
   [[nodiscard]] std::vector<ObservedValueT<ValueT>> thread_trace(ThreadId tid) const {
     std::vector<ObservedValueT<ValueT>> trace;
-    trace.reserve(thread_event_count(tid));
+    const auto thread_index = static_cast<std::size_t>(tid);
+    if (thread_index >= thread_event_ids_.size()) {
+      return trace;
+    }
+
+    const auto& thread_events = thread_event_ids_[thread_index];
+    trace.reserve(thread_events.size());
     const auto& rf = reads_from();
 
-    for (EventId id = 0; id < event_count(); ++id) {
+    for (const auto id : thread_events) {
       const auto& evt = event(id);
-      if (evt.thread != tid) {
-        continue;
-      }
       if (const auto* recv = as_receive(evt)) {
         auto rf_it = rf.find(id);
         if (rf_it != rf.end()) {
@@ -388,7 +447,10 @@ class ExplorationGraphT {
     const bool preserve_known_acyclicity =
         known_acyclic_ && is_valid_event_id(recv) && is_receive(event(recv)) &&
         is_valid_event_id(send) && is_send(event(send));
-    graph_.set_reads_from_source(recv, ReadsFromSource::from_send(send));
+    const auto previous_source = current_reads_from_source(recv);
+    const auto rebound_source = ReadsFromSource::from_send(send);
+    graph_.set_reads_from_source(recv, rebound_source);
+    update_send_reader_state(previous_source, rebound_source);
     porf_cache_ = nullptr;
     if (preserve_known_acyclicity) {
       mark_known_acyclic();
@@ -453,15 +515,11 @@ class ExplorationGraphT {
       throw std::invalid_argument("event is not a send");
     }
     const auto dest_thread = send->destination;
-
-    std::vector<EventId> result;
-    for (EventId id = 0; id < event_count(); ++id) {
-      const auto& evt = event(id);
-      if (evt.thread == dest_thread && is_receive(evt)) {
-        result.push_back(id);
-      }
+    const auto dest_index = static_cast<std::size_t>(dest_thread);
+    if (dest_index >= receive_event_ids_by_thread_.size()) {
+      return {};
     }
-    return result;
+    return receive_event_ids_by_thread_[dest_index];
   }
 
   // Cycle-only check on (po ∪ rf) without materializing vector clocks.
@@ -489,6 +547,11 @@ class ExplorationGraphT {
   std::vector<EventId> insertion_order_;
   std::vector<std::size_t> insertion_position_;
   std::vector<ThreadState> thread_state_;
+  std::vector<std::vector<EventId>> thread_event_ids_;
+  std::vector<std::vector<EventId>> receive_event_ids_by_thread_;
+  std::vector<EventId> send_event_ids_;
+  std::vector<std::size_t> send_reader_counts_;
+  std::vector<std::uint8_t> unread_send_mask_;
   bool known_acyclic_{true};
   std::optional<EventId> pending_fresh_receive_id_;
   mutable std::shared_ptr<PorfCache> porf_cache_;
@@ -605,6 +668,42 @@ class ExplorationGraphT {
     return it->second;
   }
 
+  void update_send_reader_state(const std::optional<ReadsFromSource>& previous_source,
+                                const std::optional<ReadsFromSource>& next_source) {
+    adjust_send_reader_count(previous_source, -1);
+    adjust_send_reader_count(next_source, 1);
+  }
+
+  void update_send_reader_state(const std::optional<ReadsFromSource>& previous_source,
+                                const ReadsFromSource& next_source) {
+    update_send_reader_state(previous_source, std::optional<ReadsFromSource>{next_source});
+  }
+
+  void adjust_send_reader_count(const std::optional<ReadsFromSource>& source, const int delta) {
+    if (!source.has_value() || source->is_bottom()) {
+      return;
+    }
+
+    const auto send_id = source->send_id();
+    if (!is_valid_event_id(send_id) || !is_send(event(send_id)) ||
+        send_id >= send_reader_counts_.size() || send_id >= unread_send_mask_.size()) {
+      return;
+    }
+
+    auto& reader_count = send_reader_counts_[send_id];
+    if (delta < 0) {
+      const auto magnitude = static_cast<std::size_t>(-delta);
+      if (reader_count < magnitude) {
+        throw std::logic_error("send reader count underflow");
+      }
+      reader_count -= magnitude;
+    } else {
+      reader_count += static_cast<std::size_t>(delta);
+    }
+
+    unread_send_mask_[send_id] = reader_count == 0U ? 1U : 0U;
+  }
+
   void undo_last_rf_assignment() {
     if (rf_undo_log_.empty()) {
       throw std::logic_error("rf undo log is empty");
@@ -612,8 +711,10 @@ class ExplorationGraphT {
 
     const auto undo = rf_undo_log_.back();
     rf_undo_log_.pop_back();
+    const auto current_source = current_reads_from_source(undo.receive_id);
     graph_.rollback_reads_from(undo.receive_id, undo.previous_source);
     porf_cache_ = nullptr;
+    update_send_reader_state(current_source, undo.previous_source);
   }
 
   void undo_last_event_append() {
@@ -623,6 +724,9 @@ class ExplorationGraphT {
 
     const auto undo = event_undo_log_.back();
     event_undo_log_.pop_back();
+    const auto& tail_event = event(undo.event_id);
+    const bool removed_send = is_send(tail_event);
+    const bool removed_receive = is_receive(tail_event);
 
     if (insertion_order_.empty() || insertion_order_.back() != undo.event_id) {
       throw std::logic_error("event undo log does not match insertion order tail");
@@ -641,6 +745,36 @@ class ExplorationGraphT {
       throw std::logic_error("event undo log thread state missing");
     }
     thread_state_[thread_index] = undo.previous_thread_state;
+
+    if (thread_index >= thread_event_ids_.size() || thread_event_ids_[thread_index].empty() ||
+        thread_event_ids_[thread_index].back() != undo.event_id) {
+      throw std::logic_error("thread event cache does not match rolled back tail event");
+    }
+    thread_event_ids_[thread_index].pop_back();
+
+    if (removed_receive) {
+      if (thread_index >= receive_event_ids_by_thread_.size() ||
+          receive_event_ids_by_thread_[thread_index].empty() ||
+          receive_event_ids_by_thread_[thread_index].back() != undo.event_id) {
+        throw std::logic_error("receive-event cache does not match rolled back tail event");
+      }
+      receive_event_ids_by_thread_[thread_index].pop_back();
+    }
+
+    if (send_reader_counts_.empty() || unread_send_mask_.empty()) {
+      throw std::logic_error("send caches missing for rolled back tail event");
+    }
+    if (removed_send) {
+      if (send_event_ids_.empty() || send_event_ids_.back() != undo.event_id) {
+        throw std::logic_error("send-event cache does not match rolled back tail event");
+      }
+      if (send_reader_counts_.back() != 0U) {
+        throw std::logic_error("rolled back send still appears to have readers");
+      }
+      send_event_ids_.pop_back();
+    }
+    send_reader_counts_.pop_back();
+    unread_send_mask_.pop_back();
     porf_cache_ = nullptr;
   }
 
@@ -677,15 +811,7 @@ class ExplorationGraphT {
   // monotonic per-thread indices. Scanning events in ID order therefore
   // already yields each thread's immediate program order.
   [[nodiscard]] std::vector<std::vector<EventId>> build_thread_events() const {
-    std::vector<std::vector<EventId>> thread_events(thread_state_.size());
-    for (EventId id = 0; id < event_count(); ++id) {
-      const auto thread_index = static_cast<std::size_t>(event(id).thread);
-      if (thread_index >= thread_events.size()) {
-        thread_events.resize(thread_index + 1);
-      }
-      thread_events[thread_index].push_back(id);
-    }
-    return thread_events;
+    return thread_event_ids_;
   }
 
   static void add_po_edges(const std::vector<std::vector<EventId>>& thread_events,
