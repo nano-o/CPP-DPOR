@@ -2684,6 +2684,69 @@ TEST_CASE("verify handles a deep linear execution without recursive stack growth
   REQUIRE(result.executions_explored == 1);
 }
 
+TEST_CASE("verify handles deep ND execution without recursive stack growth",
+          "[algo][dpor][stack]") {
+  constexpr std::size_t kDepth = 12000;
+
+  Program program;
+  program.threads[1] = [](const ThreadTrace& trace, const std::size_t step)
+      -> std::optional<EventLabel> {
+    if (trace.size() != step) {
+      throw std::logic_error("ND stack regression: thread_trace must track prior ND choices");
+    }
+    if (step < kDepth) {
+      return NondeterministicChoiceLabel{
+          .value = "tick",
+          .choices = {"tick"},
+      };
+    }
+    return std::nullopt;
+  };
+
+  DporConfig config;
+  config.program = program;
+  config.max_depth = kDepth + 1U;
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExplored);
+  REQUIRE(result.full_executions_explored == 1);
+  REQUIRE(result.error_executions_explored == 0);
+  REQUIRE(result.depth_limit_executions_explored == 0);
+  REQUIRE(result.executions_explored == 1);
+}
+
+TEST_CASE("verify handles deep receive execution without recursive stack growth",
+          "[algo][dpor][stack]") {
+  constexpr std::size_t kReceivePairs = 6000;
+
+  Program program;
+  program.threads[1] = [](const ThreadTrace& trace, const std::size_t step)
+      -> std::optional<EventLabel> {
+    if (trace.size() != step / 2U) {
+      throw std::logic_error(
+          "receive stack regression: receive observations must remain in thread_trace");
+    }
+    if (step >= kReceivePairs * 2U) {
+      return std::nullopt;
+    }
+    if ((step % 2U) == 0U) {
+      return SendLabel{.destination = 1, .value = "tick"};
+    }
+    return make_receive_label_from_values<Value>({"tick"});
+  };
+
+  DporConfig config;
+  config.program = program;
+  config.max_depth = (kReceivePairs * 2U) + 1U;
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExplored);
+  REQUIRE(result.full_executions_explored == 1);
+  REQUIRE(result.error_executions_explored == 0);
+  REQUIRE(result.depth_limit_executions_explored == 0);
+  REQUIRE(result.executions_explored == 1);
+}
+
 TEST_CASE("verify_parallel with one worker handles a deep linear execution without recursive stack growth",
           "[algo][dpor][parallel][stack]") {
   constexpr std::size_t kDepth = 12000;

@@ -8,6 +8,69 @@
 
 namespace {
 using namespace dpor::model;
+
+std::vector<ExplorationGraph::EventId> scan_send_event_ids(const ExplorationGraph& graph) {
+  std::vector<ExplorationGraph::EventId> send_ids;
+  for (ExplorationGraph::EventId id = 0; id < graph.event_count(); ++id) {
+    if (is_send(graph.event(id))) {
+      send_ids.push_back(id);
+    }
+  }
+  return send_ids;
+}
+
+std::vector<ExplorationGraph::EventId> scan_unread_send_event_ids(const ExplorationGraph& graph) {
+  std::unordered_set<ExplorationGraph::EventId> consumed_send_ids;
+  for (const auto& [recv_id, source] : graph.reads_from()) {
+    static_cast<void>(recv_id);
+    if (source.is_send()) {
+      consumed_send_ids.insert(source.send_id());
+    }
+  }
+
+  std::vector<ExplorationGraph::EventId> unread_send_ids;
+  for (const auto send_id : scan_send_event_ids(graph)) {
+    if (!consumed_send_ids.contains(send_id)) {
+      unread_send_ids.push_back(send_id);
+    }
+  }
+  return unread_send_ids;
+}
+
+std::vector<ExplorationGraph::EventId> scan_receives_in_destination(
+    const ExplorationGraph& graph, const ExplorationGraph::EventId send_id) {
+  const auto* send = as_send(graph.event(send_id));
+  REQUIRE(send != nullptr);
+
+  std::vector<ExplorationGraph::EventId> receives;
+  for (ExplorationGraph::EventId id = 0; id < graph.event_count(); ++id) {
+    const auto& event = graph.event(id);
+    if (event.thread == send->destination && is_receive(event)) {
+      receives.push_back(id);
+    }
+  }
+  return receives;
+}
+
+void require_indexed_views_match_scan(const ExplorationGraph& graph) {
+  const auto expected_send_ids = scan_send_event_ids(graph);
+  REQUIRE(graph.send_event_ids() == expected_send_ids);
+
+  const auto expected_unread_send_ids = scan_unread_send_event_ids(graph);
+  REQUIRE(graph.unread_send_event_ids() == expected_unread_send_ids);
+
+  std::vector<ExplorationGraph::EventId> unread_from_callback;
+  graph.for_each_unread_send(
+      [&](const ExplorationGraph::EventId send_id) { unread_from_callback.push_back(send_id); });
+  REQUIRE(unread_from_callback == expected_unread_send_ids);
+
+  REQUIRE(graph.any_unread_send([](const ExplorationGraph::EventId) { return true; }) ==
+          !expected_unread_send_ids.empty());
+
+  for (const auto send_id : expected_send_ids) {
+    REQUIRE(graph.receives_in_destination(send_id) == scan_receives_in_destination(graph, send_id));
+  }
+}
 }  // namespace
 
 // --- Insertion order tracking ---
@@ -325,6 +388,39 @@ TEST_CASE("rollback restores overwritten rf assignment and thread-local metadata
   REQUIRE(trace[0] == "x");
   REQUIRE(g.inserted_before_or_equal(s1, r1));
   REQUIRE_FALSE(g.inserted_before_or_equal(r1, s1));
+}
+
+TEST_CASE("indexed send views stay coherent across rf updates rollback and rebind",
+          "[model][exploration_graph][rollback]") {
+  ExplorationGraph g;
+  require_indexed_views_match_scan(g);
+
+  const auto s1 = g.add_event(1, SendLabel{.destination = 2, .value = "x"});
+  const auto s2 = g.add_event(3, SendLabel{.destination = 2, .value = "y"});
+  const auto r1 = g.add_event(2, make_receive_label<Value>());
+  const auto r2 = g.add_event(2, make_nonblocking_receive_label<Value>());
+  require_indexed_views_match_scan(g);
+
+  g.set_reads_from(r1, s1);
+  require_indexed_views_match_scan(g);
+
+  const auto checkpoint = g.checkpoint();
+
+  const auto s3 = g.add_event(1, SendLabel{.destination = 4, .value = "z"});
+  const auto r3 = g.add_event(4, make_receive_label<Value>());
+  g.set_reads_from(r2, s2);
+  g.set_reads_from(r1, s2);
+  g.set_reads_from(r3, s3);
+  require_indexed_views_match_scan(g);
+
+  g.rollback(checkpoint);
+  require_indexed_views_match_scan(g);
+
+  auto owned = g.restrict({s1, s2, r1, r2});
+  require_indexed_views_match_scan(owned);
+
+  owned.rebind_rf_preserving_known_acyclicity(2, 1);
+  require_indexed_views_match_scan(owned);
 }
 
 TEST_CASE("nested checkpoints roll back to their own frontier",

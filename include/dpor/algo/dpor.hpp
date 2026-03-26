@@ -1961,7 +1961,7 @@ class DepthFirstExplorer {
       return;
     }
 
-    if (frame.flag && recv->is_nonblocking()) {
+    if (frame.flag) {
       frame.flag = false;
       const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
       const auto recv_id = graph.add_event(frame.thread_id, *frame.label);
