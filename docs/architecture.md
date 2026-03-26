@@ -83,7 +83,7 @@ exploration engine.
 
 - **`dpor.hpp`** implements the exploration algorithm inspired by Must
   Algorithm 1.
-- **`DporConfigT`** carries the program, depth limit, whole-program
+- **`DporConfigT`** carries the program, DPOR tree-depth limit, whole-program
   communication model, and an optional terminal-execution observer.
 - **`verify()`** performs sequential exploration.
 - **`verify_parallel()`** is an experimental parallel executor built on the
@@ -143,7 +143,7 @@ integration style:
 - **Separation of concerns**: execution validity is defined by the model layer,
   while search strategy lives in the DPOR engine.
 - **Isolated ownership at task boundaries**: parallel tasks own graph values,
-  while worker-local recursion mutates graphs temporarily and restores them via
-  rollback.
+  while worker-local exploration mutates graphs temporarily and restores them
+  via rollback.
 - **Zero global state**: exploration state lives in configs, executors,
   results, and graph values rather than hidden global mutable state.

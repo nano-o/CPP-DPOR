@@ -47,9 +47,10 @@ VerifyResult verify_parallel(const DporConfigT<ValueT>& config,
 Shared `DporConfigT<ValueT>` parameters:
 
 - `program`: the modeled program. This is required.
-- `max_depth{1000}`: maximum explored execution depth. When DPOR reaches
-  `depth >= max_depth`, it publishes a `DepthLimit` terminal execution and
-  does not explore that branch further.
+- `max_depth{1000}`: maximum explored DPOR tree depth. When DPOR reaches
+  `dpor_tree_depth >= max_depth`, it publishes a `DepthLimit` terminal
+  execution and does not explore that branch further. This bounds logical
+  search-tree depth, not current graph size or implementation stack depth.
 - `communication_model{Async}`: communication semantics for consistency
   checking and revisit generation. Supported values are `Async` and `FifoP2P`.
 - `on_terminal_execution{}`: optional callback invoked for each published
@@ -66,9 +67,9 @@ Shared `DporConfigT<ValueT>` parameters:
   `progress_counter_flush_interval` controls how fresh the live execution
   counts are when a snapshot is emitted, and
   `progress_poll_interval_steps` controls how often workers even check whether
-  a throttled report is due. A progress checkpoint currently happens at entry
-  to `visit_impl()`, so it is roughly per explored execution prefix/state, not
-  per terminal execution found.
+  a throttled report is due. A progress checkpoint currently happens when the
+  explorer enters a DPOR state/frame, so it is roughly per explored execution
+  prefix/state, not per terminal execution found.
 
 Parallel exploration adds `ParallelVerifyOptions`:
 
@@ -77,9 +78,9 @@ Parallel exploration adds `ParallelVerifyOptions`:
   does not report a value.
 - `max_queued_tasks{0}`: maximum number of queued spawned tasks. `0` derives a
   small default queue budget of `max_workers * 2`.
-- `spawn_depth_cutoff{0}`: depth gate for task spawning. `0` means no cutoff.
-  Otherwise, a branch is only considered for remote execution when
-  `child_depth <= spawn_depth_cutoff`.
+- `spawn_depth_cutoff{0}`: DPOR tree-depth gate for task spawning. `0` means no
+  cutoff. Otherwise, a branch is only considered for remote execution when
+  `child_dpor_tree_depth <= spawn_depth_cutoff`.
 - `min_fanout{2}`: spawn threshold for branch fanout. If the current choice
   point has fewer than `min_fanout` alternatives, DPOR keeps the work local.
 - `sync_steps{512}`: stop-polling interval. `0` enables the strict mode, where
@@ -148,9 +149,9 @@ Paper-derived examples in current scope are in `tests/dpor_test.cpp` and tagged 
 against an independent exhaustive async oracle in `tests/support/oracle.hpp`.
 When `max_depth` truncates exploration, DPOR publishes depth-limit terminal
 executions and counts them in `VerifyResult::depth_limit_executions_explored`.
-The current exploration code still uses recursive branch traversal, so very
-deep executions may also hit the process stack before reaching the configured
-depth limit.
+`max_depth` is a DPOR tree-depth limit rather than a graph-size limit. The
+current exploration core is iterative, so deep explorations no longer grow the
+process stack with search depth.
 
 If Catch2 is not installed and your environment has internet access, enable fetching:
 

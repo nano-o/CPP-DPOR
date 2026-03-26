@@ -5,7 +5,7 @@ in `include/dpor/algo/dpor.hpp`.
 
 It is no longer a design plan for multiple scheduler variants. The current
 implementation supports one parallel scheduling strategy: a bounded global
-queue with work-first local recursion.
+queue with work-first local exploration.
 
 ## Public API
 
@@ -39,7 +39,7 @@ Current option semantics:
 - `max_workers == 0` means use `std::thread::hardware_concurrency()`, falling
   back to `1` if the runtime reports `0`.
 - `max_queued_tasks == 0` derives to `max_workers * 2`.
-- `spawn_depth_cutoff == 0` means no depth cutoff.
+- `spawn_depth_cutoff == 0` means no DPOR tree-depth cutoff.
 - `min_fanout` gates whether a branch is even considered for remote execution.
 - `sync_steps == 0` enables the strict result-publication path.
 - `sync_steps > 0` reduces synchronization overhead but weakens early-stop
@@ -61,7 +61,7 @@ The parallel executor uses a single global task queue protected by
 Each queued task owns:
 
 - an `ExplorationGraphT<ValueT>`
-- a recursion `depth`
+- a DPOR tree depth
 - an `ExplorationTaskMode` (`Visit` or `VisitIfConsistent`)
 
 No mutable exploration graph state is shared across workers.
@@ -75,22 +75,23 @@ same `worker_loop()` on the calling thread.
 The implemented strategy is work-first, with parallel spawning restricted to
 send backward-revisit branches:
 
-1. ND and receive branches explore all children locally via `ScopedRollback`.
+1. ND and receive branches explore all children locally on one mutable graph
+   through rollback-based iterative frames.
 2. Send branches keep the forward continuation local. Backward-revisit children
    — which are already materialized as independent owned graphs by
    `for_each_backward_revisit_child(...)` — may be enqueued for remote
    execution if `can_spawn(...)` passes. If enqueue fails, they are explored
    locally instead.
 
-`can_spawn(child_depth, fanout)` currently requires:
+`can_spawn(child_dpor_tree_depth, fanout)` currently requires:
 
 - `max_workers > 1`
 - stop not requested
 - `fanout >= min_fanout`
-- `child_depth <= spawn_depth_cutoff` when a cutoff is configured
+- `child_dpor_tree_depth <= spawn_depth_cutoff` when a cutoff is configured
 
 The queue is only a backlog buffer. Workers always prefer continuing local
-rollback-based recursion over waiting for queue space.
+rollback-based exploration over waiting for queue space.
 
 ### Why only send branches spawn
 
@@ -145,13 +146,15 @@ The implementation parallelizes only at existing DPOR branch points.
 
 ### ND Branches
 
-- All choices are explored locally via `ScopedRollback` on the parent graph.
+- All choices are explored locally by iterative rollback-based frames on the
+  parent graph.
 
 ### Receive Branches
 
-- The compatible unread sends are computed once.
+- The compatible unread sends are rescanned on resume from the rolled-back
+  parent graph.
 - Each matching `(recv, send_id)` child and the non-blocking bottom branch are
-  explored locally via `ScopedRollback` on the parent graph.
+  explored locally by iterative rollback-based frames.
 
 ### Send Branches
 
@@ -159,7 +162,7 @@ The implementation parallelizes only at existing DPOR branch points.
 - Backward-revisit children are streamed one by one out of
   `for_each_backward_revisit_child(...)`.
 - Each revisited graph may be enqueued for remote execution; if enqueue fails,
-  it is explored locally.
+  it is explored locally as an owned child context.
 
 This is the sole parallel spawn point. Revisit children are already fully
 materialized owned graphs, so enqueuing them incurs no additional copy.
@@ -167,8 +170,9 @@ materialized owned graphs, so enqueuing them incurs no additional copy.
 ### Block / Reschedule Paths
 
 - Plain `Block` append continues locally.
-- `reschedule_blocked_receive_if_enabled_impl(...)` already materializes an
-  owned unblocked graph and explores it directly on the current worker.
+- Blocked-receive reschedule materializes an owned unblocked graph and explores
+  it on the current worker as a tail-like owned child context at the same DPOR
+  tree depth.
 
 ## Ownership Invariant
 
@@ -182,7 +186,7 @@ attempted through `try_enqueue_owned_task(...)`, the helper:
 1. moves the graph into a temporary task
 2. calls `executor.try_enqueue(task)`
 3. if enqueue fails, moves the graph back out of `task`
-4. falls back to local recursion on the original child
+4. falls back to local exploration on the original child
 
 This matters most on send-revisit children. Earlier versions moved a revisit
 graph into the enqueue attempt and then explored the moved-from object locally
@@ -237,7 +241,8 @@ What is preserved:
 `on_terminal_execution` may be invoked concurrently in parallel mode. Callback
 code must therefore be thread-safe in addition to being deterministic.
 As in sequential mode, published terminal executions include full executions,
-error executions, and branches cut off by `max_depth`.
+error executions, and branches cut off by the `max_depth` DPOR tree-depth
+limit.
 
 `on_progress` may also be invoked from worker threads. Its snapshots report:
 
@@ -277,7 +282,7 @@ Current non-goals and limitations:
 - only one scheduler strategy is implemented
 - no work stealing or per-worker deques
 - no attempt to preserve DFS order once `max_workers > 1`
-- queue bounds only limit queued snapshots, not worker-local recursion state
+- queue bounds only limit queued snapshots, not worker-local exploration state
 - revisit children are still materialized eagerly enough to pay graph-copy cost
 - `sync_steps > 0` deliberately weakens error-stop semantics
 
@@ -300,7 +305,7 @@ The implemented parallel mode is:
 
 - a separate `verify_parallel()` entry point
 - a bounded central queue plus worker pool
-- work-first local recursion with send-revisit handoff
+- work-first local iterative exploration with send-revisit handoff
 - value-based graph handoff only
 - correctness-first, not order-preserving
 

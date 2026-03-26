@@ -125,6 +125,9 @@ struct DporConfigT {
 };
 ```
 
+`max_depth` bounds logical DPOR tree depth, not current graph size or
+implementation stack depth.
+
 The observer receives:
 
 ```cpp
@@ -188,6 +191,8 @@ struct ParallelVerifyOptions {
 };
 ```
 
+`spawn_depth_cutoff` uses the same DPOR tree-depth accounting as `max_depth`.
+
 `VerifyResult` reports:
 
 - `VerifyResultKind::AllExplored`
@@ -202,8 +207,8 @@ and also carries:
 
 If `on_terminal_execution` is set, DPOR calls it with each published terminal
 execution. Terminal executions are full executions, error executions, and
-branches truncated by `max_depth`. DPOR keeps exploring after error terminals
-unless the callback requests `Stop`.
+branches truncated by the `max_depth` DPOR tree-depth limit. DPOR keeps
+exploring after error terminals unless the callback requests `Stop`.
 
 If `on_progress` is set, sequential exploration reports exact live counts.
 Parallel exploration reports exact final counts, and live snapshots may carry
