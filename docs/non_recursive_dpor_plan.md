@@ -1,447 +1,388 @@
-# Non-Recursive DPOR Exploration Plan (Proposed)
+# Non-Recursive DPOR Exploration Implementation
 
-This document is the implementation plan for removing recursion from the DPOR
-exploration engine in `include/dpor/algo/dpor.hpp`.
+This document describes the non-recursive DPOR exploration engine that landed
+in `include/dpor/algo/dpor.hpp`.
 
-The immediate motivation is correctness and robustness: the current recursive
-search can overflow the C++ call stack on deep explorations. The plan below is
-intended to be concrete enough that the next agent can implement it directly.
+Historically this file was an implementation plan. It now documents the
+behavior and structure of the code that replaced the old recursive traversal.
 
-## Problem Statement
+## Why The Change Was Made
 
-Today, the search uses recursion in two different ways:
+The previous DPOR core used C++ recursion in two places:
 
-- in-place DFS recursion on a single mutable `ExplorationGraphT<ValueT>`
-- recursion into a distinct owned child graph via `process_owned_task(...)`
+- ordinary in-place DFS over one mutable `ExplorationGraphT`
+- recursive descent into distinct owned child graphs
 
-The second case is the one that makes stack depth diverge from the size of the
-currently-visited graph. This happens primarily in:
+The second case was the real stack-growth problem. Backward revisits and
+blocked-receive reschedules can recurse into a smaller child graph while the
+parent call chain remains live. In practice, that means C++ stack depth can
+grow far beyond the size of the currently active execution graph.
 
-- backward revisit from the send branch
-- blocked-receive reschedule
+The new implementation removes that recursion and replaces it with an explicit
+stack machine.
 
-In those paths, the child graph can be smaller than the parent, but the parent
-frames remain live on the C++ stack while the child is explored.
+## High-Level Result
 
-## Goals
-
-1. Remove recursion from both `verify()` and `verify_parallel()`.
-2. Preserve DPOR semantics and coverage.
-3. Preserve the current sequential exploration order unless a targeted test
-   proves that a change is intentional and safe.
-4. Keep the hot path rollback-based and avoid full graph copies for ordinary
-   ND / receive / block / send-forward exploration.
-5. Keep per-frame memory small. A frame should store checkpoints and scalar
-   cursors, not whole graph snapshots.
-6. Preserve current observer behavior:
-   - terminal observers see the terminal graph before rollback
-   - `detail::visit(...)` still leaves the caller graph restored
-7. Preserve current DPOR tree-depth accounting:
-   - ordinary forward steps increment `dpor_tree_depth`
-   - backward-revisit children inherit `dpor_tree_depth + 1`
-   - blocked-reschedule keeps the same `dpor_tree_depth`
-
-## Non-Goals
-
-- changing Must semantics
-- redesigning `restrict_masked(...)`, revisit conditions, or consistency logic
-- widening the parallel scheduler policy beyond the current send-revisit spawn
-  point
-- relying on compiler tail-call optimization as the fix
-
-## Memory Constraints
-
-The important distinction is:
-
-- `ExplorationGraphT::Checkpoint` is small and cheap
-- retaining multiple full `ExplorationGraphT` objects is not
-
-Therefore:
-
-- a `FrameStack` of checkpoints is acceptable
-- a generic stack of copied graphs for every branch is not
-
-This plan keeps the normal in-place DFS path on one mutable graph and uses
-small continuation frames. The places where multiple owned graphs may remain
-live are:
-
-- local backward-revisit fallback
-- blocked-receive reschedule after popping the current `Enter` frame
-
-The latter is necessary because replacing the current graph in place would
-invalidate any parent checkpoints still live in the same context. That is a
-conscious compromise for the first landing, because it preserves correctness
-and reviewability.
-
-If stricter "memory proportional to the currently active graph only" behavior
-becomes mandatory, the follow-up work should attack local backward revisits
-and blocked-reschedule replay specifically, not the whole frame design.
-
-## High-Level Design
-
-### 1. `FrameStack`: continuation state within one graph
-
-Introduce an explicit stack of continuation frames that replaces recursive
-`visit_impl(...)` / `visit_if_consistent_impl(...)` calls on a single mutable
-graph.
-
-A frame should contain only:
-
-- a frame kind / phase tag
-- `dpor_tree_depth`
-- `ExplorationTaskMode`
-- an `ExplorationGraphT<ValueT>::Checkpoint`
-- a small number of scalar cursors / flags
-- event ids or thread ids where needed
-
-The frame should not cache large vectors such as:
-
-- ND choice copies
-- compatible-send lists
-- destination-receive lists
-
-Instead, on resume, recompute the branch data from the rolled-back graph and
-skip already-explored siblings by cursor index. This is safe because thread
-callbacks are already required to be deterministic and side-effect-free for the
-same graph state.
-
-### 2. `ContextStack`: owned graph roots only
-
-Keep a narrow context abstraction for the cases where exploration switches to a
-distinct owned graph that cannot be reached via rollback from the current one.
-
-A context owns:
-
-- `ExplorationGraphT<ValueT> graph`
-- its local `FrameStack`
-
-Why a context exists at all:
-
-- backward-revisit children are materialized as restricted+rewired owned graphs
-- if a revisit child is explored locally, the parent send continuation still
-  has to survive until that child returns
-- blocked-reschedule children are materialized as restricted owned graphs, and
-  replacing the current graph in place would invalidate parent rollback
-  checkpoints when the current `Enter` frame is not the only frame in the
-  context
-
-What should not use a new context:
-
-- ordinary ND / receive / block / send-forward recursion
-
-### 3. One driver shared by sequential and parallel
-
-Introduce one internal iterative driver, for example:
+The core traversal is now implemented by:
 
 - `DepthFirstExplorer<ValueT, ExecutorT>`
 
-The driver should be shared by:
+It is shared by:
 
 - `verify()`
 - `detail::visit(...)`
 - `detail::visit_if_consistent(...)`
-- `ParallelExecutor::process_task(...)`
+- parallel worker-owned task processing through the existing executor path
 
-This avoids creating a new divergence between sequential and parallel code
-paths while removing recursion.
+The public exploration APIs and high-level semantics stay the same. The main
+change is internal control flow: the search is now iterative rather than
+recursive.
 
-## Recommended Frame Kinds
+## Main Data Structures
 
-Use a small tagged union or equivalent compact structure. The exact names can
-change, but the state split should stay close to:
+### `ExplorationFrame`
+
+`ExplorationFrame` is the small continuation object used for in-place
+exploration within one mutable graph.
+
+Each frame stores only:
+
+- `kind`
+- `dpor_tree_depth`
+- `mode` (`Visit` or `VisitIfConsistent`)
+- `checkpoint`
+- `cursor`
+- `event_id`
+- `flag`
+
+This is deliberate. The frame does not cache large branch payloads such as ND
+choice vectors or compatible-send lists. On resume, the explorer rolls the
+graph back to the stored checkpoint, recomputes the current next event, and
+uses the scalar cursor to skip already-explored siblings.
+
+That keeps frame memory small and keeps the hot path rollback-based.
+
+### `ExplorationContext`
+
+`ExplorationContext` owns the graph root for one local exploration context plus
+its frame stack.
+
+There are two kinds of contexts:
+
+- a borrowed root graph supplied by the caller
+- an owned child graph created for a branch that cannot be reached by rollback
+  from the current graph
+
+Each context contains:
+
+- either `borrowed_graph` or `owned_graph`
+- `frames`
+
+The explorer maintains a vector of contexts. In the common case there is only
+one current mutable graph. Additional contexts appear only when the algorithm
+must suspend one graph and temporarily explore a distinct owned child graph.
+
+## Frame Kinds That Landed
+
+The landed frame kinds are:
 
 - `Enter`
+- `ExitLinearChild`
 - `ResumeNd`
 - `ResumeReceive`
 - `ResumeSendRevisits`
-- `ResumeSendForward`
-- `ExitLinearChild`
 
-Notes:
+The original design sketch included a separate send-forward resume phase. The
+implementation ended up simpler: once send revisits are exhausted, the same
+frame is converted to `ExitLinearChild` and the ordinary post-send child
+`Enter` frame is pushed immediately. That removed one frame kind without
+changing behavior.
 
-- `Visit` vs `VisitIfConsistent` should be a frame mode, not separate recursive
-  entry points.
-- `ExitLinearChild` is the common "child finished, now rollback my checkpoint
-  and pop" state for simple one-child cases.
+## Control Flow
 
-## Control Flow by Event Kind
+### Entry
 
-### Entry / common checks
+`Enter` is the common entry point for exploring a graph state.
 
-At frame entry:
+At entry the explorer:
 
-1. call `executor.maybe_report_progress()`
-2. honor `stop_requested()`
-3. if mode is `VisitIfConsistent`, run the consistency check and prune on
-   failure
-4. honor `max_depth` as a DPOR tree-depth limit, not a graph-size limit
-5. compute the next event
+1. runs the consistency check if the frame is in `VisitIfConsistent` mode
+2. reports progress through the executor
+3. honors stop requests
+4. checks `max_depth` against `dpor_tree_depth`
+5. computes the next event
+
+If the frame is consistent and should continue, the frame mode is normalized to
+`Visit` so later resumption does not re-run the consistency check unnecessarily.
 
 ### Full terminal
 
-If there is no next event:
-
-1. try blocked-receive reschedule
-2. if reschedule succeeds, pop the current `Enter` frame and push an owned
-   child context rooted at the `unblocked_graph` in `Visit` mode at the same
-   `dpor_tree_depth`
-3. otherwise publish a full execution and pop
+If there is no next event, the explorer first tries blocked-receive
+reschedule. If no reschedule child exists, it publishes a full execution and
+pops the frame.
 
 ### Error
 
-Error remains a local temporary mutation:
+Errors remain a local temporary mutation:
 
-1. take a checkpoint
-2. append the error
+1. checkpoint
+2. append the error event
 3. publish the error terminal
 4. rollback immediately
-5. pop
+5. pop the frame
 
-### Empty ND
+### Empty ND and `Block`
 
-Treat this as a linear child:
+Both are handled as linear children:
 
-1. take a checkpoint
-2. append the ND event
+1. checkpoint
+2. append the event
 3. convert the current frame to `ExitLinearChild`
-4. push a child `Enter` frame with `dpor_tree_depth + 1`
+4. push a child `Enter` at `dpor_tree_depth + 1`
+
+When the child finishes, `ExitLinearChild` rolls back the checkpoint and pops.
 
 ### ND with choices
 
-Use one frame with a scalar cursor:
+Non-empty ND uses `ResumeNd`.
 
-1. save a checkpoint before the ND append
-2. store `tid` and `next_choice_index`
-3. on each resume:
-   - rollback to the checkpoint
-   - recompute the ND label from the graph
-   - if no more choices remain, pop
-   - append the next chosen ND event
-   - push the child frame
+The frame stores:
 
-Do not keep a copied vector of choices in the frame.
+- the checkpoint before the ND append
+- a scalar `cursor` identifying the next choice to explore
+
+On each resume:
+
+1. rollback to the checkpoint
+2. recompute the current ND label from the restored graph
+3. if `cursor` is past the last choice, pop
+4. otherwise append the chosen ND value, increment the cursor, and push the
+   child `Enter` frame
 
 ### Receive
 
-Use the same pattern as ND:
+Receives use `ResumeReceive`.
 
-1. save a checkpoint before the receive append
-2. store `tid`, `next_send_index`, and whether the bottom branch remains
-3. on each resume:
-   - rollback to the checkpoint
-   - recompute the receive label from the graph
-   - rescan unread sends and skip to the indexed compatible sibling
-   - for a real send source: append receive, set `rf`, push child
-   - for the non-blocking bottom branch: append receive, set bottom `rf`, push
-     child
-   - once all siblings are exhausted, pop
+The frame stores:
 
-This intentionally trades some recomputation for bounded frame memory.
+- the checkpoint before the receive append
+- a scalar `cursor` over compatible sends
+- `flag`, which records whether the non-blocking bottom branch is still
+  available
+
+On each resume:
+
+1. rollback to the checkpoint
+2. recompute the current receive label
+3. rescan unread sends and skip to the indexed compatible source
+4. if a real send source is selected, append the receive, bind `rf`, and push
+   a child `VisitIfConsistent` frame
+5. if no send branch remains but the non-blocking bottom branch is still
+   enabled, append the receive, bind bottom `rf`, clear the flag, and push a
+   child `VisitIfConsistent` frame
+6. otherwise pop
+
+This keeps receive frames small and avoids storing send lists in the frame.
 
 ### Send
 
-Send has two logically separate continuations:
+Sends are handled in two phases:
 
-1. backward-revisit children
-2. the ordinary forward continuation after the send
+1. append the send once and switch to `ResumeSendRevisits`
+2. when revisit children are exhausted, push the ordinary forward child
 
-Recommended shape:
+`ResumeSendRevisits` stores:
 
-1. take a checkpoint before the send append
-2. append the send once on the current context graph
-3. convert the frame to `ResumeSendRevisits`
-4. in `ResumeSendRevisits`, stream revisit children one by one out of
-   `for_each_backward_revisit_child(...)`
-5. for each child:
-   - if remote enqueue is allowed and succeeds, continue the same frame
-   - otherwise push a new owned context for local exploration
-6. after revisit children are exhausted, transition to `ResumeSendForward`
-7. in `ResumeSendForward`, push the ordinary child `Enter` frame at
-   `dpor_tree_depth + 1`
-8. when that child returns, rollback the pre-send checkpoint and pop
+- the checkpoint before the send append
+- `event_id` for the live send event
+- `cursor` over destination receives
+- `flag`, which caches whether the executor is allowed to spawn remote tasks
 
-Important:
+The frame uses `next_backward_revisit_child(...)` to stream revisit children
+one at a time. For each revisit child:
 
-- preserve current behavior where backward revisits are considered before the
-  normal post-send continuation
-- do not enqueue ND / receive siblings; keep the current send-only spawn policy
+- if remote enqueue is allowed and succeeds, the frame stays in place and
+  continues with the next child later
+- otherwise the child is explored locally by pushing a new owned context in
+  `VisitIfConsistent` mode
 
-### Block
+When no revisit child remains, the same frame is converted to
+`ExitLinearChild`, and the ordinary post-send child `Enter` frame is pushed at
+`dpor_tree_depth + 1`.
 
-Treat block as a linear child:
+This preserves the previous search order:
 
-1. checkpoint
-2. append `Block`
-3. convert to `ExitLinearChild`
-4. push child `Enter` at `dpor_tree_depth + 1`
+- revisit children first
+- ordinary send-forward continuation after revisits
 
-## API Boundary Behavior
+## Backward Revisit Enumeration
 
-`detail::visit(...)` and `detail::visit_if_consistent(...)` accept a caller
-graph by reference and today leave it restored after return.
+The old code eagerly walked revisit children through recursive control flow.
+The landed code instead splits revisit generation into two helpers:
 
-Preserve that behavior explicitly:
+- `next_backward_revisit_child(...)`
+- `for_each_backward_revisit_child(...)`
 
-- keep an outer rollback guard at the wrapper boundary, or
-- otherwise guarantee that the root borrowed graph is restored on both normal
-  return and exceptions
+`DepthFirstExplorer` uses `next_backward_revisit_child(...)` directly so it can
+resume revisit enumeration from a scalar receive index stored in the frame.
 
-Do not make callers depend on moved-from or permanently mutated input graphs.
+`for_each_backward_revisit_child(...)` remains as a thin utility used by the
+standalone `detail::backward_revisit(...)` helper.
 
-## Parallel Path
+## Blocked-Receive Reschedule
 
-The parallel executor should keep its current ownership model:
+Blocked-receive reschedule is the main area where the landed code intentionally
+deviates from the strictest possible single-graph design.
 
-- queued tasks own their graphs
-- no mutable graph state is shared across workers
+### What the implementation does
 
-The new driver runs inside `ParallelExecutor::process_task(...)`.
+At a full-terminal point, the explorer calls
+`find_blocked_receive_reschedule_child(...)`.
 
-Current spawn policy remains:
+That helper:
+
+1. scans threads in the existing deterministic thread-id order
+2. finds threads whose last event is `Block`
+3. constructs `unblocked_graph` by removing that `Block`
+4. re-runs the thread function on the unblocked graph
+5. requires the result to be a blocking receive with at least one compatible
+   unread send
+6. returns the first such `unblocked_graph`
+
+If a reschedule child is found, `handle_enter_frame()`:
+
+1. records the current `dpor_tree_depth`
+2. pops the current `Enter` frame
+3. pushes the `unblocked_graph` as a new owned context in `Visit` mode at the
+   same `dpor_tree_depth`
+
+This is tail-like, but it is not an in-place graph swap.
+
+### Why it was implemented this way
+
+Replacing the current graph in place would be unsafe when there are parent
+frames below the current `Enter` frame. Those parent frames hold checkpoints
+taken on the original graph, and `rollback()` requires the checkpoint to match
+the graph being rolled back.
+
+So the final implementation keeps blocked-reschedule as an owned child context.
+That avoids recursion and preserves correctness, but it can temporarily keep a
+parent graph and a smaller unblocked child graph alive at the same time.
+
+### How this differs from the ideal memory story
+
+The normal local DFS path uses one mutable graph plus small checkpoint-based
+frames. Blocked-reschedule is one of the exceptions where an additional owned
+graph may remain live temporarily.
+
+That is a deliberate compromise:
+
+- correctness and checkpoint validity were prioritized for the first landing
+- the remaining memory hotspot is narrow and explicit
+
+## DPOR Tree Depth
+
+The old internal variable name `depth` was misleading after the recursion
+removal, so the landed code renames the internal plumbing to
+`dpor_tree_depth`.
+
+`dpor_tree_depth` means logical depth in the DPOR search tree. It does not
+mean:
+
+- current C++ stack depth
+- current frame-stack depth
+- current graph size
+
+The implemented accounting is:
+
+- ordinary forward children use `dpor_tree_depth + 1`
+- backward-revisit children use `dpor_tree_depth + 1`
+- blocked-reschedule keeps the same `dpor_tree_depth`
+
+This is the quantity used by:
+
+- `DporConfigT::max_depth`
+- `ParallelVerifyOptions::spawn_depth_cutoff`
+
+## Root Graph Restoration And Exceptions
+
+The borrowed root graph passed into `detail::visit(...)` and
+`detail::visit_if_consistent(...)` is still restored on return.
+
+That behavior now comes from the iterative unwind rules:
+
+- linear and resumable frames roll back their checkpoints before popping
+- owned child contexts are destroyed when their frame stacks empty
+- error terminals roll back immediately after publication
+
+`DepthFirstExplorer::run_loop()` also catches exceptions, unwinds all remaining
+frames and contexts, and then rethrows. That preserves the previous rollback
+guarantee for callers even in exceptional paths.
+
+## Sequential And Parallel Integration
+
+The same `DepthFirstExplorer` is used in both sequential and parallel
+exploration.
+
+The parallel ownership model is unchanged:
+
+- queued tasks still own their graphs
+- mutable graph state is not shared across workers
+
+The spawn policy is also unchanged:
 
 - only send backward-revisit children may be enqueued remotely
-- all other branching remains local
+- ND and receive siblings remain local
 
-This keeps the current performance rationale from
-`docs/parallel_exploration_implementation.md`.
+If enqueue fails, the owned graph is restored to the caller and explored
+locally.
 
-## Incremental Implementation Plan
+## Memory Characteristics
 
-### Step 1: Add regression tests before the refactor
+The landed design keeps memory low on the common path by relying on:
 
-Add or extend tests covering:
+- one mutable graph per local context
+- small per-frame checkpoints and cursors
+- recomputation of branch data on resume instead of caching vectors
 
-- a deep linear program in `verify()` that would previously risk stack
-  overflow
-- the same program in `verify_parallel(max_workers = 1)`
-- current rollback visibility for full and error terminals
-- exact sequential vs one-worker-parallel execution order
-- current graph restoration after enqueue rejection
+The main cases that can retain multiple full graphs locally are:
 
-The deep test does not need to be huge in debug builds, but it should be large
-enough to catch recursive regressions if recursion accidentally remains.
+- local backward-revisit fallback
+- blocked-receive reschedule
 
-### Step 2: Introduce the frame data structure and the iterative driver
+Those are now isolated exceptions rather than the default exploration
+mechanism.
 
-Create the non-recursive driver in `include/dpor/algo/dpor.hpp`, but do not
-switch all callers yet.
+## Validation Performed For The Landing
 
-Start by supporting:
+The implementation was validated with:
 
-- `Enter`
-- `ExitLinearChild`
-- common terminal publication
-
-This lets the driver handle:
-
-- depth-limit terminal
-- full terminal without reschedule
-- error terminal
-- block
-- empty ND
-
-### Step 3: Fold `VisitIfConsistent` into frame mode
-
-Once the iterative entry path works for simple cases, move the consistency
-check into the frame mode so that:
-
-- `visit_impl(...)`
-- `visit_if_consistent_impl(...)`
-
-stop being distinct recursive engines.
-
-### Step 4: Port ND and receive branching
-
-Move ND and receive from recursion plus `ScopedRollback` to cursor-based frame
-continuations.
-
-Guardrails:
-
-- keep frame memory small
-- recompute siblings from the graph on resume
-- preserve sibling order exactly
-
-### Step 5: Port blocked-reschedule as a tail-like owned child
-
-Replace the current recursive reschedule path with:
-
-- build `unblocked_graph`
-- pop the current `Enter` frame
-- push the unblocked graph as a new owned context at the same `dpor_tree_depth`
-
-This still removes recursion, but it does not eliminate all "smaller graph,
-deeper context stack" behavior yet.
-
-### Step 6: Port send handling and narrow local owned-context use to revisit children
-
-Convert the send branch to the explicit send frame phases described above.
-
-At the end of this step:
-
-- local backward-revisit fallback and blocked-reschedule tail branches are the
-  only places that still need a new owned context
-- ordinary forward DFS should no longer recurse anywhere
-
-### Step 7: Switch all entry points to the new driver
-
-After the iterative driver covers all cases:
-
-- make `verify()` use it
-- make `detail::visit(...)` use it
-- make `detail::visit_if_consistent(...)` use it
-- make `ParallelExecutor::process_task(...)` use it
-
-### Step 8: Remove the recursive helpers
-
-Delete or reduce to thin wrappers:
-
-- `recurse_graph(...)`
-- `process_owned_task(...)`
-- `explore_branch(...)`
-- recursive-only `visit_impl(...)` control flow
-
-Leave helper extraction in place if it still improves readability, but the
-driver itself should be iterative.
-
-## Validation Plan
-
-Minimum required validation:
-
-- `cmake --preset debug`
-- `cmake --build --preset debug`
-- `ctest --preset debug`
-- `cmake --preset asan`
-- `cmake --build --preset asan`
+- `ctest --preset debug -R dpor_dpor_test`
 - `ctest --preset asan`
 - `scripts/run_tsan.sh`
 
-Targeted performance sanity checks:
+The landing also added deep linear regression coverage in
+`tests/dpor_test.cpp` for:
 
-- compare sequential runtime on a deep linear program before and after
-- run the documented 2PC timeout benchmark smoke test
-- confirm `verify_parallel(max_workers = 1)` still matches sequential exactly
+- `verify()`
+- `verify_parallel()` with `max_workers = 1`
 
-## Rejected Approaches
+The documented two-phase-commit DPOR benchmark smoke workload was also used as
+a sanity check that one-worker parallel mode stayed close to sequential mode.
 
-Rejected for this landing:
+## Remaining Trade-Offs
 
-- relying on compiler tail-call optimization
-- a generic stack of copied `ExplorationTask` graphs for all sequential
-  exploration
-- storing whole sibling vectors in frames
-- enqueuing ND / receive siblings for parallel exploration
+The recursion is gone from the core DPOR exploration engine, but one trade-off
+remains explicit: local exploration can still temporarily retain multiple full
+graphs when the algorithm must suspend one graph and visit another owned child
+graph.
 
-## Open Follow-Up
+Today that applies to:
 
-The remaining memory hotspot after this landing will be nested local
-backward-revisit fallback, because that still retains parent and child owned
-graphs simultaneously.
+- local backward revisits
+- blocked-receive reschedules
 
-If that becomes a practical problem, the next design target should be:
-
-- replace local revisit contexts with a replay / recompute scheme, or
-- intentionally change local revisit traversal order to avoid suspended parent
-  graphs
-
-That should be treated as a follow-up optimization after the non-recursive
-landing is correct and fully tested.
+If future work needs stricter "memory proportional only to the currently
+active graph" behavior, those two paths are the right place to focus. The main
+iterative frame machine is already structured so that such follow-up work can
+be targeted without reintroducing recursion.

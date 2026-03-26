@@ -88,6 +88,9 @@ exploration engine.
 - **`verify()`** performs sequential exploration.
 - **`verify_parallel()`** is an experimental parallel executor built on the
   same DPOR core and configuration.
+- The current exploration core is iterative: one mutable graph is explored
+  through explicit continuation frames, with owned child contexts only for
+  branches that cannot be reached by rollback from the current graph.
 - Exploration proceeds over consistent execution graphs and includes:
   - forward branching on enabled events
   - Must-style internal `Block` insertion for unsatisfied blocking receives

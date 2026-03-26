@@ -78,8 +78,8 @@ send backward-revisit branches:
 1. ND and receive branches explore all children locally on one mutable graph
    through rollback-based iterative frames.
 2. Send branches keep the forward continuation local. Backward-revisit children
-   — which are already materialized as independent owned graphs by
-   `for_each_backward_revisit_child(...)` — may be enqueued for remote
+   — which are materialized one at a time by
+   `next_backward_revisit_child(...)` inside the iterative explorer — may be enqueued for remote
    execution if `can_spawn(...)` passes. If enqueue fails, they are explored
    locally instead.
 
@@ -95,11 +95,11 @@ rollback-based exploration over waiting for queue space.
 
 ### Why only send branches spawn
 
-ND and receive branches use in-place mutation with `ScopedRollback` to avoid
-graph copies. Enqueuing a sibling from these branches requires copying the
-parent graph, which is pure overhead. Send backward-revisit children, by
-contrast, are already fully materialized owned graphs (via `restrict_masked` +
-`with_rf`), so enqueuing them costs no additional copy.
+ND and receive branches use in-place mutation with explicit checkpoints and
+iterative rollback-based frames to avoid graph copies. Enqueuing a sibling from
+these branches requires copying the parent graph, which is pure overhead. Send
+backward-revisit children, by contrast, are already fully materialized owned
+graphs, so enqueuing them costs no additional copy.
 
 On the 4-participant no-crash 2PC timeout benchmark, restricting parallelism to
 send branches is neutral to ~8% faster across 1-20 workers compared to also
@@ -160,7 +160,7 @@ The implementation parallelizes only at existing DPOR branch points.
 
 - The worker appends the send locally and keeps the forward continuation local.
 - Backward-revisit children are streamed one by one out of
-  `for_each_backward_revisit_child(...)`.
+  `next_backward_revisit_child(...)` as the `ResumeSendRevisits` frame advances.
 - Each revisited graph may be enqueued for remote execution; if enqueue fails,
   it is explored locally as an owned child context.
 

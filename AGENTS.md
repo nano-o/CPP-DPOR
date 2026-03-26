@@ -63,7 +63,7 @@ This is required to preserve DPOR soundness/completeness assumptions.
 
 ## Consistency Invariants Policy
 
-- Every graph that is recursively explored by DPOR (`visit`) must satisfy full consistency (`consistent(G)`), with no issue-code exemptions.
+- Every graph explored by DPOR (`visit`) must satisfy full consistency (`consistent(G)`), with no issue-code exemptions.
 - Intermediate helper constructions (e.g., transient graphs during restrict/remap/revisit computation) may be partial only as internal artifacts.
 - No helper/partial graph may be emitted as a complete execution, or used as an exploration state, unless it passes full consistency.
 
@@ -128,7 +128,8 @@ The engine in `include/dpor/algo/dpor.hpp` implements **Algorithm 1** from the M
 
 - `verify()` — sequential DFS entry point, returns `VerifyResult` (`AllExplored` / `Stopped`) plus counts for full, error, and depth-limit terminal executions
 - `verify_parallel()` — experimental parallel exploration with configurable worker threads
-- `visit()` — recursive exploration of consistent executions
+- `visit()` — iterative exploration of consistent executions via the internal
+  frame/context stack machine
 - `backward_revisit()` — identifies alternative interleavings or message matches
 - `DporConfigT` — configuration: program, max_depth, communication_model, terminal-execution observer callback (`on_terminal_execution`; legacy alias `on_execution`), and optional progress reporting
 - `ParallelVerifyOptions` — parallel tuning: `max_workers`, `max_queued_tasks`, `spawn_depth_cutoff`, `min_fanout`, `sync_steps`, `progress_counter_flush_interval`, `progress_poll_interval_steps`

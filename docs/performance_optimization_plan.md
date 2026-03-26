@@ -1,6 +1,17 @@
 # Performance Optimization Plan
 
-This is the single source of truth for DPOR performance optimization work. It covers diagnosis, phased implementation, measurement results, and future plans.
+This is the single source of truth for DPOR performance optimization work. It
+covers diagnosis, phased implementation, measurement results, and future
+plans.
+
+Historical note:
+
+- The current DPOR exploration core is already iterative (`DepthFirstExplorer`)
+  and no longer uses recursive `visit()` control flow.
+- Older sections below preserve the terminology and design assumptions that
+  were current when those measurements and plans were written. References to
+  recursive `visit()` or to "introducing" local rollback are historical unless
+  a section explicitly says otherwise.
 
 ## Constraint
 
@@ -8,10 +19,13 @@ Different parallel `visit()` calls must not share mutable exploration state.
 
 That implies two distinct execution contexts:
 
-- worker-local recursion, where temporary mutation plus rollback is allowed
+- worker-local iterative exploration, where temporary mutation plus rollback is
+  allowed
 - task-spawn boundaries, where a worker must hand off an isolated snapshot
 
-Today, the by-value `visit()` / `visit_if_consistent()` style is already the natural task-spawn boundary interface: a caller can hand an owned graph to a worker without sharing mutable state. If local rollback is introduced later, that should remain an internal optimization inside one worker rather than a change to the spawn-boundary ownership model.
+Today, queued tasks still use owned graphs at the task-spawn boundary, while
+the local worker path uses checkpoint/rollback inside the iterative explorer.
+That separation should remain in place for future performance work.
 
 ## Diagnosis
 
@@ -347,7 +361,7 @@ After the Phase 4 measurements, this is now the most plausible next major step. 
 Phase 5 scope:
 
 - remove full-graph value copies from the common forward branches in `visit()`
-- keep all mutation worker-local to one recursion stack
+- keep all mutation worker-local to one exploration stack
 - preserve the current revisit logic (`restrict()`, `with_rf()`, `revisit_condition()`, `backward_revisit()`) except for minimal signature adjustments needed to call the new recursion helper
 - preserve the current by-value ownership model at the task-spawn boundary for any future parallel search
 
@@ -355,7 +369,7 @@ Phase 5 non-goals:
 
 - do not redesign revisit materialization yet; that remains Phase 6
 - do not try to preserve or incrementally extend `PorfCache` across rollback in the first implementation
-- do not weaken the rule that every graph recursively explored by `visit()` must already be fully consistent
+- do not weaken the rule that every graph explored by `visit()` must already be fully consistent
 - do not introduce shared mutable graph state across workers
 
 Implementation plan:
@@ -377,9 +391,9 @@ Implementation shape:
 
 1. keep rollback state inside `ExplorationGraphT`; it is worker-local bookkeeping, not part of the graph's logical value
 2. make `Checkpoint` token-based rather than stack-based:
-   - each recursive call frame takes one checkpoint before mutating
+   - each worker-local exploration frame takes one checkpoint before mutating
    - `rollback(token)` undoes mutations back to that token's frontier
-   - recursion gives the needed LIFO behavior naturally, without a global checkpoint stack API
+   - the worker-local exploration stack gives the needed LIFO behavior naturally, without a global checkpoint stack API
 3. add an event-append undo log that records enough state to undo one `add_event()`:
    - appended event id
    - thread id
@@ -413,7 +427,7 @@ Landing 1 tests:
 - append one event, then roll back to the empty graph
 - append a receive, assign `rf`, then roll back and confirm both the event and its `rf` entry disappear
 - overwrite an existing `rf` entry, then roll back and confirm the previous source is restored
-- token-based checkpoints compose correctly across nested recursive use; one explicit nested-checkpoint unit test is enough, but the implementation does not need a separate checkpoint stack
+- token-based checkpoints compose correctly across nested LIFO use; one explicit nested-checkpoint unit test is enough, but the implementation does not need a separate checkpoint stack
 - `thread_event_count()`, `last_event_id()`, `thread_trace()`, insertion order, and `inserted_before_or_equal()` all match the pre-mutation state after rollback
 - `known_acyclic_` and `pending_fresh_receive_id_` are restored correctly across rollback
 - checkpoint -> append receive -> assign `rf` -> rollback -> append a different receive -> assign a different `rf` source still preserves correct `known_acyclic_` tracking on the restored graph
@@ -781,7 +795,7 @@ Phase 6 closeout:
 2. defer Landing 3 unless a fresh profile makes `restrict()` / blocked-receive materialization dominant again
 3. move the next performance phase toward `thread_trace()`, unread-send tracking, and related repeatedly recomputed derived state
 
-## Suggested Landing Order
+## Recorded Landing Order
 
 1. example-local structured `ValueT`
 2. dense storage for clearly dense event-ID-indexed fields
@@ -798,14 +812,16 @@ Phase 6 closeout:
 
 ## Why This Order
 
-This order balances:
+This order reflects the sequence that was preferred while Phases 0-6 were being
+landed. It balances:
 
 - immediate wins
 - implementation safety
 - compatibility with future parallel search
 - preservation of current correctness and diagnostics
 
-It also avoids paying the complexity cost of a rollback-based redesign before the cheaper and more local wins have been measured.
+At the time, it also avoided paying the complexity cost of a rollback-based
+redesign before the cheaper and more local wins had been measured.
 
 After Phase 2, the event-ID cleanup removed a large chunk of graph-copy overhead, so Phases 5 and 6 needed to stay perf-gated. After Phase 4, that gating pointed toward Phase 5: Phase 4 fixed the forward-path cycle/PORF structure cleanly, but the remaining profile was still too allocator-heavy for more PORF-local work. Phase 5 delivered the forward-path copy elimination. Phase 5.5 cleaned up the newly exposed hash-map and reallocation hotspots. Phase 6 then removed the obvious revisit-only extra materialization costs and paid off. The remaining profile shape no longer points first at `revisit_condition()` materialization; it now points more strongly at repeatedly recomputed derived state such as `thread_trace()`, unread-send discovery, and the remaining PORF / restriction work.
 
