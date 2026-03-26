@@ -36,10 +36,10 @@ frames remain live on the C++ stack while the child is explored.
 6. Preserve current observer behavior:
    - terminal observers see the terminal graph before rollback
    - `detail::visit(...)` still leaves the caller graph restored
-7. Preserve current depth accounting:
-   - ordinary forward steps increment `depth`
-   - backward-revisit children inherit `depth + 1`
-   - blocked-reschedule keeps the same `depth`
+7. Preserve current DPOR tree-depth accounting:
+   - ordinary forward steps increment `dpor_tree_depth`
+   - backward-revisit children inherit `dpor_tree_depth + 1`
+   - blocked-reschedule keeps the same `dpor_tree_depth`
 
 ## Non-Goals
 
@@ -88,7 +88,7 @@ graph.
 A frame should contain only:
 
 - a frame kind / phase tag
-- `depth`
+- `dpor_tree_depth`
 - `ExplorationTaskMode`
 - an `ExplorationGraphT<ValueT>::Checkpoint`
 - a small number of scalar cursors / flags
@@ -174,7 +174,7 @@ At frame entry:
 2. honor `stop_requested()`
 3. if mode is `VisitIfConsistent`, run the consistency check and prune on
    failure
-4. honor `max_depth`
+4. honor `max_depth` as a DPOR tree-depth limit, not a graph-size limit
 5. compute the next event
 
 ### Full terminal
@@ -184,7 +184,7 @@ If there is no next event:
 1. try blocked-receive reschedule
 2. if reschedule succeeds, pop the current `Enter` frame and push an owned
    child context rooted at the `unblocked_graph` in `Visit` mode at the same
-   `depth`
+   `dpor_tree_depth`
 3. otherwise publish a full execution and pop
 
 ### Error
@@ -204,7 +204,7 @@ Treat this as a linear child:
 1. take a checkpoint
 2. append the ND event
 3. convert the current frame to `ExitLinearChild`
-4. push a child `Enter` frame with `depth + 1`
+4. push a child `Enter` frame with `dpor_tree_depth + 1`
 
 ### ND with choices
 
@@ -256,7 +256,8 @@ Recommended shape:
    - if remote enqueue is allowed and succeeds, continue the same frame
    - otherwise push a new owned context for local exploration
 6. after revisit children are exhausted, transition to `ResumeSendForward`
-7. in `ResumeSendForward`, push the ordinary child `Enter` frame at `depth + 1`
+7. in `ResumeSendForward`, push the ordinary child `Enter` frame at
+   `dpor_tree_depth + 1`
 8. when that child returns, rollback the pre-send checkpoint and pop
 
 Important:
@@ -272,7 +273,7 @@ Treat block as a linear child:
 1. checkpoint
 2. append `Block`
 3. convert to `ExitLinearChild`
-4. push child `Enter` at `depth + 1`
+4. push child `Enter` at `dpor_tree_depth + 1`
 
 ## API Boundary Behavior
 
@@ -366,7 +367,7 @@ Replace the current recursive reschedule path with:
 
 - build `unblocked_graph`
 - pop the current `Enter` frame
-- push the unblocked graph as a new owned context at the same depth
+- push the unblocked graph as a new owned context at the same `dpor_tree_depth`
 
 This still removes recursion, but it does not eliminate all "smaller graph,
 deeper context stack" behavior yet.

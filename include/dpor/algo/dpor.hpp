@@ -174,6 +174,7 @@ using ExecutionObserverT = TerminalExecutionObserverT<ValueT>;
 template <typename ValueT>
 struct DporConfigT {
   ProgramT<ValueT> program;
+  // Bounds DPOR tree depth, not current graph size or implementation stack depth.
   std::size_t max_depth{1000};
   model::CommunicationModel communication_model{model::CommunicationModel::Async};
   TerminalExecutionObserverT<ValueT> on_terminal_execution{};
@@ -189,6 +190,7 @@ struct DporConfigT {
 struct ParallelVerifyOptions {
   std::size_t max_workers{0};
   std::size_t max_queued_tasks{0};
+  // Uses the same DPOR tree-depth accounting as max_depth.
   std::size_t spawn_depth_cutoff{0};
   std::size_t min_fanout{2};
   // Workers read the shared stop flag only every sync_steps stop_requested()
@@ -810,22 +812,27 @@ template <typename ValueT>
 
 enum class ExplorationTaskMode : std::uint8_t { Visit, VisitIfConsistent };
 
+// DPOR tree depth is logical search-tree distance from the root:
+// ordinary forward steps and backward revisits increment it by one, while
+// blocked-reschedule preserves it because no new event is added.
 template <typename ValueT>
 struct ExplorationTask {
   model::ExplorationGraphT<ValueT> graph;
-  std::size_t depth{0};
+  std::size_t dpor_tree_depth{0};
   ExplorationTaskMode mode{ExplorationTaskMode::Visit};
 };
 
 template <typename ValueT, typename ExecutorT>
 inline void visit_impl(const ProgramT<ValueT>& program, model::ExplorationGraphT<ValueT>& graph,
-                       ExecutorT& executor, const DporConfigT<ValueT>& config, std::size_t depth,
+                       ExecutorT& executor, const DporConfigT<ValueT>& config,
+                       std::size_t dpor_tree_depth,
                        const std::vector<model::ThreadId>& thread_ids);
 
 template <typename ValueT, typename ExecutorT>
 inline void visit_if_consistent_impl(const ProgramT<ValueT>& program,
                                      model::ExplorationGraphT<ValueT>& graph, ExecutorT& executor,
-                                     const DporConfigT<ValueT>& config, std::size_t depth,
+                                     const DporConfigT<ValueT>& config,
+                                     std::size_t dpor_tree_depth,
                                      const std::vector<model::ThreadId>& thread_ids);
 
 template <typename ValueT>
@@ -872,7 +879,8 @@ class SequentialExecutor {
     return true;
   }
 
-  [[nodiscard]] bool can_spawn(std::size_t /*depth*/, std::size_t /*fanout*/) const noexcept {
+  [[nodiscard]] bool can_spawn(std::size_t /*dpor_tree_depth*/,
+                               std::size_t /*fanout*/) const noexcept {
     return false;
   }
 
@@ -961,7 +969,7 @@ class ParallelExecutor {
       std::lock_guard lock(queue_mutex_);
       task_queue_.push(ExplorationTask<ValueT>{
           .graph = model::ExplorationGraphT<ValueT>{},
-          .depth = 0,
+          .dpor_tree_depth = 0,
           .mode = ExplorationTaskMode::Visit,
       });
     }
@@ -1069,14 +1077,16 @@ class ParallelExecutor {
     return true;
   }
 
-  [[nodiscard]] bool can_spawn(const std::size_t child_depth, const std::size_t fanout) noexcept {
+  [[nodiscard]] bool can_spawn(const std::size_t child_dpor_tree_depth,
+                               const std::size_t fanout) noexcept {
     if (max_workers_ <= 1 || stop_requested()) {
       return false;
     }
     if (fanout < min_fanout_) {
       return false;
     }
-    if (options_.spawn_depth_cutoff != 0 && child_depth > options_.spawn_depth_cutoff) {
+    if (options_.spawn_depth_cutoff != 0 &&
+        child_dpor_tree_depth > options_.spawn_depth_cutoff) {
       return false;
     }
     return true;
@@ -1214,12 +1224,12 @@ class ParallelExecutor {
     }
 
     if (task.mode == ExplorationTaskMode::VisitIfConsistent) {
-      visit_if_consistent_impl(config_.program, task.graph, *this, config_, task.depth,
+      visit_if_consistent_impl(config_.program, task.graph, *this, config_, task.dpor_tree_depth,
                                thread_ids_);
       return;
     }
 
-    visit_impl(config_.program, task.graph, *this, config_, task.depth, thread_ids_);
+    visit_impl(config_.program, task.graph, *this, config_, task.dpor_tree_depth, thread_ids_);
   }
 
   struct WorkerState {
@@ -1377,11 +1387,11 @@ class ParallelExecutor {
 template <typename ValueT, typename ExecutorT>
 [[nodiscard]] inline bool try_enqueue_owned_task(ExecutorT& executor,
                                                  model::ExplorationGraphT<ValueT>& graph,
-                                                 const std::size_t depth,
+                                                 const std::size_t dpor_tree_depth,
                                                  const ExplorationTaskMode mode) {
   ExplorationTask<ValueT> task{
       .graph = std::move(graph),
-      .depth = depth,
+      .dpor_tree_depth = dpor_tree_depth,
       .mode = mode,
   };
   if (executor.try_enqueue(task)) {
@@ -1407,18 +1417,18 @@ struct ExplorationFrame {
   using EventId = typename model::ExplorationGraphT<ValueT>::EventId;
 
   ExplorationFrameKind kind{ExplorationFrameKind::Enter};
-  std::size_t depth{0};
+  std::size_t dpor_tree_depth{0};
   ExplorationTaskMode mode{ExplorationTaskMode::Visit};
   Checkpoint checkpoint{};
   std::size_t cursor{0};
   EventId event_id{model::ExplorationGraphT<ValueT>::kNoSource};
   bool flag{false};
 
-  [[nodiscard]] static ExplorationFrame enter(const std::size_t frame_depth,
+  [[nodiscard]] static ExplorationFrame enter(const std::size_t frame_dpor_tree_depth,
                                               const ExplorationTaskMode frame_mode) {
     return ExplorationFrame{
         .kind = ExplorationFrameKind::Enter,
-        .depth = frame_depth,
+        .dpor_tree_depth = frame_dpor_tree_depth,
         .mode = frame_mode,
     };
   }
@@ -1649,12 +1659,12 @@ class DepthFirstExplorer {
                      const std::vector<model::ThreadId>& thread_ids)
       : program_(program), executor_(executor), config_(config), thread_ids_(thread_ids) {}
 
-  void run(Graph& graph, const std::size_t depth, const ExplorationTaskMode mode) {
+  void run(Graph& graph, const std::size_t dpor_tree_depth, const ExplorationTaskMode mode) {
     contexts_.clear();
     contexts_.push_back(ExplorationContext<ValueT>{
         .borrowed_graph = &graph,
         .owned_graph = std::nullopt,
-        .frames = {ExplorationFrame<ValueT>::enter(depth, mode)},
+        .frames = {ExplorationFrame<ValueT>::enter(dpor_tree_depth, mode)},
     });
     run_loop();
   }
@@ -1684,11 +1694,12 @@ class DepthFirstExplorer {
     pop_context_if_empty(contexts_);
   }
 
-  void push_owned_context(Graph graph, const std::size_t depth, const ExplorationTaskMode mode) {
+  void push_owned_context(Graph graph, const std::size_t dpor_tree_depth,
+                          const ExplorationTaskMode mode) {
     contexts_.push_back(ExplorationContext<ValueT>{
         .borrowed_graph = nullptr,
         .owned_graph = std::move(graph),
-        .frames = {ExplorationFrame<ValueT>::enter(depth, mode)},
+        .frames = {ExplorationFrame<ValueT>::enter(dpor_tree_depth, mode)},
     });
   }
 
@@ -1778,7 +1789,7 @@ class DepthFirstExplorer {
       return;
     }
 
-    if (frame.depth >= config_.max_depth) {
+    if (frame.dpor_tree_depth >= config_.max_depth) {
       static_cast<void>(executor_.publish_depth_limit_execution(graph));
       pop_top_frame();
       return;
@@ -1792,9 +1803,10 @@ class DepthFirstExplorer {
         return;
       }
       if (reschedule.kind == BlockedReceiveRescheduleKind::Ready) {
-        const auto depth = frame.depth;
+        const auto dpor_tree_depth = frame.dpor_tree_depth;
         pop_top_frame();
-        push_owned_context(std::move(*reschedule.graph), depth, ExplorationTaskMode::Visit);
+        push_owned_context(std::move(*reschedule.graph), dpor_tree_depth,
+                           ExplorationTaskMode::Visit);
         return;
       }
 
@@ -1821,7 +1833,8 @@ class DepthFirstExplorer {
         frame.kind = ExplorationFrameKind::ExitLinearChild;
         frame.checkpoint = checkpoint;
         context.frames.push_back(
-            ExplorationFrame<ValueT>::enter(frame.depth + 1U, ExplorationTaskMode::Visit));
+            ExplorationFrame<ValueT>::enter(frame.dpor_tree_depth + 1U,
+                                            ExplorationTaskMode::Visit));
         return;
       }
 
@@ -1849,7 +1862,7 @@ class DepthFirstExplorer {
       frame.checkpoint = checkpoint;
       frame.cursor = 0;
       frame.event_id = send_id;
-      frame.flag = executor_.can_spawn(frame.depth + 1U, 2);
+      frame.flag = executor_.can_spawn(frame.dpor_tree_depth + 1U, 2);
       return;
     }
 
@@ -1859,7 +1872,8 @@ class DepthFirstExplorer {
       frame.kind = ExplorationFrameKind::ExitLinearChild;
       frame.checkpoint = checkpoint;
       context.frames.push_back(
-          ExplorationFrame<ValueT>::enter(frame.depth + 1U, ExplorationTaskMode::Visit));
+          ExplorationFrame<ValueT>::enter(frame.dpor_tree_depth + 1U,
+                                          ExplorationTaskMode::Visit));
       return;
     }
   }
@@ -1889,10 +1903,10 @@ class DepthFirstExplorer {
     auto nd_label = *nd;
     nd_label.value = nd->choices[frame.cursor];
     ++frame.cursor;
-    const auto child_depth = frame.depth + 1U;
+    const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
     static_cast<void>(graph.add_event(tid, model::EventLabelT<ValueT>{std::move(nd_label)}));
     context.frames.push_back(
-        ExplorationFrame<ValueT>::enter(child_depth, ExplorationTaskMode::Visit));
+        ExplorationFrame<ValueT>::enter(child_dpor_tree_depth, ExplorationTaskMode::Visit));
   }
 
   void handle_resume_receive_frame() {
@@ -1920,11 +1934,12 @@ class DepthFirstExplorer {
       }
       if (compatible_index == frame.cursor) {
         ++frame.cursor;
-        const auto child_depth = frame.depth + 1U;
+        const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
         const auto recv_id = graph.add_event(tid, label);
         graph.set_reads_from(recv_id, send_id);
         context.frames.push_back(
-            ExplorationFrame<ValueT>::enter(child_depth, ExplorationTaskMode::VisitIfConsistent));
+            ExplorationFrame<ValueT>::enter(child_dpor_tree_depth,
+                                            ExplorationTaskMode::VisitIfConsistent));
         return;
       }
       ++compatible_index;
@@ -1932,11 +1947,12 @@ class DepthFirstExplorer {
 
     if (frame.flag && recv->is_nonblocking()) {
       frame.flag = false;
-      const auto child_depth = frame.depth + 1U;
+      const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
       const auto recv_id = graph.add_event(tid, label);
       graph.set_reads_from_bottom(recv_id);
       context.frames.push_back(
-          ExplorationFrame<ValueT>::enter(child_depth, ExplorationTaskMode::VisitIfConsistent));
+          ExplorationFrame<ValueT>::enter(child_dpor_tree_depth,
+                                          ExplorationTaskMode::VisitIfConsistent));
       return;
     }
 
@@ -1958,21 +1974,22 @@ class DepthFirstExplorer {
     frame.cursor = next.next_receive_index;
 
     if (next.child.has_value()) {
-      const auto child_depth = frame.depth + 1U;
+      const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
       auto revisited = std::move(*next.child);
       if (frame.flag &&
-          try_enqueue_owned_task<ValueT>(executor_, revisited, child_depth,
+          try_enqueue_owned_task<ValueT>(executor_, revisited, child_dpor_tree_depth,
                                          ExplorationTaskMode::VisitIfConsistent)) {
         return;
       }
-      push_owned_context(std::move(revisited), child_depth,
+      push_owned_context(std::move(revisited), child_dpor_tree_depth,
                          ExplorationTaskMode::VisitIfConsistent);
       return;
     }
 
     frame.kind = ExplorationFrameKind::ExitLinearChild;
     context.frames.push_back(
-        ExplorationFrame<ValueT>::enter(frame.depth + 1U, ExplorationTaskMode::Visit));
+        ExplorationFrame<ValueT>::enter(frame.dpor_tree_depth + 1U,
+                                        ExplorationTaskMode::Visit));
   }
 
   const ProgramT<ValueT>& program_;
@@ -1985,27 +2002,29 @@ class DepthFirstExplorer {
 template <typename ValueT, typename ExecutorT>
 inline void visit_if_consistent_impl(const ProgramT<ValueT>& program,
                                      model::ExplorationGraphT<ValueT>& graph, ExecutorT& executor,
-                                     const DporConfigT<ValueT>& config, const std::size_t depth,
+                                     const DporConfigT<ValueT>& config,
+                                     const std::size_t dpor_tree_depth,
                                      const std::vector<model::ThreadId>& thread_ids) {
   DepthFirstExplorer<ValueT, ExecutorT> explorer(program, executor, config, thread_ids);
-  explorer.run(graph, depth, ExplorationTaskMode::VisitIfConsistent);
+  explorer.run(graph, dpor_tree_depth, ExplorationTaskMode::VisitIfConsistent);
 }
 
 template <typename ValueT, typename ExecutorT>
 inline void visit_impl(const ProgramT<ValueT>& program, model::ExplorationGraphT<ValueT>& graph,
                        ExecutorT& executor, const DporConfigT<ValueT>& config,
-                       const std::size_t depth, const std::vector<model::ThreadId>& thread_ids) {
+                       const std::size_t dpor_tree_depth,
+                       const std::vector<model::ThreadId>& thread_ids) {
   DepthFirstExplorer<ValueT, ExecutorT> explorer(program, executor, config, thread_ids);
-  explorer.run(graph, depth, ExplorationTaskMode::Visit);
+  explorer.run(graph, dpor_tree_depth, ExplorationTaskMode::Visit);
 }
 
 template <typename ValueT>
 inline void visit_if_consistent(const ProgramT<ValueT>& program,
                                 model::ExplorationGraphT<ValueT>& graph, VerifyResult& result,
-                                const DporConfigT<ValueT>& config, std::size_t depth,
+                                const DporConfigT<ValueT>& config, std::size_t dpor_tree_depth,
                                 const std::vector<model::ThreadId>& thread_ids) {
   SequentialExecutor<ValueT> executor(result, config);
-  visit_if_consistent_impl(program, graph, executor, config, depth, thread_ids);
+  visit_if_consistent_impl(program, graph, executor, config, dpor_tree_depth, thread_ids);
 }
 
 template <typename ValueT>
@@ -2013,24 +2032,26 @@ inline void backward_revisit(const ProgramT<ValueT>& program,
                              const model::ExplorationGraphT<ValueT>& graph,
                              typename model::ExplorationGraphT<ValueT>::EventId send_id,
                              VerifyResult& result, const DporConfigT<ValueT>& config,
-                             std::size_t depth, const std::vector<model::ThreadId>& thread_ids) {
+                             std::size_t dpor_tree_depth,
+                             const std::vector<model::ThreadId>& thread_ids) {
   SequentialExecutor<ValueT> executor(result, config);
   DepthFirstExplorer<ValueT, SequentialExecutor<ValueT>> explorer(program, executor, config,
                                                                   thread_ids);
   for_each_backward_revisit_child(
       graph, send_id, config.communication_model, [&executor]() { return executor.stop_requested(); },
       [&](model::ExplorationGraphT<ValueT> revisited) {
-        explorer.run(revisited, depth, ExplorationTaskMode::VisitIfConsistent);
+        explorer.run(revisited, dpor_tree_depth, ExplorationTaskMode::VisitIfConsistent);
         return !executor.stop_requested();
       });
 }
 
 template <typename ValueT>
 inline void visit(const ProgramT<ValueT>& program, model::ExplorationGraphT<ValueT>& graph,
-                  VerifyResult& result, const DporConfigT<ValueT>& config, std::size_t depth,
+                  VerifyResult& result, const DporConfigT<ValueT>& config,
+                  std::size_t dpor_tree_depth,
                   const std::vector<model::ThreadId>& thread_ids) {
   SequentialExecutor<ValueT> executor(result, config);
-  visit_impl(program, graph, executor, config, depth, thread_ids);
+  visit_impl(program, graph, executor, config, dpor_tree_depth, thread_ids);
 }
 
 }  // namespace detail
