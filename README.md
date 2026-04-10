@@ -7,6 +7,8 @@ There are some initial examples of use in the examples/ folder.
 See `docs/api.md` for a public API summary and `docs/architecture.md` for the
 high-level design.
 
+For a more realistic example, see this integration with stellar-core: https://github.com/nano-o/stellar-core/tree/skip-ledgers-p25-dpor-2
+
 ## Current scope
 
 - Supported communication models are `Async` and `FifoP2P`.
