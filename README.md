@@ -1,7 +1,6 @@
 # dpor
 
-A vibe-coded C++20 DPOR model-checking library inspired by Must.
-See the Must paper in docs/.
+A vibe-coded C++20 DPOR model-checking library inspired by [Must](https://dl.acm.org/doi/10.1145/3689778).
 
 There are some initial examples of use in the examples/ folder.
 See `docs/api.md` for a public API summary and `docs/architecture.md` for the
