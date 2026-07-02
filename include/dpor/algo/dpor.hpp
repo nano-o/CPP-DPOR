@@ -180,7 +180,8 @@ struct DporConfigT {
   TerminalExecutionObserverT<ValueT> on_terminal_execution{};
   ProgressObserver on_progress{};
   std::chrono::milliseconds progress_report_interval{std::chrono::seconds(1)};
-  // Compatibility alias; prefer on_terminal_execution.
+  // Compatibility alias; prefer on_terminal_execution. Setting both this and
+  // on_terminal_execution makes verify()/verify_parallel() throw.
   TerminalExecutionObserverT<ValueT> on_execution{};
 };
 
@@ -241,6 +242,14 @@ template <typename ValueT>
     });
   }
   return TerminalExecutionAction::Continue;
+}
+
+template <typename ValueT>
+inline void validate_terminal_observer_config(const DporConfigT<ValueT>& config) {
+  if (config.on_terminal_execution && config.on_execution) {
+    throw std::invalid_argument(
+        "DporConfigT: set only one of on_terminal_execution and its legacy alias on_execution");
+  }
 }
 
 [[nodiscard]] inline ProgressState progress_state_from_result_kind(
@@ -980,6 +989,15 @@ class ParallelExecutor {
   }
 
   [[nodiscard]] VerifyResult run() {
+    if (active_executor() != nullptr) {
+      // worker_state() is one thread_local per OS thread shared by all
+      // executor instances, so interleaving two executors on one thread
+      // would corrupt terminal counts and stop-flag caching.
+      throw std::logic_error(
+          "verify_parallel is not reentrant: it must not be called from inside a parallel "
+          "exploration worker (e.g., from an observer callback or thread function)");
+    }
+
     {
       std::lock_guard lock(queue_mutex_);
       task_queue_.push(ExplorationTask<ValueT>{
@@ -1195,7 +1213,26 @@ class ParallelExecutor {
     return requested == 0 ? 1024U : requested;
   }
 
+  // One slot per OS thread marking the executor whose worker loop the thread
+  // is currently inside. Guards the shared thread_local worker_state().
+  [[nodiscard]] static ParallelExecutor*& active_executor() noexcept {
+    thread_local ParallelExecutor* active{nullptr};
+    return active;
+  }
+
+  struct ActiveExecutorGuard {
+    explicit ActiveExecutorGuard(ParallelExecutor* executor) noexcept {
+      active_executor() = executor;
+    }
+
+    ActiveExecutorGuard(const ActiveExecutorGuard&) = delete;
+    ActiveExecutorGuard& operator=(const ActiveExecutorGuard&) = delete;
+
+    ~ActiveExecutorGuard() { active_executor() = nullptr; }
+  };
+
   void worker_loop() {
+    const ActiveExecutorGuard active_guard(this);
     while (true) {
       std::optional<ExplorationTask<ValueT>> task;
       {
@@ -1776,8 +1813,14 @@ class DepthFirstExplorer {
         }
       }
     } catch (...) {
-      while (!contexts_.empty()) {
-        unwind_one_step();
+      // A rollback failure while unwinding implies already-corrupted state;
+      // drop the remaining contexts rather than mask the original exception.
+      try {
+        while (!contexts_.empty()) {
+          unwind_one_step();
+        }
+      } catch (...) {
+        contexts_.clear();
       }
       throw;
     }
@@ -1875,8 +1918,8 @@ class DepthFirstExplorer {
       frame.event_id = Graph::kNoSource;
       frame.thread_id = tid;
       frame.candidate_event_ids = compatible_unread_send_ids(graph, tid, *recv);
-      frame.label = std::move(label);
       frame.flag = recv->is_nonblocking();
+      frame.label = std::move(label);
       return;
     }
 
@@ -2075,6 +2118,7 @@ inline void visit(const ProgramT<ValueT>& program, model::ExplorationGraphT<Valu
 // VERIFY(P): entry point. Creates empty G₀, calls visit.
 template <typename ValueT>
 [[nodiscard]] inline VerifyResult verify(const DporConfigT<ValueT>& config) {
+  detail::validate_terminal_observer_config(config);
   VerifyResult result;
   model::ExplorationGraphT<ValueT> empty_graph;
   const auto thread_ids = detail::sorted_thread_ids(config.program);
@@ -2090,6 +2134,7 @@ template <typename ValueT>
   // Experimental. Callback order is unspecified across workers. With
   // sync_steps>0, additional terminal executions may still be published after a
   // callback has requested stop.
+  detail::validate_terminal_observer_config(config);
   const auto thread_ids = detail::sorted_thread_ids(config.program);
   detail::ParallelExecutor<ValueT> executor(config, options, thread_ids);
   return executor.run();

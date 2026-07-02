@@ -2505,6 +2505,57 @@ TEST_CASE("verify_parallel can stop when terminal observer requests stop",
   REQUIRE(observed_count <= 2);
 }
 
+TEST_CASE("verify_parallel rejects reentrant invocation from a worker callback",
+          "[algo][dpor][parallel]") {
+  Program inner_program;
+  inner_program.threads[1] = [](const ThreadTrace&,
+                                std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "inner"};
+    }
+    return std::nullopt;
+  };
+
+  DporConfig config;
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "outer"};
+    }
+    return std::nullopt;
+  };
+  config.on_terminal_execution = [inner_program](const ExplorationGraph&) {
+    DporConfig inner_config;
+    inner_config.program = inner_program;
+    ParallelVerifyOptions inner_options;
+    inner_options.max_workers = 1;
+    static_cast<void>(verify_parallel(inner_config, inner_options));
+  };
+
+  ParallelVerifyOptions options;
+  options.max_workers = 2;
+  options.max_queued_tasks = 4;
+
+  REQUIRE_THROWS_AS(verify_parallel(config, options), std::logic_error);
+}
+
+TEST_CASE("verify and verify_parallel reject configs that set both terminal observers",
+          "[algo][dpor]") {
+  DporConfig config;
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t) -> std::optional<EventLabel> {
+    return std::nullopt;
+  };
+  config.on_terminal_execution = [](const ExplorationGraph&) {};
+  config.on_execution = [](const ExplorationGraph&) {};
+
+  REQUIRE_THROWS_AS(verify(config), std::invalid_argument);
+
+  ParallelVerifyOptions options;
+  options.max_workers = 1;
+  REQUIRE_THROWS_AS(verify_parallel(config, options), std::invalid_argument);
+}
+
 TEST_CASE("verify_parallel reports approximate running progress and exact final progress",
           "[algo][dpor][parallel]") {
   Program program;

@@ -268,7 +268,6 @@ Graph transformation and rollback helpers:
 - `with_nd_value(nd_event, value)`
 - `checkpoint()`
 - `rollback(checkpoint)`
-- `ScopedRollback`
 
 `porf_contains()` requires an acyclic graph and throws on causal cycles.
 

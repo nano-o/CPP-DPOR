@@ -24,6 +24,12 @@
 //
 // Graph operations (restrict, with_rf, with_nd_value) return copies.
 // This matches the recursive branching nature of Algorithm 1.
+//
+// Thread safety: const reachability queries (porf_contains, has_causal_cycle)
+// lazily build the PORF cache through a mutable member, so concurrent access
+// to the same instance is not safe even when all calls are const. Each thread
+// must own its graph instance; copies may safely share an already-built cache
+// because published PorfCache contents are immutable.
 
 #include "dpor/model/event.hpp"
 #include "dpor/model/execution_graph.hpp"
@@ -124,44 +130,6 @@ class ExplorationGraphT {
     std::size_t rf_undo_size{0};
     bool known_acyclic{true};
     std::optional<EventId> pending_fresh_receive_id{};
-  };
-
-  class ScopedRollback {
-   public:
-    explicit ScopedRollback(ExplorationGraphT& graph)
-        : graph_(&graph), checkpoint_(graph.checkpoint()) {}
-
-    ScopedRollback(const ScopedRollback&) = delete;
-    ScopedRollback& operator=(const ScopedRollback&) = delete;
-
-    ScopedRollback(ScopedRollback&& other) noexcept
-        : graph_(std::exchange(other.graph_, nullptr)), checkpoint_(other.checkpoint_) {}
-
-    ScopedRollback& operator=(ScopedRollback&& other) noexcept {
-      if (this == &other) {
-        return *this;
-      }
-      if (graph_ != nullptr) {
-        // cppcheck-suppress throwInNoexceptFunction
-        graph_->rollback(checkpoint_);
-      }
-      graph_ = std::exchange(other.graph_, nullptr);
-      checkpoint_ = other.checkpoint_;
-      return *this;
-    }
-
-    ~ScopedRollback() {  // NOLINT(bugprone-exception-escape)
-      if (graph_ != nullptr) {
-        // cppcheck-suppress throwInNoexceptFunction
-        graph_->rollback(checkpoint_);
-      }
-    }
-
-    void release() noexcept { graph_ = nullptr; }
-
-   private:
-    ExplorationGraphT* graph_{nullptr};
-    Checkpoint checkpoint_{};
   };
 
   [[nodiscard]] Checkpoint checkpoint() const noexcept {

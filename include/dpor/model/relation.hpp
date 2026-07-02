@@ -167,7 +167,8 @@ class ProgramOrderRelation {
 };
 
 // Relational composition view: (left ; right).
-// This is a lazy adapter, not a materialized relation.
+// This is a lazy adapter, not a materialized relation. It stores references
+// to its operands, so temporaries are rejected at compile time.
 template <Relation LeftRelation, Relation RightRelation>
 class ComposeRelation {
  public:
@@ -177,6 +178,10 @@ class ComposeRelation {
       throw std::invalid_argument("cannot compose relations with different node counts");
     }
   }
+
+  ComposeRelation(const LeftRelation&& left, const RightRelation& right) = delete;
+  ComposeRelation(const LeftRelation& left, const RightRelation&& right) = delete;
+  ComposeRelation(const LeftRelation&& left, const RightRelation&& right) = delete;
 
   [[nodiscard]] std::size_t node_count() const noexcept { return left_.node_count(); }
 
@@ -225,12 +230,22 @@ template <Relation LeftRelation, Relation RightRelation>
   return ComposeRelation<LeftRelation, RightRelation>(left, right);
 }
 
+template <Relation LeftRelation, Relation RightRelation>
+auto compose(const LeftRelation&& left, const RightRelation& right) = delete;
+template <Relation LeftRelation, Relation RightRelation>
+auto compose(const LeftRelation& left, const RightRelation&& right) = delete;
+template <Relation LeftRelation, Relation RightRelation>
+auto compose(const LeftRelation&& left, const RightRelation&& right) = delete;
+
 // Transitive-closure view: relation+ (non-reflexive).
-// Reachability is computed on demand via graph traversal.
+// Reachability is computed on demand via graph traversal. Stores a reference
+// to its operand, so temporaries are rejected at compile time.
 template <Relation BaseRelation>
 class TransitiveClosureRelation {
  public:
   explicit TransitiveClosureRelation(const BaseRelation& relation) : relation_(relation) {}
+
+  explicit TransitiveClosureRelation(const BaseRelation&& relation) = delete;
 
   [[nodiscard]] std::size_t node_count() const noexcept { return relation_.node_count(); }
 
@@ -290,8 +305,12 @@ template <Relation BaseRelation>
   return TransitiveClosureRelation<BaseRelation>(relation);
 }
 
+template <Relation BaseRelation>
+auto transitive_closure(const BaseRelation&& relation) = delete;
+
 // Union-relation view: left ∪ right.
-// Contains (from, to) if either left or right contains it.
+// Contains (from, to) if either left or right contains it. Stores references
+// to its operands, so temporaries are rejected at compile time.
 template <Relation LeftRelation, Relation RightRelation>
 class UnionRelation {
  public:
@@ -300,6 +319,10 @@ class UnionRelation {
       throw std::invalid_argument("cannot union relations with different node counts");
     }
   }
+
+  UnionRelation(const LeftRelation&& left, const RightRelation& right) = delete;
+  UnionRelation(const LeftRelation& left, const RightRelation&& right) = delete;
+  UnionRelation(const LeftRelation&& left, const RightRelation&& right) = delete;
 
   [[nodiscard]] std::size_t node_count() const noexcept { return left_.node_count(); }
 
@@ -344,5 +367,12 @@ template <Relation L, Relation R>
 [[nodiscard]] inline auto relation_union(const L& left, const R& right) {
   return UnionRelation<L, R>(left, right);
 }
+
+template <Relation L, Relation R>
+auto relation_union(const L&& left, const R& right) = delete;
+template <Relation L, Relation R>
+auto relation_union(const L& left, const R&& right) = delete;
+template <Relation L, Relation R>
+auto relation_union(const L&& left, const R&& right) = delete;
 
 }  // namespace dpor::model
