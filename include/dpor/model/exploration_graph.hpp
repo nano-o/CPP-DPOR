@@ -14,6 +14,7 @@
 // - with_nd_value(nd_event, value): returns a copy with ND choice value set
 // - checkpoint()/rollback(): worker-local temporary mutation support
 // - thread_trace(tid): extracts value sequence for a thread
+// - has_blocked_thread(): true if any thread's last event is a Block event
 // - porf_contains(from, to): checks (po ∪ rf)+ reachability
 // - has_porf_cache(): reports whether PORF reachability has been materialized
 // - is_known_acyclic(): reports whether the current (po ∪ rf) structure is
@@ -308,6 +309,23 @@ class ExplorationGraphT {
     }
     const auto& last_evt = event(thread_state_[thread_index].last_event_id);
     return is_block(last_evt) || is_error(last_evt);
+  }
+
+  // Returns true if any thread's last event is a Block event, i.e., the thread
+  // waits on a blocking receive with no compatible unread send. Block events
+  // are always the last event of their thread, so scanning per-thread tails is
+  // sufficient. DPOR uses this at maximality to classify terminal executions
+  // as blocked rather than full.
+  [[nodiscard]] bool has_blocked_thread() const {
+    for (const auto& state : thread_state_) {
+      if (state.event_count == 0) {
+        continue;
+      }
+      if (is_block(event(state.last_event_id))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // Count events belonging to the given thread.

@@ -28,8 +28,10 @@ For a more realistic example, see this integration with stellar-core: https://gi
   deterministic thread functions.
 - Published terminal executions are exposed to observers as
   `dpor::algo::TerminalExecutionT<ValueT>`, which carries an
-  `ExplorationGraphT<ValueT>` plus a terminal kind (`Full`, `Error`, or
-  `DepthLimit`).
+  `ExplorationGraphT<ValueT>` plus a terminal kind (`Full`, `Blocked`,
+  `Error`, or `DepthLimit`). `Blocked` marks maximal executions in which some
+  thread waits forever on a blocking receive; asserting
+  `blocked_executions_explored == 0` checks deadlock-freedom in that sense.
 - Manual graph validation is available through
   `dpor::model::AsyncConsistencyCheckerT`, `FifoP2PConsistencyCheckerT`, and
   `ConsistencyCheckerT`.
@@ -55,7 +57,7 @@ Shared `DporConfigT<ValueT>` parameters:
 - `communication_model{Async}`: communication semantics for consistency
   checking and revisit generation. Supported values are `Async` and `FifoP2P`.
 - `on_terminal_execution{}`: optional callback invoked for each published
-  terminal execution (`Full`, `Error`, or `DepthLimit`). The callback may
+  terminal execution (`Full`, `Blocked`, `Error`, or `DepthLimit`). The callback may
   return `TerminalExecutionAction::Continue` or `Stop`; `void` callbacks are
   treated as `Continue`.
 - `on_progress{}`: optional progress callback that receives
@@ -119,7 +121,10 @@ Result reporting:
 - `VerifyResult.kind` is `AllExplored` or `Stopped`.
 - `VerifyResult` also reports aggregate terminal counts via
   `executions_explored`, `full_executions_explored`,
-  `error_executions_explored`, and `depth_limit_executions_explored`.
+  `blocked_executions_explored`, `error_executions_explored`, and
+  `depth_limit_executions_explored`. Full and blocked counts partition the
+  maximal executions; `full_executions_explored` alone does not cover
+  executions in which a thread ended blocked on a receive.
 - Parallel callback order is unspecified across workers. Final `VerifyResult`
   counts are exact; live `ProgressSnapshot` counts may lag local worker state
   when `progress_counter_flush_interval > 1`.

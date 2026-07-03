@@ -1,5 +1,4 @@
 #include "two_phase_commit_benchmark.hpp"
-
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstddef>
@@ -16,9 +15,9 @@ using dpor::algo::ThreadTrace;
 using dpor::benchmarks::detail::Options;
 using dpor::model::CommunicationModel;
 using dpor::model::EventLabel;
+using dpor::model::make_receive_label;
 using dpor::model::SendLabel;
 using dpor::model::Value;
-using dpor::model::make_receive_label;
 
 [[nodiscard]] Options parse_options(std::initializer_list<std::string_view> args) {
   std::vector<std::string> storage;
@@ -41,8 +40,7 @@ using dpor::model::make_receive_label;
 [[nodiscard]] Program make_fifo_sensitive_program() {
   Program program;
 
-  program.threads[1] = [](const ThreadTrace&,
-                          const std::size_t step) -> std::optional<EventLabel> {
+  program.threads[1] = [](const ThreadTrace&, const std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 2, .value = "a"};
     }
@@ -98,8 +96,7 @@ TEST_CASE("benchmark CLI accepts --progress-poll-interval-steps", "[benchmarks][
   REQUIRE(options.parallel_options.progress_poll_interval_steps == 128);
 }
 
-TEST_CASE("benchmark helper forwards communication model to DPOR and oracle",
-          "[benchmarks][cli]") {
+TEST_CASE("benchmark helper forwards communication model to DPOR and oracle", "[benchmarks][cli]") {
   Options async_options;
   async_options.participants = 2;
   async_options.inject_crash = false;
@@ -112,30 +109,34 @@ TEST_CASE("benchmark helper forwards communication model to DPOR and oracle",
 
   const auto async_dpor = dpor::benchmarks::detail::run_dpor(async_options, make_program, 1);
   const auto fifo_dpor = dpor::benchmarks::detail::run_dpor(fifo_options, make_program, 1);
-  const auto async_oracle = dpor::benchmarks::detail::run_oracle(
-      async_options.participants, async_options.inject_crash, async_options.communication_model,
-      make_program);
-  const auto fifo_oracle = dpor::benchmarks::detail::run_oracle(
-      fifo_options.participants, fifo_options.inject_crash, fifo_options.communication_model,
-      make_program);
+  const auto async_oracle =
+      dpor::benchmarks::detail::run_oracle(async_options.participants, async_options.inject_crash,
+                                           async_options.communication_model, make_program);
+  const auto fifo_oracle =
+      dpor::benchmarks::detail::run_oracle(fifo_options.participants, fifo_options.inject_crash,
+                                           fifo_options.communication_model, make_program);
 
   REQUIRE(async_dpor.terminal_executions == 2);
   REQUIRE(async_dpor.full_executions == 2);
+  REQUIRE(async_dpor.blocked_executions == 0);
   REQUIRE(async_dpor.error_executions == 0);
   REQUIRE(async_dpor.depth_limit_executions == 0);
 
   REQUIRE(fifo_dpor.terminal_executions == 1);
   REQUIRE(fifo_dpor.full_executions == 1);
+  REQUIRE(fifo_dpor.blocked_executions == 0);
   REQUIRE(fifo_dpor.error_executions == 0);
   REQUIRE(fifo_dpor.depth_limit_executions == 0);
 
   REQUIRE(async_oracle.terminal_executions == 2);
   REQUIRE(async_oracle.full_executions == 2);
+  REQUIRE(async_oracle.blocked_executions == 0);
   REQUIRE(async_oracle.error_executions == 0);
   REQUIRE(async_oracle.depth_limit_executions == 0);
 
   REQUIRE(fifo_oracle.terminal_executions == 1);
   REQUIRE(fifo_oracle.full_executions == 1);
+  REQUIRE(fifo_oracle.blocked_executions == 0);
   REQUIRE(fifo_oracle.error_executions == 0);
   REQUIRE(fifo_oracle.depth_limit_executions == 0);
 }

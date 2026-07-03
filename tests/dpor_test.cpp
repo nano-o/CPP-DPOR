@@ -1335,6 +1335,124 @@ TEST_CASE("multiple blocked receives are both rescheduled when matching sends ap
       config.program, "T1=[Rb({a,a2})]; T2=[Rb({b,b2})]; T3=[S(1,a),S(2,b)]; T4=[S(1,a2),S(2,b2)]");
 }
 
+TEST_CASE("blocking receive with no sender publishes a blocked terminal execution",
+          "[algo][dpor][blocked]") {
+  DporConfig config;
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+
+  std::vector<TerminalExecutionKind> kinds;
+  bool observer_saw_block_event = false;
+  bool observer_blocked_flag = false;
+  config.on_terminal_execution = [&](const TerminalExecution& execution) {
+    kinds.push_back(execution.kind);
+    observer_blocked_flag = execution.is_blocked_execution();
+    for (const auto& evt : execution.graph.events()) {
+      if (is_block(evt)) {
+        observer_saw_block_event = true;
+      }
+    }
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(result.blocked_executions_explored == 1);
+  REQUIRE(result.full_executions_explored == 0);
+  REQUIRE(kinds == std::vector<TerminalExecutionKind>{TerminalExecutionKind::Blocked});
+  REQUIRE(observer_blocked_flag);
+  REQUIRE(observer_saw_block_event);
+  require_dpor_matches_oracle(config.program, "T1=[Rb(*)] with no sender");
+}
+
+TEST_CASE("ND-gated sender yields one full and one blocked terminal execution",
+          "[algo][dpor][blocked]") {
+  DporConfig config;
+
+  // T1 blocks on a receive; T2 nondeterministically decides whether to send,
+  // so exactly one branch satisfies the receive and one leaves it blocked.
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+  config.program.threads[2] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return NondeterministicChoiceLabel{
+          .value = "send",
+          .choices = {"send", "skip"},
+      };
+    }
+    if (step == 1 && !trace.empty() && trace[0].value() == "send") {
+      return SendLabel{.destination = 1, .value = "m"};
+    }
+    return std::nullopt;
+  };
+
+  const auto sequential = verify(config);
+  REQUIRE(sequential.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(sequential.executions_explored == 2);
+  REQUIRE(sequential.full_executions_explored == 1);
+  REQUIRE(sequential.blocked_executions_explored == 1);
+  require_dpor_matches_oracle(config.program, "T1=[Rb(*)]; T2=[ND({send,skip}), send -> S(1,m)]");
+
+  ParallelVerifyOptions options;
+  options.max_workers = 2;
+  options.max_queued_tasks = 4;
+  const auto parallel = verify_parallel(config, options);
+  REQUIRE(parallel.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(parallel.executions_explored == sequential.executions_explored);
+  REQUIRE(parallel.full_executions_explored == sequential.full_executions_explored);
+  REQUIRE(parallel.blocked_executions_explored == sequential.blocked_executions_explored);
+}
+
+TEST_CASE("depth-limited branch keeps DepthLimit kind even when a thread is blocked",
+          "[algo][dpor][blocked]") {
+  DporConfig config;
+  config.max_depth = 1;
+  // T1's receive matches nothing, so it blocks immediately; the depth limit
+  // then fires on a graph that contains a Block event.
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return make_receive_label<Value>([](const Value&) { return false; });
+    }
+    return std::nullopt;
+  };
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "unmatched"};
+    }
+    return std::nullopt;
+  };
+
+  bool depth_limit_graph_has_block = false;
+  config.on_terminal_execution = [&](const TerminalExecution& execution) {
+    REQUIRE(execution.kind == TerminalExecutionKind::DepthLimit);
+    for (const auto& evt : execution.graph.events()) {
+      if (is_block(evt)) {
+        depth_limit_graph_has_block = true;
+      }
+    }
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.depth_limit_executions_explored == result.executions_explored);
+  REQUIRE(result.blocked_executions_explored == 0);
+  REQUIRE(result.full_executions_explored == 0);
+  REQUIRE(depth_limit_graph_has_block);
+}
+
 // --- ND choice affects subsequent behavior ---
 
 TEST_CASE("ND choice value visible in subsequent trace", "[algo][dpor]") {
@@ -1859,6 +1977,72 @@ TEST_CASE("paper ex 2.4: nondet failure target yields one execution per choice",
   REQUIRE(received_failures == std::set<std::string>{"Fail(node1)", "Fail(node2)"});
   require_dpor_matches_oracle(config.program,
                               "T1=[ND({node1,node2}),S(2,Fail(trace[0]))]; T2=[Rb(*)]");
+}
+
+namespace {
+
+// Paper example 2.5 (NNR), naive timeout encoding:
+//   recv_timeout() ≜ if (nondet({wait,timeout})) { recv() } else { ⊥ }
+// with no sender, so every thread that chooses to wait blocks forever.
+[[nodiscard]] Program make_naive_nnr_program(const std::size_t thread_count) {
+  Program program;
+  for (ThreadId tid = 1; tid <= thread_count; ++tid) {
+    program.threads[tid] = [](const ThreadTrace& trace,
+                              std::size_t step) -> std::optional<EventLabel> {
+      if (step == 0) {
+        return NondeterministicChoiceLabel{
+            .value = "wait",
+            .choices = {"wait", "timeout"},
+        };
+      }
+      if (step == 1 && !trace.empty() && trace[0].value() == "wait") {
+        return make_receive_label<Value>();
+      }
+      return std::nullopt;
+    };
+  }
+  return program;
+}
+
+}  // namespace
+
+TEST_CASE("paper ex 2.5: naive NNR timeout encoding yields 2^N executions, all but one blocked",
+          "[algo][dpor][paper][blocked]") {
+  constexpr std::size_t kThreadCount = 3;
+  DporConfig config;
+  config.program = make_naive_nnr_program(kThreadCount);
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  // One terminal per nondet combination; no message is ever sent, so every
+  // combination with at least one waiting thread ends blocked.
+  REQUIRE(result.executions_explored == 8);
+  REQUIRE(result.blocked_executions_explored == 7);
+  REQUIRE(result.full_executions_explored == 1);
+  require_dpor_matches_oracle(config.program,
+                              "NNR naive: Ti=[ND({wait,timeout}), wait -> Rb(*)] x3");
+}
+
+TEST_CASE("paper ex 2.5: non-blocking NNR encoding collapses to one full execution",
+          "[algo][dpor][paper][blocked]") {
+  constexpr std::size_t kThreadCount = 3;
+  DporConfig config;
+  for (ThreadId tid = 1; tid <= kThreadCount; ++tid) {
+    config.program.threads[tid] = [](const ThreadTrace&,
+                                     std::size_t step) -> std::optional<EventLabel> {
+      if (step == 0) {
+        return make_nonblocking_receive_label<Value>();
+      }
+      return std::nullopt;
+    };
+  }
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(result.full_executions_explored == 1);
+  REQUIRE(result.blocked_executions_explored == 0);
+  require_dpor_matches_oracle(config.program, "NNR nb: Ti=[Rnb(*)] x3");
 }
 
 TEST_CASE("paper ex 2.6: selective receive filters stale value", "[algo][dpor][paper]") {

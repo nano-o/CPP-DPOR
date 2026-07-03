@@ -100,6 +100,29 @@ TEST_CASE("inserted_before_or_equal checks insertion order", "[model][exploratio
   REQUIRE_FALSE(g.inserted_before_or_equal(b, a));
 }
 
+// --- has_blocked_thread ---
+
+TEST_CASE("has_blocked_thread reports thread-tail block events", "[model][exploration_graph]") {
+  ExplorationGraph g;
+  REQUIRE_FALSE(g.has_blocked_thread());
+
+  static_cast<void>(g.add_event(1, SendLabel{.destination = 2, .value = "a"}));
+  REQUIRE_FALSE(g.has_blocked_thread());
+
+  const auto block_id = g.add_event(2, BlockLabel{});
+  REQUIRE(g.has_blocked_thread());
+
+  // Removing the block event (as blocked-receive rescheduling does) clears it.
+  std::unordered_set<ExplorationGraph::EventId> keep_set;
+  for (ExplorationGraph::EventId id = 0; id < g.event_count(); ++id) {
+    if (id != block_id) {
+      keep_set.insert(id);
+    }
+  }
+  const auto unblocked = g.restrict(keep_set);
+  REQUIRE_FALSE(unblocked.has_blocked_thread());
+}
+
 // --- thread_trace ---
 
 TEST_CASE("thread_trace extracts values from receives via rf", "[model][exploration_graph]") {

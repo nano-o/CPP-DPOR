@@ -134,7 +134,7 @@ implementation stack depth.
 The observer receives:
 
 ```cpp
-enum class TerminalExecutionKind : std::uint8_t { Full, Error, DepthLimit };
+enum class TerminalExecutionKind : std::uint8_t { Full, Blocked, Error, DepthLimit };
 
 template <typename ValueT>
 struct TerminalExecutionT {
@@ -144,6 +144,28 @@ struct TerminalExecutionT {
 
 enum class TerminalExecutionAction : std::uint8_t { Continue, Stop };
 ```
+
+`Full` and `Blocked` partition the maximal executions: `Full` means every
+thread ran to completion, while `Blocked` means at least one thread ended
+waiting forever on a blocking receive that no message can satisfy. The graph
+of a blocked execution contains the internal `Block` events marking which
+threads are stuck (always as the last event of their thread). `DepthLimit`
+branches keep that kind even if some thread happens to be blocked at the
+cutoff, because a truncated branch is not a maximal execution.
+
+A blocked execution is not necessarily a bug. In request/response protocols a
+blocked terminal usually is one (a node waiting for a message that can never
+arrive), and deadlock-freedom in that sense is a one-line assertion:
+
+```cpp
+REQUIRE(result.blocked_executions_explored == 0);
+```
+
+Threads that legitimately end a finite program waiting for further input
+(server-style receive loops) also classify every terminal as `Blocked`. For
+such models, assert instead that specific threads are not blocked by
+inspecting the terminal graph for `Block` events belonging to those threads.
+
 
 `on_terminal_execution` may accept either `TerminalExecutionT<ValueT>` or
 `ExplorationGraphT<ValueT>`. Returning `Stop` requests early termination; void
@@ -159,6 +181,7 @@ struct ProgressSnapshot {
   std::chrono::steady_clock::duration elapsed{};
   std::size_t terminal_executions{0};
   std::size_t full_executions{0};
+  std::size_t blocked_executions{0};
   std::size_t error_executions{0};
   std::size_t depth_limit_executions{0};
   std::size_t active_workers{0};
@@ -204,14 +227,19 @@ struct ParallelVerifyOptions {
 and also carries:
 
 - `executions_explored`: total number of published terminal executions
-- `full_executions_explored`: number of full executions
+- `full_executions_explored`: number of full executions (every thread completed)
+- `blocked_executions_explored`: number of blocked maximal executions
 - `error_executions_explored`: number of error executions
 - `depth_limit_executions_explored`: number of depth-limit executions
 
 If `on_terminal_execution` is set, DPOR calls it with each published terminal
-execution. Terminal executions are full executions, error executions, and
-branches truncated by the `max_depth` DPOR tree-depth limit. DPOR keeps
-exploring after error terminals unless the callback requests `Stop`.
+execution. Terminal executions are full executions, blocked maximal
+executions, error executions, and branches truncated by the `max_depth` DPOR
+tree-depth limit. DPOR keeps exploring after error terminals unless the
+callback requests `Stop`.
+
+Note that `is_full_execution()` is false for blocked executions: observers
+that want every maximal execution must accept both `Full` and `Blocked`.
 
 If `on_progress` is set, sequential exploration reports exact live counts.
 Parallel exploration reports exact final counts, and live snapshots may carry

@@ -20,6 +20,9 @@ namespace dpor::test_support {
 template <typename ValueT>
 struct OracleExplorationStatsT {
   std::set<std::string> signatures{};
+  // Subset of signatures whose graphs contain a Block event, i.e., maximal
+  // executions in which some thread waits forever on a blocking receive.
+  std::set<std::string> blocked_signatures{};
   std::size_t paths_explored{0};
 };
 
@@ -301,7 +304,11 @@ inline void enumerate_consistent_executions(const algo::ProgramT<ValueT>& progra
   }
 
   ++stats.paths_explored;
-  stats.signatures.insert(graph_signature(graph));
+  auto signature = graph_signature(graph);
+  if (graph.has_blocked_thread()) {
+    stats.blocked_signatures.insert(signature);
+  }
+  stats.signatures.insert(std::move(signature));
 }
 
 template <typename ValueT>
@@ -325,8 +332,10 @@ template <typename ValueT>
 struct OracleComparisonT {
   algo::VerifyResult result{};
   std::set<std::string> oracle_signatures{};
+  std::set<std::string> oracle_blocked_signatures{};
   std::vector<std::string> dpor_observed{};
   std::set<std::string> dpor_unique{};
+  std::set<std::string> dpor_blocked_unique{};
   std::set<std::string> missing_from_dpor{};
   std::set<std::string> unexpected_in_dpor{};
   bool found_inconsistent_graph{false};
@@ -337,14 +346,18 @@ template <typename ValueT>
     const algo::ProgramT<ValueT>& program,
     const model::CommunicationModel communication_model = model::CommunicationModel::Async) {
   OracleComparisonT<ValueT> comparison;
-  comparison.oracle_signatures = collect_oracle_stats(program, communication_model).signatures;
+  auto oracle_stats = collect_oracle_stats(program, communication_model);
+  comparison.oracle_signatures = std::move(oracle_stats.signatures);
+  comparison.oracle_blocked_signatures = std::move(oracle_stats.blocked_signatures);
 
   model::ConsistencyCheckerT<ValueT> checker(communication_model);
   algo::DporConfigT<ValueT> config;
   config.program = program;
   config.communication_model = communication_model;
   config.on_terminal_execution = [&](const algo::TerminalExecutionT<ValueT>& execution) {
-    if (!execution.is_full_execution()) {
+    // Full and Blocked together are the maximal executions the oracle
+    // enumerates; error/depth-limit terminals are out of scope here.
+    if (!execution.is_full_execution() && !execution.is_blocked_execution()) {
       return;
     }
     const auto& graph = execution.graph;
@@ -354,6 +367,9 @@ template <typename ValueT>
       comparison.found_inconsistent_graph = true;
     }
     const auto sig = graph_signature(graph);
+    if (execution.is_blocked_execution()) {
+      comparison.dpor_blocked_unique.insert(sig);
+    }
     comparison.dpor_observed.push_back(sig);
     comparison.dpor_unique.insert(sig);
   };

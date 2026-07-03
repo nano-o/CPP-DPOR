@@ -203,9 +203,7 @@ Current behavior differs by `sync_steps`.
 
 ### Strict Mode: `sync_steps == 0`
 
-- `publish_full_execution()`, `publish_depth_limit_execution()`, and
-  `publish_error_execution()` serialize
-  through `publication_mutex_`.
+- `publish_terminal_execution()` serializes through `publication_mutex_`.
 - Terminal-count updates are serialized against stop checks.
 - Live progress snapshots can still lag worker-local terminal counts if
   `progress_counter_flush_interval > 1`.
@@ -241,13 +239,13 @@ What is preserved:
 `on_terminal_execution` may be invoked concurrently in parallel mode. Callback
 code must therefore be thread-safe in addition to being deterministic.
 As in sequential mode, published terminal executions include full executions,
-error executions, and branches cut off by the `max_depth` DPOR tree-depth
-limit.
+blocked maximal executions, error executions, and branches cut off by the
+`max_depth` DPOR tree-depth limit.
 
 `on_progress` may also be invoked from worker threads. Its snapshots report:
 
 - elapsed time since exploration start
-- total/full/error/depth-limit terminal counts
+- total/full/blocked/error/depth-limit terminal counts
 - current `active_workers` and queued-task count
 - configured worker and queue capacities
 - whether the live counts are exact

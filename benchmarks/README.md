@@ -53,12 +53,15 @@ The executable supports the following CLI:
   only affects DPOR runs.
 
 Benchmark output reports `terminal_executions`, `full_executions`,
-`error_executions`, and `depth_limit_executions` for each run. Oracle runs only
-enumerate full executions, so their error and depth-limit counts remain zero.
+`blocked_executions`, `error_executions`, and `depth_limit_executions` for each
+run. `full_executions` and `blocked_executions` partition the maximal
+executions: blocked ones ended with some thread waiting forever on a blocking
+receive. Oracle runs enumerate exactly those maximal executions and split them
+the same way, so their error and depth-limit counts remain zero.
 
 When the oracle runs, the benchmark also prints `paths_explored`, which counts
 raw oracle DFS terminal paths before deduplication. That number is typically
-much larger than the final `full_executions` count.
+much larger than the final `terminal_executions` count (full plus blocked).
 
 ## Configure and build
 
@@ -160,12 +163,12 @@ Each benchmark prints per-run timings and a summary. Example shape:
 ```text
 Plain 2PC benchmark participants=2 communication_model=async inject_crash=true iterations=1 progress_interval_ms=1000 optimized_build=true
 DPOR
-  progress run 1: elapsed_ms=1000.000 terminal_executions=12 full_executions=12 error_executions=0 depth_limit_executions=0 active_workers=1/1 queued_tasks=0/0 counts_exact=true
-  run 1: terminal_executions=24 full_executions=24 error_executions=0 depth_limit_executions=0 elapsed_ms=...
-  summary: min_ms=... avg_ms=... max_ms=... terminal_executions=24 full_executions=24 error_executions=0 depth_limit_executions=0
+  progress run 1: elapsed_ms=1000.000 terminal_executions=12 full_executions=12 blocked_executions=0 error_executions=0 depth_limit_executions=0 active_workers=1/1 queued_tasks=0/0 counts_exact=true
+  run 1: terminal_executions=24 full_executions=24 blocked_executions=0 error_executions=0 depth_limit_executions=0 elapsed_ms=...
+  summary: min_ms=... avg_ms=... max_ms=... terminal_executions=24 full_executions=24 blocked_executions=0 error_executions=0 depth_limit_executions=0
 Oracle
-  run 1: terminal_executions=24 full_executions=24 error_executions=0 depth_limit_executions=0 paths_explored=... elapsed_ms=...
-  summary: min_ms=... avg_ms=... max_ms=... terminal_executions=24 full_executions=24 error_executions=0 depth_limit_executions=0 paths_explored=...
+  run 1: terminal_executions=24 full_executions=24 blocked_executions=0 error_executions=0 depth_limit_executions=0 paths_explored=... elapsed_ms=...
+  summary: min_ms=... avg_ms=... max_ms=... terminal_executions=24 full_executions=24 blocked_executions=0 error_executions=0 depth_limit_executions=0 paths_explored=...
 ```
 
 Use `--iterations N` to get repeated timings in a single process.

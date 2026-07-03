@@ -38,6 +38,7 @@ struct Options {
 struct Measurement {
   std::size_t terminal_executions{0};
   std::size_t full_executions{0};
+  std::size_t blocked_executions{0};
   std::size_t error_executions{0};
   std::size_t depth_limit_executions{0};
   std::size_t paths_explored{0};
@@ -47,6 +48,7 @@ struct Measurement {
 struct BenchmarkRunResult {
   std::size_t terminal_executions{0};
   std::size_t full_executions{0};
+  std::size_t blocked_executions{0};
   std::size_t error_executions{0};
   std::size_t depth_limit_executions{0};
   std::size_t paths_explored{0};
@@ -211,6 +213,7 @@ template <typename Fn>
   return Measurement{
       .terminal_executions = result.terminal_executions,
       .full_executions = result.full_executions,
+      .blocked_executions = result.blocked_executions,
       .error_executions = result.error_executions,
       .depth_limit_executions = result.depth_limit_executions,
       .paths_explored = result.paths_explored,
@@ -221,6 +224,7 @@ template <typename Fn>
 inline void print_execution_counts(const Measurement& measurement) {
   std::cout << " terminal_executions=" << measurement.terminal_executions
             << " full_executions=" << measurement.full_executions
+            << " blocked_executions=" << measurement.blocked_executions
             << " error_executions=" << measurement.error_executions
             << " depth_limit_executions=" << measurement.depth_limit_executions;
 }
@@ -237,6 +241,7 @@ inline void print_progress_snapshot(const std::size_t run_index,
             << std::setprecision(3) << elapsed_ms.count()
             << " terminal_executions=" << snapshot.terminal_executions
             << " full_executions=" << snapshot.full_executions
+            << " blocked_executions=" << snapshot.blocked_executions
             << " error_executions=" << snapshot.error_executions
             << " depth_limit_executions=" << snapshot.depth_limit_executions
             << " active_workers=" << snapshot.active_workers << "/" << snapshot.max_workers
@@ -303,6 +308,7 @@ template <typename ProgramFactory>
   return BenchmarkRunResult{
       .terminal_executions = result.executions_explored,
       .full_executions = result.full_executions_explored,
+      .blocked_executions = result.blocked_executions_explored,
       .error_executions = result.error_executions_explored,
       .depth_limit_executions = result.depth_limit_executions_explored,
       .paths_explored = 0,
@@ -317,7 +323,8 @@ template <typename ProgramFactory>
   const auto stats = test_support::collect_oracle_stats(program, communication_model);
   return BenchmarkRunResult{
       .terminal_executions = stats.signatures.size(),
-      .full_executions = stats.signatures.size(),
+      .full_executions = stats.signatures.size() - stats.blocked_signatures.size(),
+      .blocked_executions = stats.blocked_signatures.size(),
       .error_executions = 0,
       .depth_limit_executions = 0,
       .paths_explored = stats.paths_explored,
@@ -343,11 +350,13 @@ template <typename ProgramFactory>
     if (measurements.back().full_executions != measurements.front().full_executions) {
       throw std::runtime_error("full execution count changed across iterations");
     }
+    if (measurements.back().blocked_executions != measurements.front().blocked_executions) {
+      throw std::runtime_error("blocked execution count changed across iterations");
+    }
     if (measurements.back().error_executions != measurements.front().error_executions) {
       throw std::runtime_error("error execution count changed across iterations");
     }
-    if (measurements.back().depth_limit_executions !=
-        measurements.front().depth_limit_executions) {
+    if (measurements.back().depth_limit_executions != measurements.front().depth_limit_executions) {
       throw std::runtime_error("depth-limit execution count changed across iterations");
     }
     if (measurements.back().paths_explored != measurements.front().paths_explored) {
@@ -409,12 +418,21 @@ inline int run_two_phase_commit_benchmark(int argc, char** argv, std::string_vie
       detail::print_measurements("Oracle", oracle_measurements, true);
     }
 
-    if (!dpor_measurements.empty() && !oracle_measurements.empty() &&
-        dpor_measurements.front().full_executions != oracle_measurements.front().full_executions) {
-      std::cerr << "full execution count mismatch: dpor="
-                << dpor_measurements.front().full_executions
-                << " oracle=" << oracle_measurements.front().full_executions << '\n';
-      return 2;
+    if (!dpor_measurements.empty() && !oracle_measurements.empty()) {
+      if (dpor_measurements.front().full_executions !=
+          oracle_measurements.front().full_executions) {
+        std::cerr << "full execution count mismatch: dpor="
+                  << dpor_measurements.front().full_executions
+                  << " oracle=" << oracle_measurements.front().full_executions << '\n';
+        return 2;
+      }
+      if (dpor_measurements.front().blocked_executions !=
+          oracle_measurements.front().blocked_executions) {
+        std::cerr << "blocked execution count mismatch: dpor="
+                  << dpor_measurements.front().blocked_executions
+                  << " oracle=" << oracle_measurements.front().blocked_executions << '\n';
+        return 2;
+      }
     }
 
     return 0;

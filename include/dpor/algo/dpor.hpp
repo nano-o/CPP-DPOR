@@ -42,13 +42,21 @@ enum class VerifyResultKind : std::uint8_t {
   AllExecutionsExplored = AllExplored,
 };
 enum class ProgressState : std::uint8_t { Running, Stopped, AllExplored };
-enum class TerminalExecutionKind : std::uint8_t { Full, Error, DepthLimit };
+// Full: every thread ran to completion. Blocked: maximal execution in which at
+// least one thread waits forever on a blocking receive (its last event is a
+// Block event). Error: a thread produced an error label. DepthLimit: branch
+// truncated by max_depth; it keeps that kind even if some thread happens to be
+// blocked at the cutoff, since it is not a maximal execution. Note that a
+// blocked execution is not necessarily a bug: threads that legitimately end a
+// finite program waiting for further input (e.g., server loops) also count.
+enum class TerminalExecutionKind : std::uint8_t { Full, Blocked, Error, DepthLimit };
 enum class TerminalExecutionAction : std::uint8_t { Continue, Stop };
 
 struct VerifyResult {
   VerifyResultKind kind{VerifyResultKind::AllExplored};
   std::size_t executions_explored{0};
   std::size_t full_executions_explored{0};
+  std::size_t blocked_executions_explored{0};
   std::size_t error_executions_explored{0};
   std::size_t depth_limit_executions_explored{0};
 
@@ -66,6 +74,7 @@ struct ProgressSnapshot {
   std::chrono::steady_clock::duration elapsed{};
   std::size_t terminal_executions{0};
   std::size_t full_executions{0};
+  std::size_t blocked_executions{0};
   std::size_t error_executions{0};
   std::size_t depth_limit_executions{0};
   std::size_t active_workers{0};
@@ -86,6 +95,13 @@ struct TerminalExecutionT {
     return kind == TerminalExecutionKind::Full;
   }
 
+  // False for full executions: Full and Blocked partition the maximal
+  // executions. The graph of a blocked execution contains the Block events
+  // marking which threads are stuck.
+  [[nodiscard]] bool is_blocked_execution() const noexcept {
+    return kind == TerminalExecutionKind::Blocked;
+  }
+
   [[nodiscard]] bool is_error_execution() const noexcept {
     return kind == TerminalExecutionKind::Error;
   }
@@ -99,8 +115,9 @@ struct TerminalExecutionT {
 
 template <typename ValueT>
 // Observers are called for every published terminal execution: full
-// executions, error executions, and branches truncated by max_depth. Returning
-// Stop requests early termination; void callbacks are treated as Continue.
+// executions, blocked executions, error executions, and branches truncated by
+// max_depth. Returning Stop requests early termination; void callbacks are
+// treated as Continue.
 class TerminalExecutionObserverT {
  public:
   using Execution = TerminalExecutionT<ValueT>;
@@ -292,6 +309,24 @@ template <typename ValueT>
     });
   }
   return TerminalExecutionAction::Continue;
+}
+
+inline void increment_terminal_counts(VerifyResult& result, const TerminalExecutionKind kind) {
+  ++result.executions_explored;
+  switch (kind) {
+    case TerminalExecutionKind::Full:
+      ++result.full_executions_explored;
+      break;
+    case TerminalExecutionKind::Blocked:
+      ++result.blocked_executions_explored;
+      break;
+    case TerminalExecutionKind::Error:
+      ++result.error_executions_explored;
+      break;
+    case TerminalExecutionKind::DepthLimit:
+      ++result.depth_limit_executions_explored;
+      break;
+  }
 }
 
 template <typename ValueT>
@@ -967,16 +1002,6 @@ class SequentialExecutor {
     notify_progress(config_, make_progress_snapshot(ProgressState::Running, now));
   }
 
-  [[nodiscard]] bool publish_depth_limit_execution(const model::ExplorationGraphT<ValueT>& graph) {
-    ++result_.executions_explored;
-    ++result_.depth_limit_executions_explored;
-    if (notify_terminal_execution(config_, graph, TerminalExecutionKind::DepthLimit) ==
-        TerminalExecutionAction::Stop) {
-      request_stop();
-    }
-    return true;
-  }
-
   [[nodiscard]] bool can_spawn(std::size_t /*dpor_tree_depth*/,
                                std::size_t /*fanout*/) const noexcept {
     return false;
@@ -984,23 +1009,10 @@ class SequentialExecutor {
 
   [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT>& /*task*/) const noexcept { return false; }
 
-  [[nodiscard]] bool publish_full_execution(const model::ExplorationGraphT<ValueT>& graph) {
-    ++result_.executions_explored;
-    ++result_.full_executions_explored;
-    if (notify_terminal_execution(config_, graph, TerminalExecutionKind::Full) ==
-        TerminalExecutionAction::Stop) {
-      request_stop();
-    }
-    return true;
-  }
-
-  [[nodiscard]] bool publish_error_execution(const model::ExplorationGraphT<ValueT>& graph,
-                                             const model::ThreadId /*tid*/,
-                                             const model::ErrorLabel& /*error*/) {
-    ++result_.executions_explored;
-    ++result_.error_executions_explored;
-    if (notify_terminal_execution(config_, graph, TerminalExecutionKind::Error) ==
-        TerminalExecutionAction::Stop) {
+  [[nodiscard]] bool publish_terminal_execution(const model::ExplorationGraphT<ValueT>& graph,
+                                                const TerminalExecutionKind kind) {
+    increment_terminal_counts(result_, kind);
+    if (notify_terminal_execution(config_, graph, kind) == TerminalExecutionAction::Stop) {
       request_stop();
     }
     return true;
@@ -1038,6 +1050,7 @@ class SequentialExecutor {
     snapshot.elapsed = now - start_time_;
     snapshot.terminal_executions = result_.executions_explored;
     snapshot.full_executions = result_.full_executions_explored;
+    snapshot.blocked_executions = result_.blocked_executions_explored;
     snapshot.error_executions = result_.error_executions_explored;
     snapshot.depth_limit_executions = result_.depth_limit_executions_explored;
     snapshot.active_workers = state == ProgressState::Running ? 1 : 0;
@@ -1116,12 +1129,14 @@ class ParallelExecutor {
 
     VerifyResult result;
     result.full_executions_explored = full_executions_explored_.load(std::memory_order_relaxed);
+    result.blocked_executions_explored =
+        blocked_executions_explored_.load(std::memory_order_relaxed);
     result.error_executions_explored = error_executions_explored_.load(std::memory_order_relaxed);
     result.depth_limit_executions_explored =
         depth_limit_executions_explored_.load(std::memory_order_relaxed);
-    result.executions_explored = result.full_executions_explored +
-                                 result.error_executions_explored +
-                                 result.depth_limit_executions_explored;
+    result.executions_explored =
+        result.full_executions_explored + result.blocked_executions_explored +
+        result.error_executions_explored + result.depth_limit_executions_explored;
     if (stop_requested_.load(std::memory_order_relaxed)) {
       result.kind = VerifyResultKind::Stopped;
     }
@@ -1178,22 +1193,23 @@ class ParallelExecutor {
     }
   }
 
-  [[nodiscard]] bool publish_depth_limit_execution(const model::ExplorationGraphT<ValueT>& graph) {
+  [[nodiscard]] bool publish_terminal_execution(const model::ExplorationGraphT<ValueT>& graph,
+                                                const TerminalExecutionKind kind) {
     if (sync_steps_ == 0) {
+      // Serialise terminal-count updates with stop checks.
       std::lock_guard lock(publication_mutex_);
       if (stop_requested_.load(std::memory_order_acquire)) {
         return false;
       }
-      increment_local_terminal_counts(TerminalExecutionKind::DepthLimit);
+      increment_local_terminal_counts(kind);
     } else {
       if (stop_requested()) {
         return false;
       }
-      increment_local_terminal_counts(TerminalExecutionKind::DepthLimit);
+      increment_local_terminal_counts(kind);
     }
 
-    if (notify_terminal_execution(config_, graph, TerminalExecutionKind::DepthLimit) ==
-        TerminalExecutionAction::Stop) {
+    if (notify_terminal_execution(config_, graph, kind) == TerminalExecutionAction::Stop) {
       request_stop();
     }
     return true;
@@ -1232,51 +1248,6 @@ class ParallelExecutor {
       queue_cv_.notify_one();
     }
     return enqueued;
-  }
-
-  [[nodiscard]] bool publish_full_execution(const model::ExplorationGraphT<ValueT>& graph) {
-    if (sync_steps_ == 0) {
-      // Serialise terminal-count updates with stop checks.
-      std::lock_guard lock(publication_mutex_);
-      if (stop_requested_.load(std::memory_order_acquire)) {
-        return false;
-      }
-      increment_local_terminal_counts(TerminalExecutionKind::Full);
-    } else {
-      if (stop_requested()) {
-        return false;
-      }
-      increment_local_terminal_counts(TerminalExecutionKind::Full);
-    }
-
-    if (notify_terminal_execution(config_, graph, TerminalExecutionKind::Full) ==
-        TerminalExecutionAction::Stop) {
-      request_stop();
-    }
-    return true;
-  }
-
-  [[nodiscard]] bool publish_error_execution(const model::ExplorationGraphT<ValueT>& graph,
-                                             const model::ThreadId /*tid*/,
-                                             const model::ErrorLabel& /*error*/) {
-    if (sync_steps_ == 0) {
-      std::lock_guard lock(publication_mutex_);
-      if (stop_requested_.load(std::memory_order_acquire)) {
-        return false;
-      }
-      increment_local_terminal_counts(TerminalExecutionKind::Error);
-    } else {
-      if (stop_requested()) {
-        return false;
-      }
-      increment_local_terminal_counts(TerminalExecutionKind::Error);
-    }
-
-    if (notify_terminal_execution(config_, graph, TerminalExecutionKind::Error) ==
-        TerminalExecutionAction::Stop) {
-      request_stop();
-    }
-    return true;
   }
 
   // Runs on the failing worker's thread. Only the first fatal error is
@@ -1407,6 +1378,7 @@ class ParallelExecutor {
 
   struct WorkerState {
     std::size_t local_full_executions{0};
+    std::size_t local_blocked_executions{0};
     std::size_t local_error_executions{0};
     std::size_t local_depth_limit_executions{0};
     std::size_t pending_terminal_executions{0};
@@ -1425,6 +1397,9 @@ class ParallelExecutor {
     switch (kind) {
       case TerminalExecutionKind::Full:
         ++state.local_full_executions;
+        break;
+      case TerminalExecutionKind::Blocked:
+        ++state.local_blocked_executions;
         break;
       case TerminalExecutionKind::Error:
         ++state.local_error_executions;
@@ -1454,6 +1429,10 @@ class ParallelExecutor {
     if (state.local_full_executions > 0) {
       full_executions_explored_.fetch_add(state.local_full_executions, std::memory_order_relaxed);
     }
+    if (state.local_blocked_executions > 0) {
+      blocked_executions_explored_.fetch_add(state.local_blocked_executions,
+                                             std::memory_order_relaxed);
+    }
     if (state.local_error_executions > 0) {
       error_executions_explored_.fetch_add(state.local_error_executions, std::memory_order_relaxed);
     }
@@ -1462,6 +1441,7 @@ class ParallelExecutor {
                                                  std::memory_order_relaxed);
     }
     state.local_full_executions = 0;
+    state.local_blocked_executions = 0;
     state.local_error_executions = 0;
     state.local_depth_limit_executions = 0;
     state.pending_terminal_executions = 0;
@@ -1496,11 +1476,12 @@ class ParallelExecutor {
     snapshot.state = state;
     snapshot.elapsed = now - start_time_;
     snapshot.full_executions = full_executions_explored_.load(std::memory_order_relaxed);
+    snapshot.blocked_executions = blocked_executions_explored_.load(std::memory_order_relaxed);
     snapshot.error_executions = error_executions_explored_.load(std::memory_order_relaxed);
     snapshot.depth_limit_executions =
         depth_limit_executions_explored_.load(std::memory_order_relaxed);
-    snapshot.terminal_executions =
-        snapshot.full_executions + snapshot.error_executions + snapshot.depth_limit_executions;
+    snapshot.terminal_executions = snapshot.full_executions + snapshot.blocked_executions +
+                                   snapshot.error_executions + snapshot.depth_limit_executions;
     snapshot.max_workers = max_workers_;
     snapshot.max_queued_tasks = max_queued_tasks_;
     snapshot.counts_exact = counts_exact;
@@ -1544,6 +1525,7 @@ class ParallelExecutor {
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> fatal_error_reported_{false};
   std::atomic<std::size_t> full_executions_explored_{0};
+  std::atomic<std::size_t> blocked_executions_explored_{0};
   std::atomic<std::size_t> error_executions_explored_{0};
   std::atomic<std::size_t> depth_limit_executions_explored_{0};
 
@@ -1988,7 +1970,8 @@ class DepthFirstExplorer {
     }
 
     if (frame.dpor_tree_depth >= config_.max_depth) {
-      static_cast<void>(executor_.publish_depth_limit_execution(graph));
+      static_cast<void>(
+          executor_.publish_terminal_execution(graph, TerminalExecutionKind::DepthLimit));
       pop_top_frame();
       return;
     }
@@ -2008,17 +1991,21 @@ class DepthFirstExplorer {
         return;
       }
 
-      static_cast<void>(executor_.publish_full_execution(graph));
+      // Maximal execution: Blocked when some thread still waits on a
+      // blocking receive that no reschedule can satisfy, Full otherwise.
+      const auto kind =
+          graph.has_blocked_thread() ? TerminalExecutionKind::Blocked : TerminalExecutionKind::Full;
+      static_cast<void>(executor_.publish_terminal_execution(graph, kind));
       pop_top_frame();
       return;
     }
 
     auto [tid, label] = std::move(*next);
 
-    if (const auto* error = std::get_if<model::ErrorLabel>(&label)) {
+    if (std::holds_alternative<model::ErrorLabel>(label)) {
       const auto checkpoint = graph.checkpoint();
       static_cast<void>(graph.add_event(tid, label));
-      static_cast<void>(executor_.publish_error_execution(graph, tid, *error));
+      static_cast<void>(executor_.publish_terminal_execution(graph, TerminalExecutionKind::Error));
       graph.rollback(checkpoint);
       pop_top_frame();
       return;

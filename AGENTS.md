@@ -127,7 +127,7 @@ benchmarks/ → standalone benchmark targets and perf helpers
 
 The engine in `include/dpor/algo/dpor.hpp` implements **Algorithm 1** from the Must paper:
 
-- `verify()` — sequential DFS entry point, returns `VerifyResult` (`AllExplored` / `Stopped`) plus counts for full, error, and depth-limit terminal executions
+- `verify()` — sequential DFS entry point, returns `VerifyResult` (`AllExplored` / `Stopped`) plus counts for full, blocked, error, and depth-limit terminal executions (`Blocked` = maximal execution where some thread waits forever on a blocking receive; Must reports these separately from full executions)
 - `verify_parallel()` — experimental parallel exploration with configurable worker threads
 - `visit()` — iterative exploration of consistent executions via the internal
   frame/context stack machine
