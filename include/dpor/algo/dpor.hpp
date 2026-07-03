@@ -359,6 +359,38 @@ template <typename ValueT>
   return checker.check(graph);
 }
 
+// Algorithm 1 treats the ND choice set S as a set, but thread functions supply
+// a vector; exploring a repeated value would re-run an identical subtree and
+// violate optimality. Drops repeats while keeping first-occurrence order so
+// the user-visible exploration order of the remaining values is unchanged.
+template <typename ValueT>
+inline void erase_duplicate_nd_choices(std::vector<ValueT>& choices) {
+  std::size_t kept_count = 0;
+  for (std::size_t i = 0; i < choices.size(); ++i) {
+    const auto kept_end = choices.begin() + static_cast<std::ptrdiff_t>(kept_count);
+    if (std::find(choices.begin(), kept_end, choices[i]) != kept_end) {
+      continue;
+    }
+    if (kept_count != i) {
+      choices[kept_count] = std::move(choices[i]);
+    }
+    ++kept_count;
+  }
+  choices.resize(kept_count);
+}
+
+// Missing-reads tolerance used when the revisit tiebreaker is evaluated on
+// G|Previous. Previous = {e' <=_G e} ∪ porf-prefix(s) is not rf-closed: a kept
+// receive may read a send outside Previous (receives can read later-inserted
+// sends after an earlier backward revisit), and restriction then leaves that
+// receive with no reads-from edge. Tolerating such danglers is benign for the
+// revisit decision: whenever a kept receive reads a *deleted* send, the whole
+// revisit is independently rejected by that send's own revisit condition —
+// the reader was either inserted before the send (hence inside the send's
+// Previous set, so "no receive in Previous reads it" fails), or the reader is
+// kept via porf-prefix(s), which puts the send into porf-prefix(s) and thus
+// outside Deleted, a contradiction. A tiebreaker computed on such a partial
+// graph therefore never decides a revisit that is actually taken.
 template <typename ValueT>
 struct AllowMissingReadsForNonTargetT {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
@@ -1992,7 +2024,7 @@ class DepthFirstExplorer {
       return;
     }
 
-    if (const auto* nd = std::get_if<model::NondeterministicChoiceLabelT<ValueT>>(&label)) {
+    if (auto* nd = std::get_if<model::NondeterministicChoiceLabelT<ValueT>>(&label)) {
       if (nd->choices.empty()) {
         const auto checkpoint = graph.checkpoint();
         static_cast<void>(graph.add_event(tid, label));
@@ -2003,6 +2035,7 @@ class DepthFirstExplorer {
         return;
       }
 
+      erase_duplicate_nd_choices(nd->choices);
       frame.kind = ExplorationFrameKind::ResumeNd;
       frame.checkpoint = graph.checkpoint();
       frame.cursor = 0;
@@ -2144,6 +2177,15 @@ class DepthFirstExplorer {
       return;
     }
 
+    // Algorithm 1 line 9 guards this continuation with VisitIfConsistent; we
+    // use plain Visit, which is sound only while every supported model
+    // satisfies: adding a fresh send to a consistent graph keeps it
+    // consistent. The new send is porf-maximal and unread, so under Async it
+    // cannot affect well-formedness or acyclicity, and under FifoP2P clause
+    // (b) needs the unread send to have an so-successor and clause (c) needs
+    // rf edges at the send — a fresh send has neither. Any new communication
+    // model must re-establish this invariant or this continuation must become
+    // VisitIfConsistent (see AGENTS.md, Consistency Invariants Policy).
     frame.kind = ExplorationFrameKind::ExitLinearChild;
     context.frames.push_back(
         ExplorationFrame<ValueT>::enter(frame.dpor_tree_depth + 1U, ExplorationTaskMode::Visit));

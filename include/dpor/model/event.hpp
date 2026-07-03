@@ -126,9 +126,10 @@ struct SendLabelT {
   ValueT value;
 };
 
-// Nondeterministic choice label. When `choices` is non-empty, the DPOR revisit
-// condition uses min_element and equality comparison on ValueT, so ValueT must
-// provide operator< and operator== in that case.
+// Nondeterministic choice label. When `choices` is non-empty, the DPOR engine
+// deduplicates the choices (S is a set) and its revisit condition uses
+// min_element and equality comparison on ValueT, so ValueT must provide
+// operator< and operator== in that case.
 template <typename ValueT>
 struct NondeterministicChoiceLabelT {
   ValueT value;

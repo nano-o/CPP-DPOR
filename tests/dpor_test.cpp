@@ -313,6 +313,27 @@ TEST_CASE("ND choice with 3 options explores 3 executions", "[algo][dpor]") {
   REQUIRE(result.executions_explored == 3);
 }
 
+TEST_CASE("ND choice with duplicate options explores each distinct value once",
+          "[algo][dpor][regression]") {
+  DporConfig config;
+
+  config.program.threads[1] = [](const ThreadTrace& trace,
+                                 std::size_t) -> std::optional<EventLabel> {
+    if (trace.empty()) {
+      return NondeterministicChoiceLabel{
+          .value = "a",
+          .choices = {"a", "b", "a", "b", "a"},
+      };
+    }
+    return std::nullopt;
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.executions_explored == 2);
+  require_dpor_matches_oracle(config.program, "T1=[ND({a,b,a,b,a})]");
+}
+
 // --- Two sends to same receiver ---
 
 TEST_CASE("two sends to same receiver explores 2 executions", "[algo][dpor]") {

@@ -66,6 +66,7 @@ This is required to preserve DPOR soundness/completeness assumptions.
 - Every graph explored by DPOR (`visit`) must satisfy full consistency (`consistent(G)`), with no issue-code exemptions.
 - Intermediate helper constructions (e.g., transient graphs during restrict/remap/revisit computation) may be partial only as internal artifacts.
 - No helper/partial graph may be emitted as a complete execution, or used as an exploration state, unless it passes full consistency.
+- The engine's send continuation deliberately skips the consistency re-check that Algorithm 1 line 9 performs (`VisitIfConsistent`). This relies on a per-model invariant: adding a fresh (porf-maximal, unread) send to a consistent graph preserves consistency. The invariant holds for `Async` and `FifoP2P`; before adding any new communication model, either re-prove it for that model or change the send continuation in `include/dpor/algo/dpor.hpp` (`handle_resume_send_revisits_frame`) to a consistency-checked visit.
 
 ## Build & Test
 

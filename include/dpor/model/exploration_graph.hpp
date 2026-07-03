@@ -756,6 +756,15 @@ class ExplorationGraphT {
     }
   }
 
+  // Fast path preserving known_acyclic_ across the add-receive/set-rf pair the
+  // DPOR engine always issues back-to-back. Sound because
+  // pending_fresh_receive_id_ only ever names the most recently added event
+  // (any later add_event or rf assignment resets it): a just-added receive is
+  // the last event of its thread, so it has no po successors, and receives are
+  // never rf sources, so it has no porf successors at all. A new
+  // send -> receive edge into a porf-maximal node cannot close a cycle,
+  // regardless of which send is chosen. Every other rf assignment
+  // conservatively invalidates the flag.
   void update_acyclicity_after_rf_assignment(EventId receive_id, const ReadsFromSource& source) {
     if (!known_acyclic_ || !pending_fresh_receive_id_.has_value() ||
         *pending_fresh_receive_id_ != receive_id || !is_valid_event_id(receive_id) ||
