@@ -31,6 +31,7 @@
 // must own its graph instance; copies may safely share an already-built cache
 // because published PorfCache contents are immutable.
 
+#include "dpor/errors.hpp"
 #include "dpor/model/event.hpp"
 #include "dpor/model/execution_graph.hpp"
 #include "dpor/model/relation.hpp"
@@ -43,7 +44,6 @@
 #include <memory>
 #include <optional>
 #include <queue>
-#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -144,7 +144,7 @@ class ExplorationGraphT {
   void rollback(Checkpoint checkpoint) {
     if (checkpoint.event_undo_size > event_undo_log_.size() ||
         checkpoint.rf_undo_size > rf_undo_log_.size()) {
-      throw std::logic_error("checkpoint does not belong to the current graph state");
+      throw precondition_error("checkpoint does not belong to the current graph state");
     }
 
     while (rf_undo_log_.size() > checkpoint.rf_undo_size) {
@@ -256,7 +256,7 @@ class ExplorationGraphT {
   // Returns true if event a was inserted before event b (<=_G).
   [[nodiscard]] bool inserted_before_or_equal(EventId a, EventId b) const {
     if (a >= insertion_position_.size() || b >= insertion_position_.size()) {
-      throw std::out_of_range("event id not found in insertion order");
+      throw precondition_error("event id not found in insertion order");
     }
     return insertion_position_[a] <= insertion_position_[b];
   }
@@ -398,9 +398,9 @@ class ExplorationGraphT {
   }
 
   [[nodiscard]] ExplorationGraphT with_bottom_rf(EventId recv) const {
-    return copy_with_rf_source(recv, ReadsFromSource::bottom(),
-                               known_acyclic_ && is_valid_event_id(recv) &&
-                                   is_receive(event(recv)));
+    return copy_with_rf_source(
+        recv, ReadsFromSource::bottom(),
+        known_acyclic_ && is_valid_event_id(recv) && is_receive(event(recv)));
   }
 
   // Rebinds the rf assignment for recv to send in place. This is intended for
@@ -408,13 +408,13 @@ class ExplorationGraphT {
   // history must continue using the undo-logging mutators.
   void rebind_rf_preserving_known_acyclicity(EventId recv, EventId send) {
     if (!event_undo_log_.empty() || !rf_undo_log_.empty()) {
-      throw std::logic_error(
+      throw precondition_error(
           "rebind_rf_preserving_known_acyclicity requires clean rollback history");
     }
 
-    const bool preserve_known_acyclicity =
-        known_acyclic_ && is_valid_event_id(recv) && is_receive(event(recv)) &&
-        is_valid_event_id(send) && is_send(event(send));
+    const bool preserve_known_acyclicity = known_acyclic_ && is_valid_event_id(recv) &&
+                                           is_receive(event(recv)) && is_valid_event_id(send) &&
+                                           is_send(event(send));
     const auto previous_source = current_reads_from_source(recv);
     const auto rebound_source = ReadsFromSource::from_send(send);
     graph_.set_reads_from_source(recv, rebound_source);
@@ -429,12 +429,15 @@ class ExplorationGraphT {
 
   // Returns a copy with the ND choice value for nd_event changed.
   [[nodiscard]] ExplorationGraphT with_nd_value(EventId nd_event, ValueT value) const {
+    if (!is_valid_event_id(nd_event)) {
+      throw precondition_error("event id not found in exploration graph");
+    }
     auto copy = *this;
     auto& events = copy.graph_.events_mutable();
-    auto& evt = events.at(nd_event);
+    auto& evt = events[nd_event];
     auto* nd = std::get_if<NondeterministicChoiceLabelT<ValueT>>(&evt.label);
     if (nd == nullptr) {
-      throw std::invalid_argument("event is not a nondeterministic choice");
+      throw precondition_error("event is not a nondeterministic choice");
     }
     nd->value = std::move(value);
     return copy;
@@ -443,11 +446,11 @@ class ExplorationGraphT {
   // Check if (from, to) is in (po ∪ rf)+.
   [[nodiscard]] bool porf_contains(EventId from, EventId to) const {
     if (!is_valid_event_id(from) || !is_valid_event_id(to)) {
-      throw std::out_of_range("event id not found in exploration graph");
+      throw precondition_error("event id not found in exploration graph");
     }
     ensure_porf_cache();
     if (porf_cache_->has_cycle) {
-      throw std::logic_error("porf_contains called on a graph with a causal cycle");
+      throw precondition_error("porf_contains called on a graph with a causal cycle");
     }
     if (from == to) {
       return false;  // Acyclic graph: no self-loops in strict transitive closure.
@@ -480,7 +483,7 @@ class ExplorationGraphT {
   [[nodiscard]] std::vector<EventId> receives_in_destination(EventId send_id) const {
     const auto* send = as_send(event(send_id));
     if (send == nullptr) {
-      throw std::invalid_argument("event is not a send");
+      throw precondition_error("event is not a send");
     }
     const auto dest_thread = send->destination;
     const auto dest_index = static_cast<std::size_t>(dest_thread);
@@ -572,7 +575,7 @@ class ExplorationGraphT {
   [[nodiscard]] ExplorationGraphT restrict_from_keep_mask(
       const std::vector<std::uint8_t>& keep_mask) const {
     if (keep_mask.size() != event_count()) {
-      throw std::invalid_argument("keep mask size must match event count");
+      throw internal_error("keep mask size must match event count");
     }
 
     std::vector<EventId> kept_ids;
@@ -662,7 +665,7 @@ class ExplorationGraphT {
     if (delta < 0) {
       const auto magnitude = static_cast<std::size_t>(-delta);
       if (reader_count < magnitude) {
-        throw std::logic_error("send reader count underflow");
+        throw internal_error("send reader count underflow");
       }
       reader_count -= magnitude;
     } else {
@@ -674,7 +677,7 @@ class ExplorationGraphT {
 
   void undo_last_rf_assignment() {
     if (rf_undo_log_.empty()) {
-      throw std::logic_error("rf undo log is empty");
+      throw internal_error("rf undo log is empty");
     }
 
     const auto undo = rf_undo_log_.back();
@@ -687,7 +690,7 @@ class ExplorationGraphT {
 
   void undo_last_event_append() {
     if (event_undo_log_.empty()) {
-      throw std::logic_error("event undo log is empty");
+      throw internal_error("event undo log is empty");
     }
 
     const auto undo = event_undo_log_.back();
@@ -697,10 +700,10 @@ class ExplorationGraphT {
     const bool removed_receive = is_receive(tail_event);
 
     if (insertion_order_.empty() || insertion_order_.back() != undo.event_id) {
-      throw std::logic_error("event undo log does not match insertion order tail");
+      throw internal_error("event undo log does not match insertion order tail");
     }
     if (insertion_position_.size() != graph_.events().size()) {
-      throw std::logic_error("event undo log does not match insertion-position state");
+      throw internal_error("event undo log does not match insertion-position state");
     }
 
     graph_.rollback_last_event(undo.event_id, undo.thread, undo.event_index,
@@ -710,13 +713,13 @@ class ExplorationGraphT {
 
     const auto thread_index = static_cast<std::size_t>(undo.thread);
     if (thread_index >= thread_state_.size()) {
-      throw std::logic_error("event undo log thread state missing");
+      throw internal_error("event undo log thread state missing");
     }
     thread_state_[thread_index] = undo.previous_thread_state;
 
     if (thread_index >= thread_event_ids_.size() || thread_event_ids_[thread_index].empty() ||
         thread_event_ids_[thread_index].back() != undo.event_id) {
-      throw std::logic_error("thread event cache does not match rolled back tail event");
+      throw internal_error("thread event cache does not match rolled back tail event");
     }
     thread_event_ids_[thread_index].pop_back();
 
@@ -724,20 +727,20 @@ class ExplorationGraphT {
       if (thread_index >= receive_event_ids_by_thread_.size() ||
           receive_event_ids_by_thread_[thread_index].empty() ||
           receive_event_ids_by_thread_[thread_index].back() != undo.event_id) {
-        throw std::logic_error("receive-event cache does not match rolled back tail event");
+        throw internal_error("receive-event cache does not match rolled back tail event");
       }
       receive_event_ids_by_thread_[thread_index].pop_back();
     }
 
     if (send_reader_counts_.empty() || unread_send_mask_.empty()) {
-      throw std::logic_error("send caches missing for rolled back tail event");
+      throw internal_error("send caches missing for rolled back tail event");
     }
     if (removed_send) {
       if (send_event_ids_.empty() || send_event_ids_.back() != undo.event_id) {
-        throw std::logic_error("send-event cache does not match rolled back tail event");
+        throw internal_error("send-event cache does not match rolled back tail event");
       }
       if (send_reader_counts_.back() != 0U) {
-        throw std::logic_error("rolled back send still appears to have readers");
+        throw internal_error("rolled back send still appears to have readers");
       }
       send_event_ids_.pop_back();
     }

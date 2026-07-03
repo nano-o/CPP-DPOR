@@ -1,3 +1,4 @@
+#include "dpor/errors.hpp"
 #include "dpor/model/consistency.hpp"
 #include "dpor/model/execution_graph.hpp"
 
@@ -5,7 +6,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <stdexcept>
 #include <string>
 
 namespace {
@@ -294,5 +294,5 @@ TEST_CASE("execution graph supports explicit index insertion for replay", "[mode
   REQUIRE(graph.event(e1).index == 4);
   REQUIRE_THROWS_AS(
       graph.add_event_with_index(7, 4, dpor::model::SendLabel{.destination = 8, .value = "c"}),
-      std::invalid_argument);
+      dpor::precondition_error);
 }

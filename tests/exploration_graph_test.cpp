@@ -1,5 +1,7 @@
 #include "dpor/model/exploration_graph.hpp"
 
+#include "dpor/errors.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <string>
@@ -549,7 +551,7 @@ TEST_CASE("owned in-place rf rebind rejects graphs with rollback history",
 
   REQUIRE(g.checkpoint().event_undo_size > 0);
   REQUIRE(g.checkpoint().rf_undo_size > 0);
-  REQUIRE_THROWS_AS(g.rebind_rf_preserving_known_acyclicity(r, s2), std::logic_error);
+  REQUIRE_THROWS_AS(g.rebind_rf_preserving_known_acyclicity(r, s2), dpor::precondition_error);
 }
 
 // --- known acyclic metadata ---
@@ -959,9 +961,9 @@ TEST_CASE("porf_contains rejects reads-from edges whose target is not a receive"
   g.set_reads_from(s2, s1);
 
   // Baseline relation construction rejects this graph.
-  REQUIRE_THROWS_AS(g.rf_relation(), std::invalid_argument);
+  REQUIRE_THROWS_AS(g.rf_relation(), dpor::precondition_error);
   // porf_contains should surface the same malformed-rf error.
-  REQUIRE_THROWS_AS(g.porf_contains(s1, s2), std::invalid_argument);
+  REQUIRE_THROWS_AS(g.porf_contains(s1, s2), dpor::precondition_error);
 }
 
 TEST_CASE("porf_contains rejects reads-from edges with out-of-range endpoints",
@@ -975,9 +977,9 @@ TEST_CASE("porf_contains rejects reads-from edges with out-of-range endpoints",
   g.set_reads_from(999, s);
 
   // Baseline relation construction rejects this graph.
-  REQUIRE_THROWS_AS(g.rf_relation(), std::invalid_argument);
+  REQUIRE_THROWS_AS(g.rf_relation(), dpor::precondition_error);
   // porf_contains should surface the same malformed-rf error.
-  REQUIRE_THROWS_AS(g.porf_contains(s, r), std::invalid_argument);
+  REQUIRE_THROWS_AS(g.porf_contains(s, r), dpor::precondition_error);
 }
 
 TEST_CASE("has_causal_cycle rejects malformed reads-from edges",
@@ -989,12 +991,12 @@ TEST_CASE("has_causal_cycle rejects malformed reads-from edges",
   g.set_reads_from(12345, s);
 
   // Baseline relation construction rejects this graph.
-  REQUIRE_THROWS_AS(g.rf_relation(), std::invalid_argument);
+  REQUIRE_THROWS_AS(g.rf_relation(), dpor::precondition_error);
   REQUIRE_FALSE(g.has_porf_cache());
-  REQUIRE_THROWS_AS(g.has_causal_cycle_without_cache(), std::invalid_argument);
+  REQUIRE_THROWS_AS(g.has_causal_cycle_without_cache(), dpor::precondition_error);
   REQUIRE_FALSE(g.has_porf_cache());
   // has_causal_cycle should surface the same malformed-rf error.
-  REQUIRE_THROWS_AS(g.has_causal_cycle(), std::invalid_argument);
+  REQUIRE_THROWS_AS(g.has_causal_cycle(), dpor::precondition_error);
 }
 
 TEST_CASE("porf_contains rejects invalid event ids",
@@ -1004,8 +1006,8 @@ TEST_CASE("porf_contains rejects invalid event ids",
   const auto r = g.add_event(2, make_receive_label<Value>());
   g.set_reads_from(r, s);
 
-  REQUIRE_THROWS_AS(g.porf_contains(s, 999), std::out_of_range);
-  REQUIRE_THROWS_AS(g.porf_contains(999, r), std::out_of_range);
+  REQUIRE_THROWS_AS(g.porf_contains(s, 999), dpor::precondition_error);
+  REQUIRE_THROWS_AS(g.porf_contains(999, r), dpor::precondition_error);
 }
 
 // --- thread_event_count ---

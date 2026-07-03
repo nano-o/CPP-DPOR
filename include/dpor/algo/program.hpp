@@ -10,13 +10,13 @@
 // and allows send-only threads to know when to stop without relying on mutable
 // captured state.
 
+#include "dpor/errors.hpp"
 #include "dpor/model/event.hpp"
 
 #include <cstddef>
 #include <functional>
 #include <initializer_list>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -57,7 +57,7 @@ class ThreadMapT {
   [[nodiscard]] const T& at(model::ThreadId tid) const {
     const auto index = static_cast<std::size_t>(tid);
     if (index >= entries_.size() || !entries_[index].has_value()) {
-      throw std::out_of_range("thread id not found");
+      throw precondition_error("thread id not found");
     }
     return *entries_[index];  // NOLINT(bugprone-unchecked-optional-access)
   }
@@ -103,7 +103,7 @@ class ThreadMapT {
       return;
     }
 
-    throw std::invalid_argument(
+    throw precondition_error(
         "thread ids must form a compact contiguous 0-based or 1-based range; "
         "observed thread ids span [" +
         std::to_string(first_tid) + ", " + std::to_string(max_tid) + "] across " +

@@ -1,5 +1,6 @@
 #include "dpor/algo/dpor.hpp"
 
+#include "dpor/errors.hpp"
 #include "dpor/model/consistency.hpp"
 
 #include "support/oracle.hpp"
@@ -171,7 +172,7 @@ TEST_CASE("verify rejects sparse program thread ids", "[algo][dpor]") {
     return std::nullopt;
   };
 
-  REQUIRE_THROWS_AS(verify(config), std::invalid_argument);
+  REQUIRE_THROWS_AS(verify(config), dpor::precondition_error);
 }
 
 TEST_CASE("verify accepts compact zero-based thread ids", "[algo][dpor]") {
@@ -1106,7 +1107,7 @@ TEST_CASE("program thread function returning BlockLabel is rejected", "[algo][dp
     return std::nullopt;
   };
 
-  REQUIRE_THROWS_AS(verify(config), std::logic_error);
+  REQUIRE_THROWS_AS(verify(config), dpor::user_code_error);
 }
 
 TEST_CASE("internal block suspends thread progress until receive is rescheduled",
@@ -1627,8 +1628,7 @@ TEST_CASE("fifo p2p tiebreaker skips FIFO-inconsistent smaller-tid send",
   graph.set_reads_from(r1, s10);
 
   REQUIRE(dpor::algo::detail::get_cons_tiebreaker(graph, r0, CommunicationModel::Async) == s11);
-  REQUIRE(dpor::algo::detail::get_cons_tiebreaker(graph, r0, CommunicationModel::FifoP2P) ==
-          s20);
+  REQUIRE(dpor::algo::detail::get_cons_tiebreaker(graph, r0, CommunicationModel::FifoP2P) == s20);
 }
 
 TEST_CASE("fifo rf rewrite helper accepts safe rewires on known-acyclic graphs",
@@ -1642,8 +1642,8 @@ TEST_CASE("fifo rf rewrite helper accepts safe rewires on known-acyclic graphs",
   graph.set_reads_from(r0, s10);
   REQUIRE(graph.is_known_acyclic());
 
-  REQUIRE(dpor::algo::detail::rf_rewrite_is_consistent(graph, r0, s20,
-                                                       CommunicationModel::FifoP2P));
+  REQUIRE(
+      dpor::algo::detail::rf_rewrite_is_consistent(graph, r0, s20, CommunicationModel::FifoP2P));
 }
 
 TEST_CASE("tiebreaker should skip compatible sends that would create a cycle",
@@ -1697,8 +1697,7 @@ TEST_CASE("receive revisit condition should use tiebreaker from G|Previous",
   const auto rf_it = restricted.reads_from().find(recv_in_previous);
   REQUIRE(rf_it != restricted.reads_from().end());
   REQUIRE(rf_it->second == expected_tiebreaker);
-  REQUIRE(dpor::algo::detail::get_cons_tiebreaker_masked(graph, previous, receive) ==
-          send_current);
+  REQUIRE(dpor::algo::detail::get_cons_tiebreaker_masked(graph, previous, receive) == send_current);
 
   // This should hold when the tiebreaker is computed on G|Previous.
   REQUIRE(dpor::algo::detail::revisit_condition(graph, receive, revisiting_send));
@@ -1992,8 +1991,8 @@ TEST_CASE("fifo p2p enforces FIFO for same-sender receive choices", "[algo][dpor
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
   REQUIRE(observed_receive_values == std::set<std::string>{"a"});
-  require_dpor_matches_oracle(
-      config.program, "fifo_p2p: T1=[S(2,a),S(2,b)]; T2=[Rb(*)]", CommunicationModel::FifoP2P);
+  require_dpor_matches_oracle(config.program, "fifo_p2p: T1=[S(2,a),S(2,b)]; T2=[Rb(*)]",
+                              CommunicationModel::FifoP2P);
 }
 
 TEST_CASE("fifo p2p still allows selective receives to consume later matching sends",
@@ -2034,9 +2033,8 @@ TEST_CASE("fifo p2p still allows selective receives to consume later matching se
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
   REQUIRE(observed_trace == std::vector<std::string>{"2", "1"});
-  require_dpor_matches_oracle(
-      config.program, "fifo_p2p: T1=[S(2,1),S(2,2)]; T2=[Rb({2}),Rb({1})]",
-      CommunicationModel::FifoP2P);
+  require_dpor_matches_oracle(config.program, "fifo_p2p: T1=[S(2,1),S(2,2)]; T2=[Rb({2}),Rb({1})]",
+                              CommunicationModel::FifoP2P);
 }
 
 TEST_CASE("fifo p2p permits different senders to the same destination in cross-sender order",
@@ -2081,9 +2079,9 @@ TEST_CASE("fifo p2p permits different senders to the same destination in cross-s
   REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
   REQUIRE(result.executions_explored == 1);
   REQUIRE(observed_trace == std::vector<std::string>{"b", "a"});
-  require_dpor_matches_oracle(
-      config.program, "fifo_p2p: T1=[S(3,a)]; T2=[S(3,b)]; T3=[Rb({b}),Rb({a})]",
-      CommunicationModel::FifoP2P);
+  require_dpor_matches_oracle(config.program,
+                              "fifo_p2p: T1=[S(3,a)]; T2=[S(3,b)]; T3=[Rb({b}),Rb({a})]",
+                              CommunicationModel::FifoP2P);
 }
 
 TEST_CASE("paper ex 2.9: ns+r explores N executions (lazy ordering)", "[algo][dpor][paper]") {
@@ -2241,8 +2239,7 @@ TEST_CASE("fifo p2p prunes backward revisits that would skip an earlier same-sen
           "[algo][dpor][fifo_p2p][regression]") {
   Program program;
 
-  program.threads[1] = [](const ThreadTrace& trace,
-                          std::size_t step) -> std::optional<EventLabel> {
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 2, .value = "a"};
     }
@@ -2254,15 +2251,13 @@ TEST_CASE("fifo p2p prunes backward revisits that would skip an earlier same-sen
     }
     return std::nullopt;
   };
-  program.threads[2] = [](const ThreadTrace& trace,
-                          std::size_t) -> std::optional<EventLabel> {
+  program.threads[2] = [](const ThreadTrace& trace, std::size_t) -> std::optional<EventLabel> {
     if (trace.empty()) {
       return make_receive_label<Value>();
     }
     return std::nullopt;
   };
-  program.threads[3] = [](const ThreadTrace&,
-                          std::size_t step) -> std::optional<EventLabel> {
+  program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "token"};
     }
@@ -2294,7 +2289,8 @@ TEST_CASE("fifo p2p prunes backward revisits that would skip an earlier same-sen
   REQUIRE(fifo_result.executions_explored == 1);
   REQUIRE(fifo_observed_receive_values == std::set<std::string>{"a"});
   require_dpor_matches_oracle(
-      program, "fifo_p2p revisit prune: T1=[S(2,a),Rb({token}),S(2,b)]; T2=[Rb(*)]; T3=[S(1,token)]",
+      program,
+      "fifo_p2p revisit prune: T1=[S(2,a),Rb({token}),S(2,b)]; T2=[Rb(*)]; T3=[S(1,token)]",
       CommunicationModel::FifoP2P);
 }
 
@@ -2508,8 +2504,7 @@ TEST_CASE("verify_parallel can stop when terminal observer requests stop",
 TEST_CASE("verify_parallel rejects reentrant invocation from a worker callback",
           "[algo][dpor][parallel]") {
   Program inner_program;
-  inner_program.threads[1] = [](const ThreadTrace&,
-                                std::size_t step) -> std::optional<EventLabel> {
+  inner_program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
     if (step == 0) {
       return SendLabel{.destination = 1, .value = "inner"};
     }
@@ -2536,24 +2531,33 @@ TEST_CASE("verify_parallel rejects reentrant invocation from a worker callback",
   options.max_workers = 2;
   options.max_queued_tasks = 4;
 
-  REQUIRE_THROWS_AS(verify_parallel(config, options), std::logic_error);
+  // The reentrancy precondition_error is raised while inside the user's
+  // terminal observer, so it crosses the callback boundary tagged as
+  // user_code_error with the precondition_error preserved as the original.
+  try {
+    static_cast<void>(verify_parallel(config, options));
+    FAIL("expected verify_parallel to throw");
+  } catch (const dpor::user_code_error& err) {
+    REQUIRE(err.kind() == dpor::UserCallbackKind::TerminalObserver);
+    REQUIRE(err.has_original());
+    REQUIRE_THROWS_AS(err.rethrow_original(), dpor::precondition_error);
+  }
 }
 
 TEST_CASE("verify and verify_parallel reject configs that set both terminal observers",
           "[algo][dpor]") {
   DporConfig config;
-  config.program.threads[1] = [](const ThreadTrace&,
-                                 std::size_t) -> std::optional<EventLabel> {
+  config.program.threads[1] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
     return std::nullopt;
   };
   config.on_terminal_execution = [](const ExplorationGraph&) {};
   config.on_execution = [](const ExplorationGraph&) {};
 
-  REQUIRE_THROWS_AS(verify(config), std::invalid_argument);
+  REQUIRE_THROWS_AS(verify(config), dpor::precondition_error);
 
   ParallelVerifyOptions options;
   options.max_workers = 1;
-  REQUIRE_THROWS_AS(verify_parallel(config, options), std::invalid_argument);
+  REQUIRE_THROWS_AS(verify_parallel(config, options), dpor::precondition_error);
 }
 
 TEST_CASE("verify_parallel reports approximate running progress and exact final progress",
@@ -2740,8 +2744,8 @@ TEST_CASE("verify handles deep ND execution without recursive stack growth",
   constexpr std::size_t kDepth = 12000;
 
   Program program;
-  program.threads[1] = [](const ThreadTrace& trace, const std::size_t step)
-      -> std::optional<EventLabel> {
+  program.threads[1] = [](const ThreadTrace& trace,
+                          const std::size_t step) -> std::optional<EventLabel> {
     if (trace.size() != step) {
       throw std::logic_error("ND stack regression: thread_trace must track prior ND choices");
     }
@@ -2771,8 +2775,8 @@ TEST_CASE("verify handles deep receive execution without recursive stack growth"
   constexpr std::size_t kReceivePairs = 6000;
 
   Program program;
-  program.threads[1] = [](const ThreadTrace& trace, const std::size_t step)
-      -> std::optional<EventLabel> {
+  program.threads[1] = [](const ThreadTrace& trace,
+                          const std::size_t step) -> std::optional<EventLabel> {
     if (trace.size() != step / 2U) {
       throw std::logic_error(
           "receive stack regression: receive observations must remain in thread_trace");
@@ -2798,8 +2802,10 @@ TEST_CASE("verify handles deep receive execution without recursive stack growth"
   REQUIRE(result.executions_explored == 1);
 }
 
-TEST_CASE("verify_parallel with one worker handles a deep linear execution without recursive stack growth",
-          "[algo][dpor][parallel][stack]") {
+TEST_CASE(
+    "verify_parallel with one worker handles a deep linear execution without recursive stack "
+    "growth",
+    "[algo][dpor][parallel][stack]") {
   constexpr std::size_t kDepth = 12000;
 
   Program program;

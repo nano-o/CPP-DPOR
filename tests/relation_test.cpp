@@ -1,8 +1,9 @@
 #include "dpor/model/relation.hpp"
 
+#include "dpor/errors.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
-#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -47,7 +48,7 @@ TEST_CASE("program order relation validates malformed thread assignments",
                         {0, 1},
                         {1, 2},
                     }),
-                    std::invalid_argument);
+                    dpor::precondition_error);
 }
 
 TEST_CASE("explicit relation stores and queries direct edges", "[model][relation][explicit]") {

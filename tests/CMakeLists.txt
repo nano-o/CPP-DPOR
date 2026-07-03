@@ -13,6 +13,9 @@ target_link_libraries(dpor_exploration_graph_test PRIVATE dpor::dpor Catch2::Cat
 add_executable(dpor_dpor_test dpor_test.cpp)
 target_link_libraries(dpor_dpor_test PRIVATE dpor::dpor Catch2::Catch2WithMain)
 
+add_executable(dpor_errors_test errors_test.cpp)
+target_link_libraries(dpor_errors_test PRIVATE dpor::dpor Catch2::Catch2WithMain)
+
 add_executable(dpor_dpor_stress_test dpor_stress_test.cpp)
 target_link_libraries(dpor_dpor_stress_test PRIVATE dpor::dpor Catch2::Catch2WithMain)
 
@@ -31,6 +34,7 @@ set(DPOR_TEST_TARGETS
   dpor_consistency_test
   dpor_exploration_graph_test
   dpor_dpor_test
+  dpor_errors_test
   dpor_dpor_stress_test
   dpor_benchmark_cli_test
 )

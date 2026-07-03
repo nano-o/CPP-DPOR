@@ -11,6 +11,7 @@
 //   can use common algebra (`compose`, closure, cycle checks) independently of
 //   how each relation is represented internally.
 
+#include "dpor/errors.hpp"
 #include "dpor/model/event.hpp"
 #include "dpor/model/relation.hpp"
 
@@ -19,7 +20,6 @@
 #include <iterator>
 #include <limits>
 #include <optional>
-#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -47,7 +47,7 @@ struct ReadsFromSourceT {
 
   [[nodiscard]] EventIdT send_id() const {
     if (!send.has_value()) {
-      throw std::logic_error("reads-from source is bottom");
+      throw precondition_error("reads-from source is bottom");
     }
     return *send;
   }
@@ -149,7 +149,7 @@ class ReadsFromRelationT {
   [[nodiscard]] const ReadsFromSource& at(EventIdT receive_id) const {
     const auto index = static_cast<std::size_t>(receive_id);
     if (index >= entries_.size() || !entries_[index].has_value()) {
-      throw std::out_of_range("reads-from entry not found");
+      throw precondition_error("reads-from entry not found");
     }
     return *entries_[index];  // NOLINT(bugprone-unchecked-optional-access)
   }
@@ -203,7 +203,7 @@ class ExecutionGraphT {
     ensure_thread_storage(thread);
     auto& used_indices = used_event_indices_by_thread_[thread];
     if (used_indices.find(index) != used_indices.end()) {
-      throw std::invalid_argument("event index already used in this thread");
+      throw precondition_error("event index already used in this thread");
     }
     used_indices.insert(index);
 
@@ -240,9 +240,21 @@ class ExecutionGraphT {
     return event_id < events_.size();
   }
 
-  [[nodiscard]] const Event& event(EventId event_id) const { return events_.at(event_id); }
+  // The throw is outlined into a cold helper so this hottest accessor stays
+  // small enough to inline everywhere (matching the code the previous
+  // events_.at() call generated).
+  [[nodiscard]] const Event& event(EventId event_id) const {
+    if (!is_valid_event_id(event_id)) {
+      throw_unknown_event_id();
+    }
+    return events_[event_id];
+  }
 
   [[nodiscard]] const std::vector<Event>& events() const noexcept { return events_; }
+
+  [[noreturn]] static void throw_unknown_event_id() {
+    throw precondition_error("event id not found in execution graph");
+  }
 
   [[nodiscard]] const ReadsFromRelation& reads_from() const noexcept { return reads_from_; }
 
@@ -311,10 +323,10 @@ class ExecutionGraphT {
       Callback&& callback) const {  // NOLINT(cppcoreguidelines-missing-std-forward)
     for (const auto& [receive_id, source] : reads_from_) {
       if (!is_valid_event_id(receive_id)) {
-        throw std::invalid_argument("reads-from relation refers to an unknown receive event id");
+        throw precondition_error("reads-from relation refers to an unknown receive event id");
       }
       if (!is_receive(events_[receive_id])) {
-        throw std::invalid_argument("reads-from relation target event is not a receive");
+        throw precondition_error("reads-from relation target event is not a receive");
       }
 
       if (source.is_bottom()) {
@@ -323,11 +335,10 @@ class ExecutionGraphT {
 
       const auto source_id = source.send_id();
       if (!is_valid_event_id(source_id)) {
-        throw std::invalid_argument(
-            "reads-from relation source refers to an unknown send event id");
+        throw precondition_error("reads-from relation source refers to an unknown send event id");
       }
       if (!is_send(events_[source_id])) {
-        throw std::invalid_argument("reads-from relation source event is not a send");
+        throw precondition_error("reads-from relation source event is not a send");
       }
 
       callback(source_id, receive_id);
@@ -348,12 +359,12 @@ class ExecutionGraphT {
   void rollback_last_event(EventId expected_event_id, ThreadId expected_thread,
                            EventIndex expected_index, EventIndex previous_next_index) {
     if (events_.empty() || expected_event_id != events_.size() - 1U) {
-      throw std::logic_error("rollback_last_event requires undoing the current tail event");
+      throw internal_error("rollback_last_event requires undoing the current tail event");
     }
 
     const auto& event = events_.back();
     if (event.thread != expected_thread || event.index != expected_index) {
-      throw std::logic_error("rollback_last_event metadata does not match the current tail event");
+      throw internal_error("rollback_last_event metadata does not match the current tail event");
     }
 
     events_.pop_back();
@@ -361,12 +372,12 @@ class ExecutionGraphT {
     const auto thread_index = static_cast<std::size_t>(expected_thread);
     if (thread_index >= next_event_index_by_thread_.size() ||
         thread_index >= used_event_indices_by_thread_.size()) {
-      throw std::logic_error("rollback_last_event thread storage missing");
+      throw internal_error("rollback_last_event thread storage missing");
     }
 
     auto& used_indices = used_event_indices_by_thread_[thread_index];
     if (used_indices.erase(expected_index) != 1U) {
-      throw std::logic_error("rollback_last_event missing used event index");
+      throw internal_error("rollback_last_event missing used event index");
     }
 
     next_event_index_by_thread_[thread_index] = previous_next_index;
@@ -389,7 +400,7 @@ class ExecutionGraphT {
 
     while (used_indices.find(next_index) != used_indices.end()) {
       if (next_index == kMaxIndex) {
-        throw std::overflow_error("no available event index for thread");
+        throw precondition_error("no available event index for thread");
       }
       ++next_index;
     }
@@ -429,7 +440,7 @@ class ExecutionGraphT {
         const auto previous = event_ids[i - 1];
         const auto current = event_ids[i];
         if (events_[previous].index == events_[current].index) {
-          throw std::invalid_argument(
+          throw internal_error(
               "two events in the same thread have the same event index; program order is "
               "ambiguous");
         }

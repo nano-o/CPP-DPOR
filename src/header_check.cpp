@@ -6,10 +6,12 @@
 
 #include "dpor/algo/dpor.hpp"
 #include "dpor/algo/program.hpp"
+#include "dpor/errors.hpp"
 #include "dpor/model/consistency.hpp"
 #include "dpor/model/event.hpp"
 #include "dpor/model/execution_graph.hpp"
 #include "dpor/model/exploration_graph.hpp"
+#include "dpor/model/format.hpp"
 #include "dpor/model/relation.hpp"
 
 namespace dpor::build {

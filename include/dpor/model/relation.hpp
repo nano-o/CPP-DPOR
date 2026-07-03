@@ -8,11 +8,12 @@
 // - This is important for DPOR: `po`, `rf`, and derived relations should share
 //   a common interface even when represented differently.
 
+#include "dpor/errors.hpp"
+
 #include <algorithm>
 #include <concepts>
 #include <cstddef>
 #include <limits>
-#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -68,7 +69,7 @@ class ExplicitRelation {
 
   void validate_node(NodeId node) const {
     if (!is_valid_node(node)) {
-      throw std::out_of_range("relation node id is out of bounds");
+      throw precondition_error("relation node id is out of bounds");
     }
   }
 
@@ -138,7 +139,7 @@ class ProgramOrderRelation {
 
   void validate_node(NodeId node) const {
     if (!is_valid_node(node)) {
-      throw std::out_of_range("relation node id is out of bounds");
+      throw precondition_error("relation node id is out of bounds");
     }
   }
 
@@ -152,7 +153,7 @@ class ProgramOrderRelation {
         const auto event = events[position];
         validate_node(event);
         if (thread_of_[event] != kNoThread) {
-          throw std::invalid_argument("event appears in more than one thread sequence");
+          throw precondition_error("event appears in more than one thread sequence");
         }
         thread_of_[event] = thread;
         position_in_thread_[event] = position;
@@ -175,7 +176,7 @@ class ComposeRelation {
   ComposeRelation(const LeftRelation& left, const RightRelation& right)
       : left_(left), right_(right) {
     if (left_.node_count() != right_.node_count()) {
-      throw std::invalid_argument("cannot compose relations with different node counts");
+      throw precondition_error("cannot compose relations with different node counts");
     }
   }
 
@@ -217,7 +218,7 @@ class ComposeRelation {
  private:
   void validate_node(NodeId node) const {
     if (node >= node_count()) {
-      throw std::out_of_range("relation node id is out of bounds");
+      throw precondition_error("relation node id is out of bounds");
     }
   }
 
@@ -293,7 +294,7 @@ class TransitiveClosureRelation {
  private:
   void validate_node(NodeId node) const {
     if (node >= node_count()) {
-      throw std::out_of_range("relation node id is out of bounds");
+      throw precondition_error("relation node id is out of bounds");
     }
   }
 
@@ -316,7 +317,7 @@ class UnionRelation {
  public:
   UnionRelation(const LeftRelation& left, const RightRelation& right) : left_(left), right_(right) {
     if (left_.node_count() != right_.node_count()) {
-      throw std::invalid_argument("cannot union relations with different node counts");
+      throw precondition_error("cannot union relations with different node counts");
     }
   }
 
@@ -355,7 +356,7 @@ class UnionRelation {
  private:
   void validate_node(NodeId node) const {
     if (node >= node_count()) {
-      throw std::out_of_range("relation node id is out of bounds");
+      throw precondition_error("relation node id is out of bounds");
     }
   }
 

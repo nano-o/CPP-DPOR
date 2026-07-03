@@ -9,6 +9,7 @@
 // All functions are header-only and templated on ValueT.
 
 #include "dpor/algo/program.hpp"
+#include "dpor/errors.hpp"
 #include "dpor/model/consistency.hpp"
 #include "dpor/model/event.hpp"
 #include "dpor/model/exploration_graph.hpp"
@@ -27,7 +28,6 @@
 #include <optional>
 #include <queue>
 #include <ranges>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -109,8 +109,9 @@ class TerminalExecutionObserverT {
   TerminalExecutionObserverT() = default;
   TerminalExecutionObserverT(std::nullptr_t) noexcept {}
 
-  template <typename Fn,
-            std::enable_if_t<!std::is_same_v<std::decay_t<Fn>, TerminalExecutionObserverT>, int> = 0>
+  template <
+      typename Fn,
+      std::enable_if_t<!std::is_same_v<std::decay_t<Fn>, TerminalExecutionObserverT>, int> = 0>
   TerminalExecutionObserverT(Fn&& fn) {
     assign(std::forward<Fn>(fn));
   }
@@ -120,8 +121,9 @@ class TerminalExecutionObserverT {
     return *this;
   }
 
-  template <typename Fn,
-            std::enable_if_t<!std::is_same_v<std::decay_t<Fn>, TerminalExecutionObserverT>, int> = 0>
+  template <
+      typename Fn,
+      std::enable_if_t<!std::is_same_v<std::decay_t<Fn>, TerminalExecutionObserverT>, int> = 0>
   TerminalExecutionObserverT& operator=(Fn&& fn) {
     assign(std::forward<Fn>(fn));
     return *this;
@@ -171,6 +173,21 @@ template <typename ValueT>
 // Compatibility alias; prefer TerminalExecutionObserverT.
 using ExecutionObserverT = TerminalExecutionObserverT<ValueT>;
 
+// Diagnostic context handed to on_fatal_error when a fatal exception is
+// raised during exploration, before it propagates out of
+// verify()/verify_parallel(). The graph is the exploration state at the
+// failure point; it is a best-effort snapshot that may be mid-mutation
+// (e.g., after a failed rollback), so it is not guaranteed to satisfy
+// consistency.
+template <typename ValueT>
+struct FatalErrorContextT {
+  const model::ExplorationGraphT<ValueT>& graph;
+  std::exception_ptr exception;
+};
+
+template <typename ValueT>
+using FatalErrorObserverT = std::function<void(const FatalErrorContextT<ValueT>&)>;
+
 template <typename ValueT>
 struct DporConfigT {
   ProgramT<ValueT> program;
@@ -183,6 +200,19 @@ struct DporConfigT {
   // Compatibility alias; prefer on_terminal_execution. Setting both this and
   // on_terminal_execution makes verify()/verify_parallel() throw.
   TerminalExecutionObserverT<ValueT> on_execution{};
+  // Diagnostic hook for fatal exceptions raised during exploration: called at
+  // most once, with the in-progress exploration graph, before the exception
+  // (user_code_error, internal_error, ...) propagates out of
+  // verify()/verify_parallel(). Intended for saving or displaying the trace
+  // that led to the failure. Fatal failures with no in-progress execution
+  // bypass it: preconditions checked before exploration begins (config and
+  // thread-id validation, the parallel reentrancy check), exceptions from the
+  // final progress report after exploration ends, and parallel queue plumbing
+  // failures. Exceptions thrown by this observer are swallowed so they never
+  // mask the original failure. In parallel mode it runs on the failing
+  // worker's thread and, under rare races, may observe the graph of a
+  // different fatal error than the one verify_parallel() rethrows.
+  FatalErrorObserverT<ValueT> on_fatal_error{};
 };
 
 // Experimental options for verify_parallel(). A zero max_workers selects a
@@ -225,20 +255,40 @@ namespace detail {
 
 using EventId = typename model::ExplorationGraphT<model::Value>::EventId;
 
+// Invokes a user callback, rethrowing anything it throws as user_code_error
+// tagged with the callback surface and (when known) the thread id. An escaping
+// user_code_error passes through unchanged so the innermost origin wins.
+template <typename Fn>
+[[nodiscard]] inline decltype(auto) invoke_user_code(const UserCallbackKind kind,
+                                                     const std::optional<model::ThreadId> tid,
+                                                     Fn&& fn) {
+  try {
+    return std::forward<Fn>(fn)();
+  } catch (const user_code_error&) {
+    throw;
+  } catch (...) {
+    throw user_code_error(kind, tid, std::current_exception());
+  }
+}
+
 template <typename ValueT>
 [[nodiscard]] inline TerminalExecutionAction notify_terminal_execution(
     const DporConfigT<ValueT>& config, const model::ExplorationGraphT<ValueT>& graph,
     const TerminalExecutionKind kind) {
   if (config.on_terminal_execution) {
-    return config.on_terminal_execution(TerminalExecutionT<ValueT>{
-        .graph = graph,
-        .kind = kind,
+    return invoke_user_code(UserCallbackKind::TerminalObserver, std::nullopt, [&]() {
+      return config.on_terminal_execution(TerminalExecutionT<ValueT>{
+          .graph = graph,
+          .kind = kind,
+      });
     });
   }
   if (config.on_execution) {
-    return config.on_execution(TerminalExecutionT<ValueT>{
-        .graph = graph,
-        .kind = kind,
+    return invoke_user_code(UserCallbackKind::TerminalObserver, std::nullopt, [&]() {
+      return config.on_execution(TerminalExecutionT<ValueT>{
+          .graph = graph,
+          .kind = kind,
+      });
     });
   }
   return TerminalExecutionAction::Continue;
@@ -247,7 +297,7 @@ template <typename ValueT>
 template <typename ValueT>
 inline void validate_terminal_observer_config(const DporConfigT<ValueT>& config) {
   if (config.on_terminal_execution && config.on_execution) {
-    throw std::invalid_argument(
+    throw precondition_error(
         "DporConfigT: set only one of on_terminal_execution and its legacy alias on_execution");
   }
 }
@@ -260,7 +310,8 @@ inline void validate_terminal_observer_config(const DporConfigT<ValueT>& config)
 template <typename ValueT>
 inline void notify_progress(const DporConfigT<ValueT>& config, const ProgressSnapshot& snapshot) {
   if (config.on_progress) {
-    config.on_progress(snapshot);
+    invoke_user_code(UserCallbackKind::ProgressObserver, std::nullopt,
+                     [&]() { config.on_progress(snapshot); });
   }
 }
 
@@ -303,8 +354,7 @@ compatible_unread_send_ids(const model::ExplorationGraphT<ValueT>& graph, const 
 
 template <typename ValueT>
 [[nodiscard]] inline model::ConsistencyResult check_consistency(
-    model::ExplorationGraphT<ValueT>& graph,
-    const model::CommunicationModel communication_model) {
+    model::ExplorationGraphT<ValueT>& graph, const model::CommunicationModel communication_model) {
   model::ConsistencyCheckerT<ValueT> checker(communication_model);
   return checker.check(graph);
 }
@@ -337,7 +387,8 @@ compute_next_event(const ProgramT<ValueT>& program, const model::ExplorationGrap
     const auto& thread_fn = program.threads.at(tid);
     const auto trace = graph.thread_trace(tid);
     const auto step = graph.thread_event_count(tid);
-    const auto next_label = thread_fn(trace, step);
+    const auto next_label = invoke_user_code(UserCallbackKind::ThreadFunction, tid,
+                                             [&]() { return thread_fn(trace, step); });
 
     if (!next_label.has_value()) {
       continue;  // Thread is done.
@@ -346,8 +397,8 @@ compute_next_event(const ProgramT<ValueT>& program, const model::ExplorationGrap
     const auto& label = *next_label;
 
     if (std::holds_alternative<model::BlockLabel>(label)) {
-      throw std::logic_error(
-          "thread function returned BlockLabel; Block events are internal to DPOR");
+      throw user_code_error(UserCallbackKind::ThreadFunction, tid, std::exception_ptr{},
+                            "returned BlockLabel; Block events are internal to DPOR");
     }
 
     // If it's a receive, check if there's at least one compatible unread send.
@@ -408,7 +459,7 @@ class MaskedPorfContext {
         consumed_send_mask_(graph.event_count(), 0),
         rf_successors_by_send_(graph.event_count()) {
     if (keep_mask_.size() != graph_.event_count()) {
-      throw std::invalid_argument("keep mask size must match event count");
+      throw internal_error("keep mask size must match event count");
     }
 
     for (const auto event_id : graph_.insertion_order()) {
@@ -448,10 +499,10 @@ class MaskedPorfContext {
 
   [[nodiscard]] std::vector<std::uint8_t> reachable_from(EvId from) const {
     if (!graph_.is_valid_event_id(from)) {
-      throw std::out_of_range("event id not found in masked PORF context");
+      throw internal_error("event id not found in masked PORF context");
     }
     if (!keeps(from)) {
-      throw std::logic_error("masked PORF reachability requires a kept source event");
+      throw internal_error("masked PORF reachability requires a kept source event");
     }
 
     std::vector<std::uint8_t> reachable(graph_.event_count(), 0);
@@ -533,8 +584,7 @@ template <typename ValueT>
     const typename model::ExplorationGraphT<ValueT>::EventId send,
     const model::CommunicationModel communication_model,
     const bool allow_non_target_missing_reads = false) {
-  if (communication_model == model::CommunicationModel::Async &&
-      !allow_non_target_missing_reads) {
+  if (communication_model == model::CommunicationModel::Async && !allow_non_target_missing_reads) {
     return !rewiring_recv_creates_cycle(graph, recv, send);
   }
 
@@ -562,11 +612,10 @@ template <typename ValueT>
   const auto& recv_evt = graph.event(recv);
   const auto* recv_label = model::as_receive(recv_evt);
   if (recv_label == nullptr) {
-    throw std::logic_error("get_cons_tiebreaker invariant violated: event is not a receive");
+    throw internal_error("get_cons_tiebreaker invariant violated: event is not a receive");
   }
   if (recv_label->is_nonblocking()) {
-    throw std::logic_error(
-        "get_cons_tiebreaker invariant violated: event is not a blocking receive");
+    throw internal_error("get_cons_tiebreaker invariant violated: event is not a blocking receive");
   }
 
   // Find all compatible sends that are available for recv to read from:
@@ -579,11 +628,11 @@ template <typename ValueT>
   // Determine which send recv currently reads from (if any).
   auto rf_it = graph.reads_from().find(recv);
   if (rf_it == graph.reads_from().end()) {
-    throw std::logic_error(
+    throw internal_error(
         "get_cons_tiebreaker invariant violated: receive missing reads-from source");
   }
   if (rf_it->second.is_bottom()) {
-    throw std::logic_error(
+    throw internal_error(
         "get_cons_tiebreaker invariant violated: blocking receive reads from bottom");
   }
   const auto current_rf_source = rf_it->second.send_id();
@@ -629,16 +678,14 @@ template <typename ValueT>
     }
   }
 
-  throw std::logic_error("get_cons_tiebreaker invariant violated: no consistent source found");
+  throw internal_error("get_cons_tiebreaker invariant violated: no consistent source found");
 }
 
 template <typename ValueT>
-[[nodiscard]] inline typename model::ExplorationGraphT<ValueT>::EventId
-get_cons_tiebreaker_masked(const model::ExplorationGraphT<ValueT>& graph,
-                           const std::vector<std::uint8_t>& keep_mask,
-                           typename model::ExplorationGraphT<ValueT>::EventId recv,
-                           const model::CommunicationModel communication_model =
-                               model::CommunicationModel::Async) {
+[[nodiscard]] inline typename model::ExplorationGraphT<ValueT>::EventId get_cons_tiebreaker_masked(
+    const model::ExplorationGraphT<ValueT>& graph, const std::vector<std::uint8_t>& keep_mask,
+    typename model::ExplorationGraphT<ValueT>::EventId recv,
+    const model::CommunicationModel communication_model = model::CommunicationModel::Async) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
 
   if (communication_model != model::CommunicationModel::Async) {
@@ -658,14 +705,13 @@ get_cons_tiebreaker_masked(const model::ExplorationGraphT<ValueT>& graph,
     }
 
     if (remapped_recv == model::ExplorationGraphT<ValueT>::kNoSource) {
-      throw std::logic_error(
-          "get_cons_tiebreaker invariant violated: event missing from keep mask");
+      throw internal_error("get_cons_tiebreaker invariant violated: event missing from keep mask");
     }
 
-    const auto remapped_send = get_cons_tiebreaker(restricted, remapped_recv, communication_model,
-                                                   true);
+    const auto remapped_send =
+        get_cons_tiebreaker(restricted, remapped_recv, communication_model, true);
     if (remapped_send >= new_to_old.size()) {
-      throw std::logic_error(
+      throw internal_error(
           "get_cons_tiebreaker invariant violated: remapped send missing from restricted graph");
     }
     return new_to_old[remapped_send];
@@ -673,17 +719,16 @@ get_cons_tiebreaker_masked(const model::ExplorationGraphT<ValueT>& graph,
 
   const MaskedPorfContext<ValueT> masked_graph(graph, keep_mask);
   if (!masked_graph.keeps(recv)) {
-    throw std::logic_error("get_cons_tiebreaker invariant violated: event missing from keep mask");
+    throw internal_error("get_cons_tiebreaker invariant violated: event missing from keep mask");
   }
 
   const auto& recv_evt = graph.event(recv);
   const auto* recv_label = model::as_receive(recv_evt);
   if (recv_label == nullptr) {
-    throw std::logic_error("get_cons_tiebreaker invariant violated: event is not a receive");
+    throw internal_error("get_cons_tiebreaker invariant violated: event is not a receive");
   }
   if (recv_label->is_nonblocking()) {
-    throw std::logic_error(
-        "get_cons_tiebreaker invariant violated: event is not a blocking receive");
+    throw internal_error("get_cons_tiebreaker invariant violated: event is not a blocking receive");
   }
 
   struct Candidate {
@@ -693,16 +738,16 @@ get_cons_tiebreaker_masked(const model::ExplorationGraphT<ValueT>& graph,
 
   auto rf_it = graph.reads_from().find(recv);
   if (rf_it == graph.reads_from().end()) {
-    throw std::logic_error(
+    throw internal_error(
         "get_cons_tiebreaker invariant violated: receive missing reads-from source");
   }
   if (rf_it->second.is_bottom()) {
-    throw std::logic_error(
+    throw internal_error(
         "get_cons_tiebreaker invariant violated: blocking receive reads from bottom");
   }
   const auto current_rf_source = rf_it->second.send_id();
   if (!masked_graph.keeps(current_rf_source)) {
-    throw std::logic_error(
+    throw internal_error(
         "get_cons_tiebreaker invariant violated: receive source missing from keep mask");
   }
 
@@ -747,7 +792,7 @@ get_cons_tiebreaker_masked(const model::ExplorationGraphT<ValueT>& graph,
     }
   }
 
-  throw std::logic_error("get_cons_tiebreaker invariant violated: no consistent source found");
+  throw internal_error("get_cons_tiebreaker invariant violated: no consistent source found");
 }
 
 // REVISITCONDITION(G, e, s):
@@ -755,11 +800,11 @@ get_cons_tiebreaker_masked(const model::ExplorationGraphT<ValueT>& graph,
 // - non-receive → no receive in Previous reads from e
 // - receive → rf(e) == get_cons_tiebreaker(G|Previous, e)
 template <typename ValueT>
-[[nodiscard]] inline bool revisit_condition(const model::ExplorationGraphT<ValueT>& graph,
-                                            typename model::ExplorationGraphT<ValueT>::EventId e,
-                                            typename model::ExplorationGraphT<ValueT>::EventId s,
-                                            const model::CommunicationModel communication_model =
-                                                model::CommunicationModel::Async) {
+[[nodiscard]] inline bool revisit_condition(
+    const model::ExplorationGraphT<ValueT>& graph,
+    typename model::ExplorationGraphT<ValueT>::EventId e,
+    typename model::ExplorationGraphT<ValueT>::EventId s,
+    const model::CommunicationModel communication_model = model::CommunicationModel::Async) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
   constexpr auto kNoSource = model::ExplorationGraphT<ValueT>::kNoSource;
 
@@ -768,7 +813,7 @@ template <typename ValueT>
   if (const auto* recv = model::as_receive(evt); recv != nullptr && recv->is_nonblocking()) {
     auto rf_it = graph.reads_from().find(e);
     if (rf_it == graph.reads_from().end()) {
-      throw std::logic_error(
+      throw internal_error(
           "revisit_condition invariant violated: non-blocking receive missing reads-from source");
     }
     return rf_it->second.is_bottom();
@@ -809,18 +854,17 @@ template <typename ValueT>
   // to the Previous set, not the full graph.
   const auto previous = compute_previous_set(graph, e, s);
   if (previous[e] == 0U) {
-    throw std::logic_error("revisit_condition invariant violated: event missing from Previous");
+    throw internal_error("revisit_condition invariant violated: event missing from Previous");
   }
 
   // If rf(e) is not in Previous, the equality must fail: it cannot match any
   // tiebreaker source of G|Previous.
   auto rf_it = graph.reads_from().find(e);
   if (rf_it == graph.reads_from().end()) {
-    throw std::logic_error(
-        "revisit_condition invariant violated: receive missing reads-from source");
+    throw internal_error("revisit_condition invariant violated: receive missing reads-from source");
   }
   if (rf_it->second.is_bottom()) {
-    throw std::logic_error(
+    throw internal_error(
         "revisit_condition invariant violated: blocking receive reads from bottom");
   }
   const auto current_rf_original = rf_it->second.send_id();
@@ -849,14 +893,12 @@ struct ExplorationTask {
 template <typename ValueT, typename ExecutorT>
 inline void visit_impl(const ProgramT<ValueT>& program, model::ExplorationGraphT<ValueT>& graph,
                        ExecutorT& executor, const DporConfigT<ValueT>& config,
-                       std::size_t dpor_tree_depth,
-                       const std::vector<model::ThreadId>& thread_ids);
+                       std::size_t dpor_tree_depth, const std::vector<model::ThreadId>& thread_ids);
 
 template <typename ValueT, typename ExecutorT>
 inline void visit_if_consistent_impl(const ProgramT<ValueT>& program,
                                      model::ExplorationGraphT<ValueT>& graph, ExecutorT& executor,
-                                     const DporConfigT<ValueT>& config,
-                                     std::size_t dpor_tree_depth,
+                                     const DporConfigT<ValueT>& config, std::size_t dpor_tree_depth,
                                      const std::vector<model::ThreadId>& thread_ids);
 
 template <typename ValueT>
@@ -937,7 +979,23 @@ class SequentialExecutor {
       return;
     }
     notify_progress(config_, make_progress_snapshot(progress_state_from_result_kind(result_.kind),
-                                                   Clock::now()));
+                                                    Clock::now()));
+  }
+
+  // Diagnostic-only hook invoked while the failing graph is still intact;
+  // must never throw so the original exception keeps propagating.
+  void notify_fatal_error(const model::ExplorationGraphT<ValueT>& graph,
+                          const std::exception_ptr& exception) noexcept {
+    if (!config_.on_fatal_error) {
+      return;
+    }
+    try {
+      config_.on_fatal_error(FatalErrorContextT<ValueT>{
+          .graph = graph,
+          .exception = exception,
+      });
+    } catch (...) {
+    }
   }
 
  private:
@@ -993,7 +1051,7 @@ class ParallelExecutor {
       // worker_state() is one thread_local per OS thread shared by all
       // executor instances, so interleaving two executors on one thread
       // would corrupt terminal counts and stop-flag caching.
-      throw std::logic_error(
+      throw precondition_error(
           "verify_parallel is not reentrant: it must not be called from inside a parallel "
           "exploration worker (e.g., from an observer callback or thread function)");
     }
@@ -1088,8 +1146,7 @@ class ParallelExecutor {
     }
   }
 
-  [[nodiscard]] bool publish_depth_limit_execution(
-      const model::ExplorationGraphT<ValueT>& graph) {
+  [[nodiscard]] bool publish_depth_limit_execution(const model::ExplorationGraphT<ValueT>& graph) {
     if (sync_steps_ == 0) {
       std::lock_guard lock(publication_mutex_);
       if (stop_requested_.load(std::memory_order_acquire)) {
@@ -1118,8 +1175,7 @@ class ParallelExecutor {
     if (fanout < min_fanout_) {
       return false;
     }
-    if (options_.spawn_depth_cutoff != 0 &&
-        child_dpor_tree_depth > options_.spawn_depth_cutoff) {
+    if (options_.spawn_depth_cutoff != 0 && child_dpor_tree_depth > options_.spawn_depth_cutoff) {
       return false;
     }
     return true;
@@ -1191,6 +1247,27 @@ class ParallelExecutor {
     return true;
   }
 
+  // Runs on the failing worker's thread. Only the first fatal error is
+  // reported; the callback runs without locks (matching terminal-observer
+  // discipline), so under rare races the reported graph may belong to a
+  // different fatal error than the exception verify_parallel() rethrows.
+  void notify_fatal_error(const model::ExplorationGraphT<ValueT>& graph,
+                          const std::exception_ptr& exception) noexcept {
+    if (!config_.on_fatal_error) {
+      return;
+    }
+    if (fatal_error_reported_.exchange(true, std::memory_order_acq_rel)) {
+      return;
+    }
+    try {
+      config_.on_fatal_error(FatalErrorContextT<ValueT>{
+          .graph = graph,
+          .exception = exception,
+      });
+    } catch (...) {
+    }
+  }
+
  private:
   [[nodiscard]] static std::size_t resolve_max_workers(const std::size_t requested) {
     if (requested != 0) {
@@ -1233,6 +1310,18 @@ class ParallelExecutor {
 
   void worker_loop() {
     const ActiveExecutorGuard active_guard(this);
+    try {
+      worker_loop_impl();
+    } catch (...) {
+      // Failures in the queue/synchronisation machinery itself (process_task
+      // records its own exceptions) must not escape a worker thread, where
+      // they would call std::terminate; record and let run() rethrow after
+      // joining. record_exception() requests stop, so peer workers drain.
+      record_exception(std::current_exception());
+    }
+  }
+
+  void worker_loop_impl() {
     while (true) {
       std::optional<ExplorationTask<ValueT>> task;
       {
@@ -1313,7 +1402,8 @@ class ParallelExecutor {
         break;
     }
     ++state.pending_terminal_executions;
-    if (config_.on_progress && state.pending_terminal_executions >= progress_counter_flush_interval_) {
+    if (config_.on_progress &&
+        state.pending_terminal_executions >= progress_counter_flush_interval_) {
       flush_local_counts(state);
     }
   }
@@ -1333,8 +1423,7 @@ class ParallelExecutor {
       full_executions_explored_.fetch_add(state.local_full_executions, std::memory_order_relaxed);
     }
     if (state.local_error_executions > 0) {
-      error_executions_explored_.fetch_add(state.local_error_executions,
-                                           std::memory_order_relaxed);
+      error_executions_explored_.fetch_add(state.local_error_executions, std::memory_order_relaxed);
     }
     if (state.local_depth_limit_executions > 0) {
       depth_limit_executions_explored_.fetch_add(state.local_depth_limit_executions,
@@ -1378,8 +1467,8 @@ class ParallelExecutor {
     snapshot.error_executions = error_executions_explored_.load(std::memory_order_relaxed);
     snapshot.depth_limit_executions =
         depth_limit_executions_explored_.load(std::memory_order_relaxed);
-    snapshot.terminal_executions = snapshot.full_executions + snapshot.error_executions +
-                                   snapshot.depth_limit_executions;
+    snapshot.terminal_executions =
+        snapshot.full_executions + snapshot.error_executions + snapshot.depth_limit_executions;
     snapshot.max_workers = max_workers_;
     snapshot.max_queued_tasks = max_queued_tasks_;
     snapshot.counts_exact = counts_exact;
@@ -1421,6 +1510,7 @@ class ParallelExecutor {
   std::atomic<ProgressTick> next_progress_report_tick_{0};
 
   std::atomic<bool> stop_requested_{false};
+  std::atomic<bool> fatal_error_reported_{false};
   std::atomic<std::size_t> full_executions_explored_{0};
   std::atomic<std::size_t> error_executions_explored_{0};
   std::atomic<std::size_t> depth_limit_executions_explored_{0};
@@ -1634,8 +1724,8 @@ inline void for_each_backward_revisit_child(
   const auto receives = graph.receives_in_destination(send_id);
   std::size_t receive_index = 0;
   while (!should_stop()) {
-    auto next = next_backward_revisit_child(graph, send_id, communication_model, receives,
-                                            receive_index);
+    auto next =
+        next_backward_revisit_child(graph, send_id, communication_model, receives, receive_index);
     receive_index = next.next_receive_index;
     if (!next.child.has_value()) {
       return;
@@ -1647,8 +1737,7 @@ inline void for_each_backward_revisit_child(
 }
 
 template <typename ValueT, typename ExecutorT>
-[[nodiscard]] inline BlockedReceiveRescheduleResult<ValueT>
-find_blocked_receive_reschedule_child(
+[[nodiscard]] inline BlockedReceiveRescheduleResult<ValueT> find_blocked_receive_reschedule_child(
     const ProgramT<ValueT>& program, const model::ExplorationGraphT<ValueT>& graph,
     ExecutorT& executor, const DporConfigT<ValueT>& config,
     const std::vector<model::ThreadId>& thread_ids) {
@@ -1673,23 +1762,33 @@ find_blocked_receive_reschedule_child(
     const auto& thread_fn = program.threads.at(tid);
     const auto trace = unblocked_graph.thread_trace(tid);
     const auto step = unblocked_graph.thread_event_count(tid);
-    const auto next_label = thread_fn(trace, step);
+    const auto next_label = invoke_user_code(UserCallbackKind::ThreadFunction, tid,
+                                             [&]() { return thread_fn(trace, step); });
 
+    // The thread previously returned a blocking receive at this (trace, step);
+    // anything else now is a determinism-contract violation by the harness.
     if (!next_label.has_value()) {
-      throw std::logic_error(
-          "blocked thread became done after unblocking; expected a blocking receive");
+      throw user_code_error(UserCallbackKind::ThreadFunction, tid, std::exception_ptr{},
+                            "blocked thread became done after unblocking; determinism requires "
+                            "the same blocking receive for the same (trace, step)");
     }
     if (std::holds_alternative<model::BlockLabel>(*next_label)) {
-      throw std::logic_error(
-          "thread function returned BlockLabel; Block events are internal to DPOR");
+      throw user_code_error(UserCallbackKind::ThreadFunction, tid, std::exception_ptr{},
+                            "returned BlockLabel; Block events are internal to DPOR");
     }
 
     const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&*next_label);
     if (recv == nullptr) {
-      throw std::logic_error("blocked thread did not produce a receive after unblocking");
+      throw user_code_error(UserCallbackKind::ThreadFunction, tid, std::exception_ptr{},
+                            "blocked thread did not produce a receive after unblocking; "
+                            "determinism requires the same blocking receive for the same "
+                            "(trace, step)");
     }
     if (recv->is_nonblocking()) {
-      throw std::logic_error("blocked thread produced a non-blocking receive after unblocking");
+      throw user_code_error(UserCallbackKind::ThreadFunction, tid, std::exception_ptr{},
+                            "blocked thread produced a non-blocking receive after unblocking; "
+                            "determinism requires the same blocking receive for the same "
+                            "(trace, step)");
     }
     if (!has_compatible_unread_send(unblocked_graph, tid, *recv)) {
       continue;
@@ -1813,6 +1912,11 @@ class DepthFirstExplorer {
         }
       }
     } catch (...) {
+      // Report the at-failure graph before unwinding destroys it, so the
+      // harness can save the trace that provoked the exception.
+      if (!contexts_.empty()) {
+        executor_.notify_fatal_error(current_context().graph(), std::current_exception());
+      }
       // A rollback failure while unwinding implies already-corrupted state;
       // drop the remaining contexts rather than mask the original exception.
       try {
@@ -1894,9 +1998,8 @@ class DepthFirstExplorer {
         static_cast<void>(graph.add_event(tid, label));
         frame.kind = ExplorationFrameKind::ExitLinearChild;
         frame.checkpoint = checkpoint;
-        context.frames.push_back(
-            ExplorationFrame<ValueT>::enter(frame.dpor_tree_depth + 1U,
-                                            ExplorationTaskMode::Visit));
+        context.frames.push_back(ExplorationFrame<ValueT>::enter(frame.dpor_tree_depth + 1U,
+                                                                 ExplorationTaskMode::Visit));
         return;
       }
 
@@ -1942,8 +2045,7 @@ class DepthFirstExplorer {
       frame.kind = ExplorationFrameKind::ExitLinearChild;
       frame.checkpoint = checkpoint;
       context.frames.push_back(
-          ExplorationFrame<ValueT>::enter(frame.dpor_tree_depth + 1U,
-                                          ExplorationTaskMode::Visit));
+          ExplorationFrame<ValueT>::enter(frame.dpor_tree_depth + 1U, ExplorationTaskMode::Visit));
       return;
     }
   }
@@ -1956,11 +2058,11 @@ class DepthFirstExplorer {
     graph.rollback(frame.checkpoint);
 
     if (!frame.label.has_value()) {
-      throw std::logic_error("ND resume frame lost its cached label");
+      throw internal_error("ND resume frame lost its cached label");
     }
     const auto* nd = std::get_if<model::NondeterministicChoiceLabelT<ValueT>>(&*frame.label);
     if (nd == nullptr || nd->choices.empty()) {
-      throw std::logic_error("ND resume frame expected a non-empty ND choice");
+      throw internal_error("ND resume frame expected a non-empty ND choice");
     }
 
     if (frame.cursor >= nd->choices.size()) {
@@ -1986,11 +2088,11 @@ class DepthFirstExplorer {
     graph.rollback(frame.checkpoint);
 
     if (!frame.label.has_value()) {
-      throw std::logic_error("receive resume frame lost its cached label");
+      throw internal_error("receive resume frame lost its cached label");
     }
     const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&*frame.label);
     if (recv == nullptr) {
-      throw std::logic_error("receive resume frame expected a receive");
+      throw internal_error("receive resume frame expected a receive");
     }
 
     if (frame.cursor < frame.candidate_event_ids.size()) {
@@ -1998,9 +2100,8 @@ class DepthFirstExplorer {
       const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
       const auto recv_id = graph.add_event(frame.thread_id, *frame.label);
       graph.set_reads_from(recv_id, send_id);
-      context.frames.push_back(
-          ExplorationFrame<ValueT>::enter(child_dpor_tree_depth,
-                                          ExplorationTaskMode::VisitIfConsistent));
+      context.frames.push_back(ExplorationFrame<ValueT>::enter(
+          child_dpor_tree_depth, ExplorationTaskMode::VisitIfConsistent));
       return;
     }
 
@@ -2009,9 +2110,8 @@ class DepthFirstExplorer {
       const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
       const auto recv_id = graph.add_event(frame.thread_id, *frame.label);
       graph.set_reads_from_bottom(recv_id);
-      context.frames.push_back(
-          ExplorationFrame<ValueT>::enter(child_dpor_tree_depth,
-                                          ExplorationTaskMode::VisitIfConsistent));
+      context.frames.push_back(ExplorationFrame<ValueT>::enter(
+          child_dpor_tree_depth, ExplorationTaskMode::VisitIfConsistent));
       return;
     }
 
@@ -2025,7 +2125,7 @@ class DepthFirstExplorer {
 
     if (frame.event_id == Graph::kNoSource || !graph.is_valid_event_id(frame.event_id) ||
         !model::is_send(graph.event(frame.event_id))) {
-      throw std::logic_error("send resume frame expected a live send event");
+      throw internal_error("send resume frame expected a live send event");
     }
 
     auto next = next_backward_revisit_child(graph, frame.event_id, config_.communication_model,
@@ -2035,9 +2135,8 @@ class DepthFirstExplorer {
     if (next.child.has_value()) {
       const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
       auto revisited = std::move(*next.child);
-      if (frame.flag &&
-          try_enqueue_owned_task<ValueT>(executor_, revisited, child_dpor_tree_depth,
-                                         ExplorationTaskMode::VisitIfConsistent)) {
+      if (frame.flag && try_enqueue_owned_task<ValueT>(executor_, revisited, child_dpor_tree_depth,
+                                                       ExplorationTaskMode::VisitIfConsistent)) {
         return;
       }
       push_owned_context(std::move(revisited), child_dpor_tree_depth,
@@ -2047,8 +2146,7 @@ class DepthFirstExplorer {
 
     frame.kind = ExplorationFrameKind::ExitLinearChild;
     context.frames.push_back(
-        ExplorationFrame<ValueT>::enter(frame.dpor_tree_depth + 1U,
-                                        ExplorationTaskMode::Visit));
+        ExplorationFrame<ValueT>::enter(frame.dpor_tree_depth + 1U, ExplorationTaskMode::Visit));
   }
 
   const ProgramT<ValueT>& program_;
@@ -2097,7 +2195,8 @@ inline void backward_revisit(const ProgramT<ValueT>& program,
   DepthFirstExplorer<ValueT, SequentialExecutor<ValueT>> explorer(program, executor, config,
                                                                   thread_ids);
   for_each_backward_revisit_child(
-      graph, send_id, config.communication_model, [&executor]() { return executor.stop_requested(); },
+      graph, send_id, config.communication_model,
+      [&executor]() { return executor.stop_requested(); },
       [&](model::ExplorationGraphT<ValueT> revisited) {
         explorer.run(revisited, dpor_tree_depth, ExplorationTaskMode::VisitIfConsistent);
         return !executor.stop_requested();
@@ -2107,8 +2206,7 @@ inline void backward_revisit(const ProgramT<ValueT>& program,
 template <typename ValueT>
 inline void visit(const ProgramT<ValueT>& program, model::ExplorationGraphT<ValueT>& graph,
                   VerifyResult& result, const DporConfigT<ValueT>& config,
-                  std::size_t dpor_tree_depth,
-                  const std::vector<model::ThreadId>& thread_ids) {
+                  std::size_t dpor_tree_depth, const std::vector<model::ThreadId>& thread_ids) {
   SequentialExecutor<ValueT> executor(result, config);
   visit_impl(program, graph, executor, config, dpor_tree_depth, thread_ids);
 }

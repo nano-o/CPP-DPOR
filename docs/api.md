@@ -13,12 +13,14 @@ types. Default aliases such as `dpor::algo::Program` and
 
 ## Headers
 
+- `include/dpor/errors.hpp`
 - `include/dpor/algo/program.hpp`
 - `include/dpor/algo/dpor.hpp`
 - `include/dpor/model/event.hpp`
 - `include/dpor/model/execution_graph.hpp`
 - `include/dpor/model/exploration_graph.hpp`
 - `include/dpor/model/consistency.hpp`
+- `include/dpor/model/format.hpp`
 - `include/dpor/model/relation.hpp`
 
 ## Quick start
@@ -122,6 +124,7 @@ struct DporConfigT {
   TerminalExecutionObserverT<ValueT> on_terminal_execution{};
   ProgressObserver on_progress{};
   std::chrono::milliseconds progress_report_interval{std::chrono::seconds(1)};
+  FatalErrorObserverT<ValueT> on_fatal_error{};
 };
 ```
 
@@ -217,6 +220,101 @@ that case `counts_exact` is `false`. When `progress_report_interval > 0`,
 parallel workers only poll the clock every `progress_poll_interval_steps`
 internal progress checkpoints to keep the hot path cheaper.
 
+## Error reporting model
+
+The library separates three kinds of failure, each with its own channel.
+
+### 1. Errors in the system under test: `ErrorLabel`, not exceptions
+
+An error detected in the SUT (a violated protocol invariant, an assertion
+failure in handler logic) is an *outcome of the explored interleaving*, not a
+failure of the checker. Harnesses report it by returning
+`ErrorLabel{message}` from the thread function. DPOR records the error event,
+invokes `on_terminal_execution` with kind `TerminalExecutionKind::Error` and
+the full counterexample graph, counts it in `error_executions_explored`, and
+keeps exploring other interleavings unless the observer requests `Stop`.
+
+The harness is expected to catch SUT-semantic exceptions and convert them into
+`ErrorLabel` deterministically. Two obligations remain with the harness:
+
+- *Determinism*: whether the SUT fails must be a deterministic function of
+  `(trace, step)`. Catching a nondeterministic failure (OOM, timeout, races in
+  the harness) and converting it to `ErrorLabel` masks a contract violation
+  and silently breaks DPOR soundness. Let such exceptions escape instead; an
+  aborted run is loud, a corrupted exploration is not.
+- *Isolation*: catching an exception does not undo what a half-executed
+  handler mutated. Run SUT logic against isolated snapshots.
+
+Receive matchers have no `ErrorLabel` channel: they return `bool` and are also
+called during consistency checking. When matching defers to SUT logic, fold
+rejection into a deterministic `false`.
+
+### 2. Inconsistent candidate graphs: values, not exceptions
+
+Consistency checking returns `ConsistencyResult` issue lists (see below);
+inconsistent candidates are silently pruned during exploration. This is
+control flow, not an error.
+
+### 3. Exceptions: `dpor::error` hierarchy (`dpor/errors.hpp`)
+
+Every exception the library throws derives from `dpor::error`
+(itself a `std::runtime_error`):
+
+- `dpor::internal_error` — a library invariant was violated. Always a bug in
+  dpor itself; please report it.
+- `dpor::precondition_error` — the caller violated a documented API
+  precondition (non-compact thread ids, malformed rf edges, `porf_contains`
+  on a cyclic graph, both terminal-observer aliases set, ...).
+- `dpor::user_code_error` — an exception escaped a user callback, or a
+  callback returned an illegal result (e.g., a thread function returning
+  `BlockLabel`, or violating determinism on the blocked-receive reschedule
+  path). Carries the callback surface (`kind()`: thread function, receive
+  matcher, terminal observer, progress observer), the thread id when known
+  (`thread()`), and the original exception (`has_original()`,
+  `rethrow_original()`). A `user_code_error` thrown inside a callback passes
+  through unwrapped, so the innermost origin wins; any other exception
+  crossing the callback boundary is wrapped — including `dpor::*` errors the
+  callback itself provoked by calling the library incorrectly.
+
+Any exception reaching the `verify()` / `verify_parallel()` caller is fatal to
+the run: exploration stops and the remaining interleavings are not visited.
+In parallel mode the first recorded exception is rethrown after workers drain.
+
+### Saving a trace on fatal errors: `on_fatal_error`
+
+`DporConfigT::on_fatal_error` is a diagnostic hook for fatal exceptions raised
+*during exploration* — while an in-progress execution exists to report. It is
+called at most once, before the exception propagates, with:
+
+```cpp
+template <typename ValueT>
+struct FatalErrorContextT {
+  const model::ExplorationGraphT<ValueT>& graph;  // exploration state at failure
+  std::exception_ptr exception;
+};
+```
+
+Use it to display or save the trace that provoked the failure — the same
+graph-printing code used in `on_terminal_execution` works here, and
+`model::format_graph(graph[, value_formatter])` from
+`include/dpor/model/format.hpp` renders any graph as one event per line in
+insertion order. Caveats:
+
+- The graph is a best-effort diagnostic snapshot; after an internal rollback
+  failure it may be mid-mutation and inconsistent. The reference is only
+  valid during the callback — copy what you need.
+- Exceptions thrown by `on_fatal_error` are swallowed so they never mask the
+  original failure.
+- Fatal failures with no in-progress execution do not invoke it: preconditions
+  checked before exploration begins (config validation, thread-id validation,
+  the parallel reentrancy check), exceptions from the final progress report
+  after exploration ends, and parallel queue/synchronisation plumbing
+  failures. These still propagate out of `verify()`/`verify_parallel()` as
+  typed exceptions.
+- In parallel mode the callback runs on the failing worker's thread and, under
+  rare races, may observe a different fatal error than the one
+  `verify_parallel()` rethrows.
+
 ## Execution graphs
 
 ### `ExecutionGraphT<ValueT>`
@@ -269,7 +367,8 @@ Graph transformation and rollback helpers:
 - `checkpoint()`
 - `rollback(checkpoint)`
 
-`porf_contains()` requires an acyclic graph and throws on causal cycles.
+`porf_contains()` requires an acyclic graph and throws `dpor::precondition_error`
+on causal cycles.
 
 ## Consistency checking
 

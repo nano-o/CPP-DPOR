@@ -12,11 +12,13 @@
 // - Provide default aliases (`Event`, `SendLabel`, ...) so common usage stays
 //   concise when `std::string` payloads are sufficient.
 
+#include "dpor/errors.hpp"
+
 #include <algorithm>
 #include <concepts>
 #include <cstdint>
+#include <exception>
 #include <functional>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
@@ -58,7 +60,7 @@ struct ObservedValueT {
   [[nodiscard]] const ValueT& value() const {
     const auto* observed = as_value();
     if (observed == nullptr) {
-      throw std::logic_error("observed value is bottom");
+      throw precondition_error("observed value is bottom");
     }
     return *observed;
   }
@@ -102,7 +104,20 @@ struct ReceiveLabelT {
 
   [[nodiscard]] bool is_nonblocking() const noexcept { return mode == ReceiveMode::NonBlocking; }
 
-  [[nodiscard]] bool accepts(const ValueT& value) const { return matches(value); }
+  // Single choke point for invoking the user-provided matcher: anything it
+  // throws surfaces as user_code_error so callers can tell harness failures
+  // from library errors. The thread id is unknown at this level; engine-side
+  // fatal handling supplies the graph context.
+  [[nodiscard]] bool accepts(const ValueT& value) const {
+    try {
+      return matches(value);
+    } catch (const user_code_error&) {
+      throw;
+    } catch (...) {
+      throw user_code_error(UserCallbackKind::ReceiveMatcher, std::nullopt,
+                            std::current_exception());
+    }
+  }
 };
 
 template <typename ValueT>
