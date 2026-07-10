@@ -692,7 +692,7 @@ TEST_CASE("exploration-graph checker overload leaves cold porf cache untouched",
   REQUIRE_FALSE(graph.has_porf_cache());
 }
 
-TEST_CASE("exploration-graph checker overload reuses warm porf cache",
+TEST_CASE("exploration-graph checker overload leaves a warm porf cache intact",
           "[model][consistency][exploration_graph]") {
   ExplorationGraph graph;
   const auto s = graph.add_event(1, SendLabel{.destination = 2, .value = "x"});

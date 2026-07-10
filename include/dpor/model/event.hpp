@@ -82,10 +82,12 @@ template <typename ValueT>
 
 using ObservedValue = ObservedValueT<Value>;
 
-// Receive matcher predicate. Must be deterministic and side-effect-free: the
-// same ValueT input must always produce the same bool result. DPOR soundness
-// and completeness depend on this invariant. Stateful or mutable captures will
-// silently invalidate exploration guarantees.
+// Receive matcher predicate. The same ValueT input must always produce the
+// same bool result, and calls must not leak state into later invocations. DPOR
+// soundness and completeness depend on these invariants. Stateful matching
+// logic must run against isolated snapshots. verify_parallel() may evaluate
+// matchers concurrently, so captured state must also be safe for concurrent
+// use.
 //
 // Additionally, `std::function` keeps matcher semantics flexible but makes
 // matcher identity opaque. As a result, `ReceiveLabelT` equality is not

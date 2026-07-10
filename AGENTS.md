@@ -10,7 +10,7 @@ The Must paper is our semantic north star for:
 
 - execution graphs (`E`, `po`, `rf`)
 - well-formedness and consistency concepts
-- async communication semantics and later DPOR exploration strategy
+- async communication semantics and the DPOR exploration strategy
 
 ## Important Constraint: Existing Codebases
 
@@ -32,10 +32,16 @@ To support the above:
 
 ## Determinism Requirements
 
-Any callback/predicate used during exploration (especially receive matching) must be:
+Any callback/predicate that defines explored behavior (especially thread
+functions and receive matching) must be:
 
 - deterministic for the same exploration state
 - side-effect free, or run against isolated snapshots
+
+Parallel exploration may invoke thread functions, receive matchers, and
+observers from multiple workers. Those callbacks and any captured state must
+also be safe for concurrent use. Observers may perform reporting or aggregation,
+but must not mutate state consulted by model callbacks.
 
 This is required to preserve DPOR soundness/completeness assumptions.
 
@@ -132,7 +138,7 @@ The engine in `include/dpor/algo/dpor.hpp` implements **Algorithm 1** from the M
 - `visit()` — iterative exploration of consistent executions via the internal
   frame/context stack machine
 - `backward_revisit()` — identifies alternative interleavings or message matches
-- `DporConfigT` — configuration: program, max_depth, communication_model, terminal-execution observer callback (`on_terminal_execution`; legacy alias `on_execution`), and optional progress reporting
+- `DporConfigT` — configuration: program, max_depth, communication_model, terminal-execution observer callback (`on_terminal_execution`; legacy alias `on_execution`), optional progress reporting, and an optional fatal-error diagnostic observer
 - `ParallelVerifyOptions` — parallel tuning: `max_workers`, `max_queued_tasks`, `spawn_depth_cutoff`, `min_fanout`, `sync_steps`, `progress_counter_flush_interval`, `progress_poll_interval_steps`
 
 Programs are defined via `ProgramT` / `ThreadFunctionT` in `include/dpor/algo/program.hpp`.

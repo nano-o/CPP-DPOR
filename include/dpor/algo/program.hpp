@@ -136,11 +136,12 @@ using ThreadTraceEntryT = model::ObservedValueT<ValueT>;
 template <typename ValueT>
 using ThreadTraceT = std::vector<ThreadTraceEntryT<ValueT>>;
 
-// Thread step function. Must be deterministic and side-effect-free: the same
-// (trace, step) arguments must always produce the same event label. DPOR
-// correctness (soundness and completeness) depends on this invariant.
-// Stateful captures or external side effects will silently invalidate
-// exploration guarantees.
+// Thread step function. The same (trace, step) arguments must always produce
+// the same event-label semantics, and calls must not leak state into later
+// invocations. DPOR correctness (soundness and completeness) depends on these
+// invariants. Stateful adapters must replay against isolated snapshots.
+// verify_parallel() may invoke thread functions concurrently, so captured
+// state must also be safe for concurrent use.
 // Because sends are not included in trace, callers must use `step` (not
 // trace.size()) to determine local control-flow progress.
 //

@@ -23,8 +23,9 @@
 // - receives_in_destination(send_id): receives in the send's destination thread
 // - has_causal_cycle(): cache-backed cycle check
 //
-// Graph operations (restrict, with_rf, with_nd_value) return copies.
-// This matches the recursive branching nature of Algorithm 1.
+// Graph operations such as restrict(), with_rf(), and with_nd_value() return
+// owned copies for branches that cannot use the iterative explorer's
+// checkpoint/rollback path.
 //
 // Thread safety: const reachability queries (porf_contains, has_causal_cycle)
 // lazily build the PORF cache through a mutable member, so concurrent access
@@ -383,8 +384,10 @@ class ExplorationGraphT {
     return trace;
   }
 
-  // Returns a new graph containing only the events in keep_set.
-  // IDs are remapped to [0, keep_set.size()), preserving relative insertion order.
+  // Returns a new graph containing only the events in keep_set. Entries of
+  // keep_set that are not valid event ids are ignored. IDs of the kept events
+  // are remapped to a dense range starting at 0, preserving relative
+  // insertion order.
   [[nodiscard]] ExplorationGraphT restrict(const std::unordered_set<EventId>& keep_set) const {
     std::vector<std::uint8_t> keep_mask(event_count(), 0);
     for (const auto kept_id : keep_set) {

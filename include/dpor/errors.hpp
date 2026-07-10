@@ -25,7 +25,9 @@
 
 namespace dpor {
 
-// Base class for every exception thrown by the dpor library. Derives from
+// Base class for deliberate contract and invariant exceptions raised by the
+// dpor library. Platform and allocation failures from the C++ runtime may
+// still propagate as their original standard exception types. Derives from
 // std::runtime_error so generic catch (const std::exception&) sites keep
 // working.
 class error : public std::runtime_error {

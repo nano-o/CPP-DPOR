@@ -7,7 +7,8 @@
 // interface, which can be backed by real UDP or a DPOR simulation adapter.
 //
 // The protocol is driven by the environment: the environment calls start()
-// once, then feeds incoming messages via receive() until the protocol is done.
+// once, then feeds incoming messages via receive() and dispatches timer
+// callbacks until the protocol is done.
 
 #include <cstddef>
 #include <functional>

@@ -150,7 +150,7 @@ template <typename ValueT>
     }
 
     if (std::holds_alternative<model::BlockLabel>(*next_label)) {
-      throw std::logic_error("stress program returned BlockLabel; blocks are internal to DPOR");
+      throw std::logic_error("program returned BlockLabel; blocks are internal to DPOR");
     }
 
     if (const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&*next_label)) {
@@ -246,7 +246,7 @@ template <typename ValueT>
       throw std::logic_error("rescheduling failed in oracle: blocked thread became done");
     }
     if (std::holds_alternative<model::BlockLabel>(*next_label)) {
-      throw std::logic_error("stress program returned BlockLabel; blocks are internal to DPOR");
+      throw std::logic_error("program returned BlockLabel; blocks are internal to DPOR");
     }
     const auto* recv = std::get_if<model::ReceiveLabelT<ValueT>>(&*next_label);
     if (recv == nullptr) {

@@ -817,7 +817,7 @@ TEST_CASE("2PC protocol bug surfaces as error executions", "[two_phase_commit]")
   REQUIRE(saw_error_execution);
 }
 
-TEST_CASE("2PC false invariant is detected: Abort implies some voted No", "[two_phase_commit]") {
+TEST_CASE("2PC false invariant is detected: Abort never happens", "[two_phase_commit]") {
   constexpr std::size_t kNumParticipants = 2;
   auto prog = sim::make_program({
       .num_participants = kNumParticipants,
@@ -829,10 +829,9 @@ TEST_CASE("2PC false invariant is detected: Abort implies some voted No", "[two_
   algo::DporConfigT<SimValue> config;
   config.program = std::move(prog);
   config.on_terminal_execution = [&](const ExplorationGraph& graph) {
-    // False invariant: "if the decision is Abort, then at least one
-    // participant voted No."  This is actually true for 2PC, so let's
-    // check the *opposite*: "Abort never happens."  Since participants
-    // can vote No, this must be violated in at least one execution.
+    // Deliberately false invariant: "Abort never happens."  Participants
+    // can vote No (and the coordinator's vote timeout can abort even on
+    // all-Yes votes), so some execution must decide Abort and violate it.
     for (std::size_t pid = 1; pid <= kNumParticipants; ++pid) {
       auto dec = get_participant_decision(graph, pid);
       if (dec == tpc::Decision::Abort) {

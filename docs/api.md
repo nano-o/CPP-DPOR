@@ -77,8 +77,11 @@ struct ProgramT {
 Important rules:
 
 - Thread IDs must form a compact contiguous 0-based or 1-based range.
-- Thread functions must be deterministic and side-effect free for the same
-  `(trace, step)` inputs.
+- Thread functions must be deterministic for the same `(trace, step)` inputs
+  and must not leak side effects between invocations. Stateful adapters should
+  replay against fresh or otherwise isolated snapshots.
+- Parallel verification may invoke thread functions concurrently, so captured
+  state must also be safe for concurrent use.
 - `trace` contains only values observed through receives and nondeterministic
   choices. It does not include send, block, or error events.
 - Use `step`, not `trace.size()`, as the control-flow counter.
@@ -109,7 +112,15 @@ Supporting enums and helpers:
 - `make_receive_label_from_values<ValueT>(accepted_values, mode)`
 
 Receive matching is predicate-based. Matchers must be deterministic and
-side-effect free.
+must not leak side effects between invocations; matcher logic that calls into
+the system under test must use isolated snapshots. Parallel verification may
+evaluate matchers concurrently.
+
+When a nondeterministic-choice label has a non-empty `choices` vector, DPOR
+treats it as a set: duplicate values are removed while preserving first
+occurrence order. In that case `ValueT` must support equality and ordering
+(`operator==` and `operator<`). An empty `choices` vector records the supplied
+`value` as a linear event without branching.
 
 ## Running exploration
 
@@ -124,12 +135,15 @@ struct DporConfigT {
   TerminalExecutionObserverT<ValueT> on_terminal_execution{};
   ProgressObserver on_progress{};
   std::chrono::milliseconds progress_report_interval{std::chrono::seconds(1)};
+  TerminalExecutionObserverT<ValueT> on_execution{};  // Legacy alias.
   FatalErrorObserverT<ValueT> on_fatal_error{};
 };
 ```
 
 `max_depth` bounds logical DPOR tree depth, not current graph size or
 implementation stack depth.
+Set only one of `on_terminal_execution` and its legacy alias `on_execution`;
+setting both is a `dpor::precondition_error`.
 
 The observer receives:
 
@@ -218,6 +232,10 @@ struct ParallelVerifyOptions {
 ```
 
 `spawn_depth_cutoff` uses the same DPOR tree-depth accounting as `max_depth`.
+The current implementation only offers remote work at send backward-revisit
+branches, where it passes a fixed fanout value of `2`. Consequently,
+`min_fanout <= 2` permits that spawn site and `min_fanout > 2` disables remote
+spawning; it is not currently a count of materialized revisit children.
 
 `VerifyResult` reports:
 
@@ -247,6 +265,11 @@ slightly stale terminal counts when `progress_counter_flush_interval > 1`; in
 that case `counts_exact` is `false`. When `progress_report_interval > 0`,
 parallel workers only poll the clock every `progress_poll_interval_steps`
 internal progress checkpoints to keep the hot path cheaper.
+
+With more than one worker, terminal observers may run concurrently and their
+order is unspecified. Live progress callbacks run on worker threads but are
+serialized with one another. All callbacks and captured state must be safe to
+use concurrently; progress and terminal callbacks may overlap.
 
 ## Error reporting model
 
@@ -285,8 +308,8 @@ control flow, not an error.
 
 ### 3. Exceptions: `dpor::error` hierarchy (`dpor/errors.hpp`)
 
-Every exception the library throws derives from `dpor::error`
-(itself a `std::runtime_error`):
+The library's deliberate contract and invariant exceptions derive from
+`dpor::error` (itself a `std::runtime_error`):
 
 - `dpor::internal_error` — a library invariant was violated. Always a bug in
   dpor itself; please report it.
@@ -307,6 +330,9 @@ Every exception the library throws derives from `dpor::error`
 Any exception reaching the `verify()` / `verify_parallel()` caller is fatal to
 the run: exploration stops and the remaining interleavings are not visited.
 In parallel mode the first recorded exception is rethrown after workers drain.
+Ordinary platform and allocation failures from the C++ runtime (for example,
+allocation failure in library-owned storage) are not converted into the
+`dpor::error` hierarchy if they reach the caller directly.
 
 ### Saving a trace on fatal errors: `on_fatal_error`
 
@@ -443,7 +469,9 @@ The relation layer is intentionally generic. Public pieces are:
 - `relation_union(left, right)`
 
 These are useful when downstream code wants to inspect or derive relations from
-`po` and `rf` directly.
+`po` and `rf` directly. The lazy adapters store references to their operands,
+so their inputs must outlive the adapter; rvalue operands are rejected at
+compile time.
 
 ## Practical notes
 
@@ -453,5 +481,6 @@ These are useful when downstream code wants to inspect or derive relations from
   checking consistency outside the DPOR engine.
 - Predicate-based receives are part of the intended integration model for
   existing systems. They are not limited to finite value sets.
-- Soundness depends on determinism. Mutable captures, time-dependent matchers,
-  and other side effects can invalidate exploration guarantees.
+- Soundness depends on determinism and isolation. Mutable captures,
+  time-dependent matchers, and leaked side effects can invalidate exploration
+  guarantees. Parallel runs additionally require concurrency-safe callbacks.

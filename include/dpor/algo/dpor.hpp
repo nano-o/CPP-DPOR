@@ -240,6 +240,9 @@ struct ParallelVerifyOptions {
   std::size_t max_queued_tasks{0};
   // Uses the same DPOR tree-depth accounting as max_depth.
   std::size_t spawn_depth_cutoff{0};
+  // Spawn gate. The current sole spawn site (send backward revisits) supplies
+  // a fixed fanout of 2 rather than precomputing the number of revisit
+  // children. Values <= 2 permit spawning there; values > 2 disable it.
   std::size_t min_fanout{2};
   // Workers read the shared stop flag only every sync_steps stop_requested()
   // calls. This reduces stop-check contention at the cost of weaker stop
@@ -253,7 +256,7 @@ struct ParallelVerifyOptions {
   // Flush thread-local terminal counters into shared progress counters after
   // this many local terminal publications. Smaller values improve live progress
   // accuracy; larger values reduce atomic-update overhead. A zero value uses a
-  // small default.
+  // default of 1024.
   std::size_t progress_counter_flush_interval{1024};
   // When interval-throttled progress reporting is enabled, workers only poll
   // the clock and attempt to claim the next reporting window every
@@ -624,8 +627,8 @@ template <typename ValueT>
     typename model::ExplorationGraphT<ValueT>::EventId recv,
     typename model::ExplorationGraphT<ValueT>::EventId send) {
   // get_cons_tiebreaker() is evaluated on G|Previous while exploring already
-  // consistent executions. restrict() clears the metadata bit, but removing
-  // events cannot introduce a new causal cycle.
+  // consistent executions; removing events cannot introduce a new causal
+  // cycle, and restrict() preserves the known-acyclic bit accordingly.
   assert(!graph.has_causal_cycle() && "get_cons_tiebreaker requires an acyclic graph");
 
   // Rewiring recv replaces its single inbound rf edge with send -> recv.
@@ -863,9 +866,10 @@ template <typename ValueT>
 }
 
 // REVISITCONDITION(G, e, s):
-// - ND → val(e) == min(S)
+// - non-blocking receive → rf(e) == ⊥
+// - ND → val(e) == min(S) (empty S trivially passes)
 // - non-receive → no receive in Previous reads from e
-// - receive → rf(e) == get_cons_tiebreaker(G|Previous, e)
+// - blocking receive → rf(e) == get_cons_tiebreaker(G|Previous, e)
 template <typename ValueT>
 [[nodiscard]] inline bool revisit_condition(
     const model::ExplorationGraphT<ValueT>& graph,
@@ -1316,10 +1320,11 @@ class ParallelExecutor {
     try {
       worker_loop_impl();
     } catch (...) {
-      // Failures in the queue/synchronisation machinery itself (process_task
-      // records its own exceptions) must not escape a worker thread, where
-      // they would call std::terminate; record and let run() rethrow after
-      // joining. record_exception() requests stop, so peer workers drain.
+      // Failures in the queue/synchronisation machinery itself (exceptions
+      // from process_task are already caught and recorded inside
+      // worker_loop_impl) must not escape a worker thread, where they would
+      // call std::terminate; record and let run() rethrow after joining.
+      // record_exception() requests stop, so peer workers drain.
       record_exception(std::current_exception());
     }
   }

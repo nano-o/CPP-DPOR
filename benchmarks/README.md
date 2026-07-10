@@ -32,7 +32,8 @@ The executable supports the following CLI:
 
 - `--mode dpor` measures only DPOR exploration.
 - `--mode oracle` measures only the exhaustive oracle.
-- `--mode both` runs both and checks that they agree on the full-execution count.
+- `--mode both` runs both and checks that they agree on the full and blocked
+  execution counts.
 - `--participants` defaults to `3`.
 - `--iterations` defaults to `1`.
 - `--no-crash` disables the coordinator crash choice so you can benchmark the
@@ -44,6 +45,8 @@ The executable supports the following CLI:
   hardware-based default.
 - `--max-workers`, `--max-queued-tasks`, `--spawn-depth-cutoff`, and
   `--min-fanout` pass through to `ParallelVerifyOptions`.
+  The current executor passes a fixed fanout of `2` at its only spawn site, so
+  `--min-fanout` values above `2` disable remote spawning.
 - `--progress-counter-flush-interval` and `--progress-poll-interval-steps`
   also pass through to `ParallelVerifyOptions`. Supplying any
   `ParallelVerifyOptions` flag also enables `--parallel`.
@@ -146,7 +149,7 @@ build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_ti
 build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \
   --mode dpor --participants 4 --iterations 1 --no-crash \
   --parallel --max-workers 8 --max-queued-tasks 8 \
-  --spawn-depth-cutoff 2 --min-fanout 4
+  --spawn-depth-cutoff 2 --min-fanout 2
 ```
 
 2PC, oracle only:

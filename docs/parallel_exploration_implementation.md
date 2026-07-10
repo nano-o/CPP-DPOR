@@ -40,12 +40,14 @@ Current option semantics:
   back to `1` if the runtime reports `0`.
 - `max_queued_tasks == 0` derives to `max_workers * 2`.
 - `spawn_depth_cutoff == 0` means no DPOR tree-depth cutoff.
-- `min_fanout` gates whether a branch is even considered for remote execution.
+- `min_fanout` is normalized to at least `1` and gates whether a branch is
+  considered for remote execution. The only current spawn site passes a fixed
+  fanout of `2`, so values above `2` disable remote spawning.
 - `sync_steps == 0` enables the strict result-publication path.
 - `sync_steps > 0` reduces synchronization overhead but weakens early-stop
   semantics after a callback requests stop.
 - the default is `sync_steps == 512`
-- `progress_counter_flush_interval == 0` resolves to a small default.
+- `progress_counter_flush_interval == 0` resolves to `1024`.
 - `progress_counter_flush_interval > 1` batches worker-local terminal counts
   before flushing them into shared progress counters.
 - `progress_poll_interval_steps == 0` and `== 1` both poll at every progress
@@ -79,9 +81,9 @@ send backward-revisit branches:
    through rollback-based iterative frames.
 2. Send branches keep the forward continuation local. Backward-revisit children
    — which are materialized one at a time by
-   `next_backward_revisit_child(...)` inside the iterative explorer — may be enqueued for remote
-   execution if `can_spawn(...)` passes. If enqueue fails, they are explored
-   locally instead.
+   `next_backward_revisit_child(...)` inside the iterative explorer — may be
+   enqueued for remote execution if `can_spawn(...)` passes. If enqueue fails,
+   they are explored locally instead.
 
 `can_spawn(child_dpor_tree_depth, fanout)` currently requires:
 
@@ -89,6 +91,11 @@ send backward-revisit branches:
 - stop not requested
 - `fanout >= min_fanout`
 - `child_dpor_tree_depth <= spawn_depth_cutoff` when a cutoff is configured
+
+At the sole call site, the `fanout` argument is the fixed value `2`; the
+implementation does not precompute the number of revisit children. Thus the
+default `min_fanout == 2` permits spawning, while any value above `2` forces
+all work to remain local.
 
 The queue is only a backlog buffer. Workers always prefer continuing local
 rollback-based exploration over waiting for queue space.
@@ -237,7 +244,7 @@ What is preserved:
 - exact sequential observation order when `max_workers == 1`
 
 `on_terminal_execution` may be invoked concurrently in parallel mode. Callback
-code must therefore be thread-safe in addition to being deterministic.
+code and captured state must therefore be thread-safe.
 As in sequential mode, published terminal executions include full executions,
 blocked maximal executions, error executions, and branches cut off by the
 `max_depth` DPOR tree-depth limit.
@@ -254,22 +261,28 @@ blocked maximal executions, error executions, and branches cut off by the
 
 The implementation assumes:
 
-- thread functions are deterministic for the same exploration state
-- thread functions are safe to call concurrently from multiple workers
-- any callback logic used by receive predicates or observers is side-effect free
-  or isolated
+- thread functions and receive matchers are deterministic for the same
+  exploration state and do not leak side effects between calls
+- stateful model adapters operate on isolated snapshots
+- all user callbacks and captured state are safe to use concurrently from
+  multiple workers; observers may synchronize and update their own state
 
 These are required for DPOR correctness, not just performance.
 
 ## Current Tests
 
-The parallel test coverage in `tests/dpor_test.cpp` currently checks:
+The parallel coverage in `tests/dpor_test.cpp` and `tests/errors_test.cpp`
+currently checks:
 
 - `verify_parallel()` with one worker matches sequential execution order exactly
 - parallel execution sets match sequential and oracle execution sets on a mixed
   branching program
 - clean stop behavior when sibling branches race to an error
 - depth-limit reporting
+- blocked-terminal classification
+- serialized live progress reporting with exact final counts
+- callback exception propagation and fatal-trace reporting
+- rejection of reentrant `verify_parallel()` calls from worker callbacks
 - correctness under tiny queue budgets and high fanout
 - enqueue-fallback ownership preservation through a focused regression test
 
@@ -282,7 +295,7 @@ Current non-goals and limitations:
 - no attempt to preserve DFS order once `max_workers > 1`
 - queue bounds only limit queued snapshots, not worker-local exploration state
 - revisit children are still materialized eagerly enough to pay graph-copy cost
-- `sync_steps > 0` deliberately weakens error-stop semantics
+- `sync_steps > 0` deliberately weakens early-stop semantics
 
 ## Benchmark Surface
 

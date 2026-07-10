@@ -154,7 +154,8 @@ class ReplayState {
 
   void set_timer(tpc::TimerId id, tpc::TimerCallback callback) {
     if (active_timer_.has_value() && active_timer_->id != id) {
-      throw SimulationFailure("SimEnvironment supports at most one active timer per thread");
+      throw SimulationFailure(
+          "the simulation environment supports at most one active timer per thread");
     }
     active_timer_ = ActiveTimer{
         .id = id,

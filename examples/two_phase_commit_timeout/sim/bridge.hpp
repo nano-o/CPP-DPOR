@@ -160,7 +160,8 @@ inline std::ostream& operator<<(std::ostream& os, SimValue value) {
   return os << "<unknown>";
 }
 
-// DPOR ThreadIds start at 1. We map: coordinator (pid 0) -> tid 1,
+// DPOR ThreadIds must form a compact 0-based or 1-based range; this model
+// uses the 1-based convention. We map: coordinator (pid 0) -> tid 1,
 // participant pid N -> tid N+1.
 inline dpor::model::ThreadId participant_to_thread(tpc::ParticipantId pid) {
   return static_cast<dpor::model::ThreadId>(pid + 1);

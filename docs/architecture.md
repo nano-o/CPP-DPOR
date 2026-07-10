@@ -11,6 +11,17 @@ The codebase is organized around four areas:
 - **Public Entry Points**: sequential and parallel verification APIs
 - **Examples**: end-to-end protocol models built on the library
 
+Two cross-cutting pieces support all of them:
+
+- **`include/dpor/errors.hpp`** defines the library-wide exception taxonomy
+  (`dpor::error`, `internal_error`, `precondition_error`, `user_code_error`,
+  `UserCallbackKind`). Errors in the system under test are modeled as
+  `Error` events; C++ exceptions escaping user callbacks are fatal and
+  surface as `user_code_error`.
+- **`include/dpor/model/format.hpp`** provides `format_graph(...)`, a
+  human-readable trace renderer used by observers and fatal-error
+  diagnostics.
+
 ## 1. Model Layer (`dpor::model`)
 
 The model layer defines the execution-graph vocabulary and the validity rules
@@ -84,7 +95,10 @@ exploration engine.
 - **`dpor.hpp`** implements the exploration algorithm inspired by Must
   Algorithm 1.
 - **`DporConfigT`** carries the program, DPOR tree-depth limit, whole-program
-  communication model, and an optional terminal-execution observer.
+  communication model, and optional observers: a terminal-execution observer
+  (`on_terminal_execution`, with legacy alias `on_execution`; setting both
+  throws), a throttled progress observer (`on_progress` plus
+  `progress_report_interval`), and a fatal-error observer (`on_fatal_error`).
 - **`verify()`** performs sequential exploration.
 - **`verify_parallel()`** is an experimental parallel executor built on the
   same DPOR core and configuration.
@@ -108,7 +122,16 @@ exploration engine.
 - Optional terminal-execution observers receive `TerminalExecutionT<ValueT>`
   values for each full execution, blocked maximal execution, error execution,
   and depth-limit execution.
-- Observers may request early termination by returning `Stop`.
+- Observers may request early termination by returning `Stop`. In parallel
+  mode stop is best-effort: workers batch stop checks (`sync_steps`), so
+  additional terminal executions may be published after stop is requested.
+- Optional progress observers receive throttled `ProgressSnapshot` values
+  (state, elapsed time, live terminal counts) while exploration runs. In
+  parallel mode, counter freshness and polling are tuned via
+  `progress_counter_flush_interval` and `progress_poll_interval_steps`.
+- An optional fatal-error observer receives a `FatalErrorContextT` diagnostic
+  (including the in-progress graph) before a fatal exception raised during
+  active exploration propagates out of `verify()`/`verify_parallel()`.
 - `VerifyResult` tracks total published terminal executions plus a split count
   for each terminal-execution kind.
 
@@ -141,13 +164,19 @@ integration style:
 
 - **Correctness before optimization**: the current implementation prefers
   explicit, reviewable semantics over aggressive reduction shortcuts.
-- **Determinism**: for a fixed program and configuration, exploration is
-  deterministic. Receive matchers and other callbacks must therefore be
-  deterministic and side-effect free.
+- **Determinism and isolation**: for a fixed program and configuration,
+  sequential exploration (`verify()`) is deterministic. Thread functions and
+  receive matchers must be deterministic and must not leak state between
+  invocations; adapters may mutate isolated snapshots. Parallel exploration
+  covers the same execution set when callbacks are concurrency-safe, but
+  callback order across workers is unspecified, and runs that use `Stop` may
+  differ in how many terminals are published before stopping.
 - **Separation of concerns**: execution validity is defined by the model layer,
   while search strategy lives in the DPOR engine.
 - **Isolated ownership at task boundaries**: parallel tasks own graph values,
   while worker-local exploration mutates graphs temporarily and restores them
   via rollback.
-- **Zero global state**: exploration state lives in configs, executors,
-  results, and graph values rather than hidden global mutable state.
+- **No hidden shared state across runs**: exploration state lives in configs,
+  executors, results, and graph values. The one deliberate exception is the
+  parallel executor's per-OS-thread `thread_local` worker state, which is
+  scoped by a reentrancy precondition check rather than shared globally.

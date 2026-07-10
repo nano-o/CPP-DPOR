@@ -9,10 +9,10 @@ host system.
 
 Coding agents run arbitrary shell commands.  A container limits the blast
 radius: the agent can only see the mounted project directory plus the
-bind-mounted agent state directories (`~/.claude`, `~/.codex`).  Everything
-else on the host is invisible.  If an agent does something destructive,
-`git checkout` restores the working tree — nothing outside the mounts is
-affected.
+bind-mounted agent state directories (`~/.codex` by default; `~/.claude`
+only with `--mount-claude-dir`).  Everything else on the host is invisible.
+Damage is confined to those mounts: Git can restore tracked project files,
+but untracked files and mounted agent state need their own backups.
 
 ## Quick start
 
@@ -39,12 +39,14 @@ cmake --preset debug && cmake --build --preset debug && ctest --preset debug
 | Static analysis | `cppcheck`, `iwyu` (include-what-you-use) |
 | Build system | `cmake`, `ninja-build` |
 | Test framework | `catch2` |
-| AI agents | Claude Code (`@anthropic-ai/claude-code`), Codex CLI (`@openai/codex`) |
+| AI agents | Claude Code (native installer, `claude.ai/install.sh`), Codex CLI (`@openai/codex` via npm) |
 | Shell / editor | `bash`, `tmux`, `vim`, `fzf`, `ripgrep`, `fd-find`, `bat`, `jq` |
 | Networking | `curl`, `wget`, `openssh-client` |
 
-The image runs as a non-root `dev` user (UID/GID matched to the host) with
-passwordless `sudo` for installing additional packages on the fly.
+The image runs as a non-root `dev` user (UID/GID matched to the host). The
+sudoers file grants passwordless `sudo`, but the default hardened launch
+blocks it (see [Hardening](#hardening)); pass `--allow-new-privileges` to
+install additional packages on the fly.
 
 ## Git identity
 
@@ -56,12 +58,13 @@ and other host Git config are not mounted into the container.
 ## Agent login
 
 Agent CLIs are pre-installed but not pre-authenticated. The launcher
-bind-mounts your host `~/.claude` and `~/.codex` directories into the
-container, so the first login persists across later runs. Log in inside the
-container:
+bind-mounts your host `~/.codex` directory into the container, so the first
+Codex login persists across later runs. `~/.claude` is mounted only when you
+pass `--mount-claude-dir`; without it, a Claude Code login lasts only for the
+lifetime of that container. Log in inside the container:
 
 ```bash
-claude login    # Claude Code
+claude login    # Claude Code (persists across runs with --mount-claude-dir)
 codex auth      # Codex
 ```
 
@@ -96,10 +99,12 @@ These are layered on top of standard Docker isolation (namespaces,
 cgroups, default seccomp profile).  The `--debug` and `--debug-full`
 flags selectively relax these for debugging use cases.
 
-**Note:** `sudo` inside the container still works for `apt install` etc.
-(the sudoers file grants it) but `no-new-privileges` prevents setuid
-binaries from gaining elevated kernel capabilities — the combination is
-safe because the container already has `ALL` capabilities dropped.
+**Note:** under the default hardened baseline, `sudo` does **not** work:
+`no-new-privileges` prevents setuid binaries (including `sudo`) from
+elevating at all, even though the sudoers file grants passwordless access.
+To use `sudo` (e.g. for `apt install`), relaunch with
+`--allow-new-privileges`, which sets `no-new-privileges=false` while keeping
+the other hardening measures. `--debug-full` implies it.
 
 ## Options
 
@@ -112,7 +117,10 @@ dev-container/run-container.sh [tag] [options] [-- command...]
 | `tag` | Docker image tag (default: `dpor-dev`) |
 | `--name NAME` | Custom container name (default: `dev-<project>`) |
 | `--debug` | Add `SYS_PTRACE` and disable seccomp/apparmor |
-| `--debug-full` | Privileged mode with ASLR and ptrace scope disabled |
+| `--debug-full` | Privileged mode with ASLR and ptrace scope disabled (alias: `--privileged`; implies `--allow-new-privileges`) |
+| `--persist` | Keep the container after exit (default runs with `--rm`) |
+| `--mount-claude-dir` | Bind-mount host `~/.claude` so Claude Code logins persist |
+| `--allow-new-privileges` | Set `no-new-privileges=false` so `sudo` works (e.g. for `apt install`) |
 | `-- command...` | Override the default shell (e.g. `-- bash -c "cmake --preset debug"`) |
 
 ## Rebuilding
@@ -135,3 +143,4 @@ dev-container/build-image.sh --no-cache
 | `tmux.conf` | tmux config (vim keys, OSC52 clipboard, 256-color) |
 | `osc52-tmux` | Clipboard helper for tmux over SSH/containers |
 | `project-title.sh` | Sets terminal title to the project name |
+| `.claude/settings.local.json` | Claude Code permission presets for working in this directory |

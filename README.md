@@ -25,7 +25,8 @@ For a more realistic example, see this integration with stellar-core: https://gi
 - Main exploration entry points: `dpor::algo::verify()` and experimental
   `dpor::algo::verify_parallel()`.
 - Programs are modeled as `dpor::algo::ProgramT<ValueT>` collections of
-  deterministic thread functions.
+  deterministic, isolated thread functions. Parallel exploration may invoke
+  thread functions and receive matchers concurrently.
 - Published terminal executions are exposed to observers as
   `dpor::algo::TerminalExecutionT<ValueT>`, which carries an
   `ExplorationGraphT<ValueT>` plus a terminal kind (`Full`, `Blocked`,
@@ -57,9 +58,11 @@ Shared `DporConfigT<ValueT>` parameters:
 - `communication_model{Async}`: communication semantics for consistency
   checking and revisit generation. Supported values are `Async` and `FifoP2P`.
 - `on_terminal_execution{}`: optional callback invoked for each published
-  terminal execution (`Full`, `Blocked`, `Error`, or `DepthLimit`). The callback may
-  return `TerminalExecutionAction::Continue` or `Stop`; `void` callbacks are
-  treated as `Continue`.
+  terminal execution (`Full`, `Blocked`, `Error`, or `DepthLimit`). The callback
+  may return `TerminalExecutionAction::Continue` or `Stop`; `void` callbacks
+  are treated as `Continue`.
+- `on_execution{}`: legacy alias for `on_terminal_execution`. Setting both
+  aliases is a precondition error.
 - `on_progress{}`: optional progress callback that receives
   `ProgressSnapshot`s. If this callback is not set, DPOR does not do
   progress-related time checks or progress scheduling.
@@ -73,6 +76,9 @@ Shared `DporConfigT<ValueT>` parameters:
   a throttled report is due. A progress checkpoint currently happens when the
   explorer enters a DPOR state/frame, so it is roughly per explored execution
   prefix/state, not per terminal execution found.
+- `on_fatal_error{}`: optional diagnostic callback for fatal exceptions raised
+  while an in-progress graph is available. Exceptions from this callback are
+  swallowed so they cannot mask the original failure.
 
 Parallel exploration adds `ParallelVerifyOptions`:
 
@@ -84,8 +90,10 @@ Parallel exploration adds `ParallelVerifyOptions`:
 - `spawn_depth_cutoff{0}`: DPOR tree-depth gate for task spawning. `0` means no
   cutoff. Otherwise, a branch is only considered for remote execution when
   `child_dpor_tree_depth <= spawn_depth_cutoff`.
-- `min_fanout{2}`: spawn threshold for branch fanout. If the current choice
-  point has fewer than `min_fanout` alternatives, DPOR keeps the work local.
+- `min_fanout{2}`: spawn gate retained for scheduler tuning. The current sole
+  spawn site is a send backward-revisit branch and supplies a fixed fanout of
+  `2`; values `0` through `2` permit spawning there, while values above `2`
+  disable remote spawning.
 - `sync_steps{512}`: stop-polling interval. `0` enables the strict mode, where
   terminal publication serializes stop checks more aggressively. `> 0` is a
   relaxed mode where each worker refreshes the shared stop flag only every
@@ -125,9 +133,11 @@ Result reporting:
   `depth_limit_executions_explored`. Full and blocked counts partition the
   maximal executions; `full_executions_explored` alone does not cover
   executions in which a thread ended blocked on a receive.
-- Parallel callback order is unspecified across workers. Final `VerifyResult`
-  counts are exact; live `ProgressSnapshot` counts may lag local worker state
-  when `progress_counter_flush_interval > 1`.
+- Parallel callback order is unspecified across workers, and terminal
+  observers may run concurrently. User callbacks and any state they capture
+  must therefore be safe for concurrent use. Final `VerifyResult` counts are
+  exact; live `ProgressSnapshot` counts may lag local worker state when
+  `progress_counter_flush_interval > 1`.
 
 ## Build
 
@@ -152,7 +162,8 @@ CTest vs Catch filtering:
 Tests are written with Catch2 (v3). CMake uses a system Catch2 package if available.
 Paper-derived examples in current scope are in `tests/dpor_test.cpp` and tagged `[paper]`.
 `tests/dpor_test.cpp` and `tests/dpor_stress_test.cpp` also cross-check DPOR
-against an independent exhaustive async oracle in `tests/support/oracle.hpp`.
+against an independent exhaustive, model-aware oracle in
+`tests/support/oracle.hpp`.
 When `max_depth` truncates exploration, DPOR publishes depth-limit terminal
 executions and counts them in `VerifyResult::depth_limit_executions_explored`.
 `max_depth` is a DPOR tree-depth limit rather than a graph-size limit. The
@@ -231,12 +242,12 @@ If installed to a non-default prefix, add it to `CMAKE_PREFIX_PATH`.
 ## Performance: lazy PorfCache with vector clocks
 
 `ExplorationGraphT` uses a lazy, shared vector-clock cache (`PorfCache`) to
-accelerate hot-path reachability and warm-cache cycle queries:
-
-| Operation                 | Without cache   | With cache     |
-|---------------------------|-----------------|----------------|
-| `porf_contains(from, to)` | O(N+E) per call | O(1) amortized |
-| `has_causal_cycle()`      | O(N+E) per call | O(1) amortized |
+accelerate hot-path reachability and cycle queries. If `T` is the number of
+active threads, the first cache-backed query builds the cache in
+`O((N + E) * T)` time; subsequent `porf_contains()` and
+`has_causal_cycle()` calls are O(1). When only a cycle answer is needed,
+`has_causal_cycle_without_cache()` runs in O(N + E) without materializing
+vector clocks.
 
 The cache is built on demand via Kahn's topological sort and stores a
 per-event vector clock (one entry per thread). Subsequent `porf_contains` calls
@@ -249,11 +260,12 @@ Key properties:
 
 - **Lazy**: vector clocks are only built when `porf_contains()` or the
   cache-backed `has_causal_cycle()` path needs them.
-- **Shared across copies**: the cache is held via `std::shared_ptr`, so
-  graph copies (from `with_rf`, `with_nd_value`, etc.) share the parent's
-  cache until they mutate.
-- **Auto-invalidated**: any call to `add_event` or `set_reads_from` resets
-  the cache to null, triggering a rebuild on the next query.
+- **Shared across compatible copies**: the cache is held via
+  `std::shared_ptr`. Plain copies and transformations such as `with_nd_value`
+  can reuse it because they do not change `po` or `rf`; structural rewrites
+  such as `with_rf` return a cold cache.
+- **Auto-invalidated**: mutations of `po` or `rf`, including rollback, reset
+  the cache to null and trigger a rebuild on the next cache-backed query.
 - **Cycle-safe for DPOR**: `porf_contains()` throws on cyclic graphs. The DPOR
   engine only calls it on consistent graphs, and consistency checking prunes
   causal cycles before those queries.

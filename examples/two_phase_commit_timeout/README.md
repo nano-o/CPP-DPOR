@@ -49,8 +49,9 @@ class Participant {
 The environment drives protocol progress:
 
 1. Call `start()` once.
-2. While it returns or requests more input, feed messages through `receive()`.
-3. Stop when `receive()` returns `false`.
+2. While the protocol still needs input, feed messages through `receive()` and
+   dispatch due timer callbacks.
+3. Stop when `start()`, `receive()`, or a timer callback returns `false`.
 
 ## The Environment interface
 
@@ -151,9 +152,9 @@ This timeout variant extends the environment with `set_timer()` and
   a non-blocking receive, and bottom means that timer fired.
 - Timer callbacks are replayed directly; the adapter does not fabricate timeout
   messages.
-- The simulation assumes at most one active timer per thread at a receive
-  point. The simulation environment enforces that assumption because plain
-  bottom does not encode timer identity.
+- The simulation assumes at most one active timer per thread at a time. The
+  simulation environment enforces that assumption because plain bottom does
+  not encode timer identity. Resetting the same timer id replaces its callback.
 
 ## UDP runtime behavior
 
@@ -209,7 +210,9 @@ scenario adapter converts that uncaught protocol exception into a terminal
 treating the problem as infrastructure failure.
 
 The known replay control-flow exceptions are handled internally by the
-simulation module. Simulation failures still propagate as ordinary exceptions.
+simulation module. Simulation/infrastructure failures escape the thread
+function and make verification fail with `dpor::user_code_error`; they are not
+converted into explored error executions.
 
 The `Coordinator` constructor accepts a `bug_on_p1_no` flag that injects a
 deliberate bug when participant 1 votes No. This exists only to test the
