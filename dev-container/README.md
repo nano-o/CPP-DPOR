@@ -64,8 +64,8 @@ pass `--mount-claude-dir`; without it, a Claude Code login lasts only for the
 lifetime of that container. Log in inside the container:
 
 ```bash
-claude login    # Claude Code (persists across runs with --mount-claude-dir)
-codex auth      # Codex
+claude auth login    # Claude Code (persists across runs with --mount-claude-dir)
+codex login          # Codex
 ```
 
 ## Debug modes
@@ -101,10 +101,13 @@ flags selectively relax these for debugging use cases.
 
 **Note:** under the default hardened baseline, `sudo` does **not** work:
 `no-new-privileges` prevents setuid binaries (including `sudo`) from
-elevating at all, even though the sudoers file grants passwordless access.
-To use `sudo` (e.g. for `apt install`), relaunch with
-`--allow-new-privileges`, which sets `no-new-privileges=false` while keeping
-the other hardening measures. `--debug-full` implies it.
+elevating at all, even though the sudoers file grants passwordless access —
+and with `--cap-drop=ALL`, even an elevated root process would lack the
+capabilities to change uid/gid. To use `sudo` (e.g. for `apt install`),
+relaunch with `--allow-new-privileges`, which sets `no-new-privileges=false`
+and re-adds the capabilities `sudo` and `apt`/`dpkg` need (`SETUID`,
+`SETGID`, `AUDIT_WRITE`, `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`) while
+keeping the remaining hardening measures. `--debug-full` implies it.
 
 ## Options
 
@@ -120,7 +123,7 @@ dev-container/run-container.sh [tag] [options] [-- command...]
 | `--debug-full` | Privileged mode with ASLR and ptrace scope disabled (alias: `--privileged`; implies `--allow-new-privileges`) |
 | `--persist` | Keep the container after exit (default runs with `--rm`) |
 | `--mount-claude-dir` | Bind-mount host `~/.claude` so Claude Code logins persist |
-| `--allow-new-privileges` | Set `no-new-privileges=false` so `sudo` works (e.g. for `apt install`) |
+| `--allow-new-privileges` | Re-enable `sudo` (e.g. for `apt install`): sets `no-new-privileges=false` and re-adds the capabilities it needs |
 | `-- command...` | Override the default shell (e.g. `-- bash -c "cmake --preset debug"`) |
 
 ## Rebuilding

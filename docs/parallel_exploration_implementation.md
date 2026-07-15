@@ -277,7 +277,9 @@ currently checks:
 - `verify_parallel()` with one worker matches sequential execution order exactly
 - parallel execution sets match sequential and oracle execution sets on a mixed
   branching program
-- clean stop behavior when sibling branches race to an error
+- all error terminals are reported (without stopping exploration) when sibling
+  branches race to an error
+- best-effort early stop when a terminal observer returns `Stop`
 - depth-limit reporting
 - blocked-terminal classification
 - serialized live progress reporting with exact final counts
@@ -299,14 +301,16 @@ Current non-goals and limitations:
 
 ## Benchmark Surface
 
-The benchmark CLIs currently expose the queue-backlog tuning knobs that map
-directly to `ParallelVerifyOptions`:
+The benchmark CLIs currently expose the tuning knobs that map directly to
+`ParallelVerifyOptions`:
 
 - `--parallel`
 - `--max-workers`
 - `--max-queued-tasks`
 - `--spawn-depth-cutoff`
 - `--min-fanout`
+- `--progress-counter-flush-interval`
+- `--progress-poll-interval-steps`
 
 The benchmark harness does not currently expose `sync_steps`.
 

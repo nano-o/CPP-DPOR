@@ -17,9 +17,10 @@ Two cross-cutting pieces support all of them:
   (`dpor::error`, `internal_error`, `precondition_error`, `user_code_error`,
   `UserCallbackKind`). Errors in the system under test are modeled as
   `Error` events; C++ exceptions escaping user callbacks are fatal and
-  surface as `user_code_error`.
+  surface as `user_code_error` — except from `on_fatal_error` itself, whose
+  exceptions are swallowed so they cannot mask the original failure.
 - **`include/dpor/model/format.hpp`** provides `format_graph(...)`, a
-  human-readable trace renderer used by observers and fatal-error
+  human-readable trace renderer for use in observers and fatal-error
   diagnostics.
 
 ## 1. Model Layer (`dpor::model`)

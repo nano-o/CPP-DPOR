@@ -119,8 +119,20 @@ elif [[ "${debug_mode}" == "full" ]]; then
 fi
 
 if [[ -n "${allow_new_privs}" ]]; then
-  # Override the earlier no-new-privileges restriction.
-  docker_args+=(--security-opt=no-new-privileges=false)
+  # Override the earlier no-new-privileges restriction and re-add the
+  # capabilities sudo and apt/dpkg need: with --cap-drop=ALL the bounding
+  # set is empty, so a setuid root process still cannot change uid/gid or
+  # touch files it does not own.
+  docker_args+=(
+    --security-opt=no-new-privileges=false
+    --cap-add=SETUID
+    --cap-add=SETGID
+    --cap-add=AUDIT_WRITE
+    --cap-add=CHOWN
+    --cap-add=DAC_OVERRIDE
+    --cap-add=FOWNER
+    --cap-add=FSETID
+  )
 fi
 
 if [[ "${debug_mode}" == "full" ]]; then
