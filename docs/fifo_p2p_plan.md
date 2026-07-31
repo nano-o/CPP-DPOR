@@ -2,9 +2,14 @@
 
 This document records the landed FIFO peer-to-peer semantics work for the current DPOR prototype.
 
-The semantic landing is complete in the current tree. The roadmap below is kept as an implementation record, and the only remaining items are optional performance follow-ups rather than correctness blockers.
+The semantic landing and the masked-tiebreaker optimization are complete in
+the current tree. The roadmap below is kept as an implementation record. The
+remaining forward-branch prefilter is optional performance work rather than a
+correctness blocker.
 
-The semantic target is the Must paper in [docs/Enea et al. - 2024 - Model Checking Distributed Protocols in Must.pdf](/home/dev/project/docs/Enea%20et%20al.%20-%202024%20-%20Model%20Checking%20Distributed%20Protocols%20in%20Must.pdf), especially Definition 3.5 and the Algorithm 1 revisit/tiebreaker discussion.
+The semantic target is the
+[Must paper](<Enea et al. - 2024 - Model Checking Distributed Protocols in Must.pdf>),
+especially Definition 3.5 and the Algorithm 1 revisit/tiebreaker discussion.
 
 ## Scope
 
@@ -72,12 +77,19 @@ Implemented in the current tree:
 - whole-program `CommunicationModel::{ Async, FifoP2P }` threading through DPOR, oracle, and regression tests
 - model-aware consistency checking with formal FIFO clause (b) and clause (c) helpers
 - model-aware RF rewrite, tiebreaker, and revisit logic for FIFO p2p
+- a masked FIFO tiebreaker that evaluates both formal clauses without
+  materializing `G|Previous`
 - FIFO oracle parity and focused regression coverage
 
 Remaining optional follow-up work:
 
-- replace FIFO's conservative `restrict_masked` plus full-check tiebreaker path with a cheaper masked model-aware check
 - prefilter forward receive branches that are guaranteed FIFO-inconsistent before `VisitIfConsistent`
+
+The old restriction-based tiebreaker remains compiled on demand as a
+differential reference. Define `DPOR_VERIFY_MASKED_TIEBREAKER` to compare every
+masked verdict with it. This mode was run over roughly 21 million executions
+without a disagreement; it costs about 2.2x and must not be enabled in default
+build flags.
 
 ## Implemented Roadmap
 
@@ -100,7 +112,7 @@ For this whole-program design, the checker should receive the model as construct
 
 ### Step 2: Refactor Consistency Into Shared and Model-Specific Layers (Done)
 
-Refactor [include/dpor/model/consistency.hpp](/home/dev/project/include/dpor/model/consistency.hpp) so that it cleanly separates:
+Refactor [`include/dpor/model/consistency.hpp`](../include/dpor/model/consistency.hpp) so that it cleanly separates:
 
 - graph validation and issue collection for malformed or incomplete `rf`
 - causal-cycle handling
@@ -136,7 +148,7 @@ The implementation should name the helpers after the formal clauses where practi
 
 ### Step 4: Make Top-Level DPOR Consistency Checks Model-Aware (Done)
 
-Update [include/dpor/algo/dpor.hpp](/home/dev/project/include/dpor/algo/dpor.hpp) so the DPOR hot path uses the model-aware checker instead of hardcoding async semantics.
+Update [`include/dpor/algo/dpor.hpp`](../include/dpor/algo/dpor.hpp) so the DPOR hot path uses the model-aware checker instead of hardcoding async semantics.
 
 This includes:
 
@@ -188,10 +200,15 @@ That tolerance rule should be implemented structurally, not by loosely filtering
 
 This keeps the FIFO path simple and reviewable even if it is more expensive than the current async-only masked shortcut.
 
-Future optimization target:
+Completed follow-up optimization:
 
-- replace FIFO's conservative `restrict_masked` plus full-check approach with a masked model-aware tiebreaker check that avoids materializing `G|Previous`
-- if that is done, it should come with targeted regression tests for `get_cons_tiebreaker_masked` and `revisit_condition`
+- `MaskedPorfContext` evaluates reachability plus FIFO clauses (b) and (c) on
+  the original graph under the `Previous` keep mask, avoiding materialization
+  and dense renumbering
+- the equivalence relies on restriction preserving per-thread order and both
+  clauses comparing indices only within a sender or receiver thread
+- `get_cons_tiebreaker_masked_via_restriction` is retained behind the
+  differential verification define described above
 
 ### Step 7: Keep Forward Receive Branching Correct Before Optimizing It (Done)
 
@@ -207,7 +224,9 @@ That should be treated as a performance improvement, not as a correctness requir
 
 ### Step 8: Update the Oracle to Use the Same Model (Done)
 
-Update [tests/support/oracle_core.hpp](/home/dev/project/tests/support/oracle_core.hpp) and [tests/support/oracle.hpp](/home/dev/project/tests/support/oracle.hpp) so exhaustive enumeration runs under the configured communication model.
+Update [`tests/support/oracle_core.hpp`](../tests/support/oracle_core.hpp) and
+[`tests/support/oracle.hpp`](../tests/support/oracle.hpp) so exhaustive
+enumeration runs under the configured communication model.
 
 The oracle should remain the primary semantic cross-check for FIFO DPOR.
 
@@ -215,7 +234,8 @@ As with forward DPOR branching, oracle transition prefiltering is optional in th
 
 ### Step 9: Add Focused Regression Coverage (Done)
 
-Add tests in [tests/consistency_test.cpp](/home/dev/project/tests/consistency_test.cpp) and [tests/dpor_test.cpp](/home/dev/project/tests/dpor_test.cpp) covering:
+Add tests in [`tests/consistency_test.cpp`](../tests/consistency_test.cpp) and
+[`tests/dpor_test.cpp`](../tests/dpor_test.cpp) covering:
 
 - FIFO clause (b) violations
 - FIFO clause (c) violations
@@ -245,4 +265,5 @@ The FIFO p2p patch is complete when all of the following are true. These conditi
 - oracle parity passes under FIFO
 - focused FIFO regressions pass
 
-At that point, any masked-prefix or forward-filter optimization can be treated as follow-up work rather than part of the semantic landing.
+The masked-prefix optimization has since landed. Forward receive prefiltering
+remains optional follow-up work rather than part of the semantic landing.

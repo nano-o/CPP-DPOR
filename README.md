@@ -6,7 +6,8 @@ There are some initial examples of use in the examples/ folder.
 See `docs/api.md` for a public API summary and `docs/architecture.md` for the
 high-level design.
 
-For a more realistic example, see this integration with stellar-core: https://github.com/nano-o/stellar-core/tree/skip-ledgers-p25-dpor-2
+For a more realistic example, see the
+[`dpor-on-master` stellar-core integration](https://github.com/nano-o/stellar-core/tree/dpor-on-master).
 
 ## Current scope
 
@@ -249,12 +250,15 @@ active threads, the first cache-backed query builds the cache in
 `has_causal_cycle_without_cache()` runs in O(N + E) without materializing
 vector clocks.
 
-The cache is built on demand via Kahn's topological sort and stores a
-per-event vector clock (one entry per thread). Subsequent `porf_contains` calls
-compare a single clock entry. Cycle detection is a byproduct of the topological
-sort (incomplete sort = cycle). The consistency checker can also use the
-cheaper `has_causal_cycle_without_cache()` path when it only needs a cycle
-answer and the cache is still cold.
+The cache is built on demand via Kahn's topological sort and logically stores a
+per-event vector clock (one entry per thread). Physically, adjacency is CSR and
+the clocks are one flat row-major buffer. Per-thread build scratch is reused
+across queries, and Kahn's ready set is a stack because consumers require only
+a valid topological order, not a stable one. Subsequent `porf_contains` calls
+compare a single clock entry. Cycle detection is a byproduct of the
+topological sort (incomplete sort = cycle). The consistency checker can also
+use the cheaper `has_causal_cycle_without_cache()` path when it only needs a
+cycle answer and the cache is still cold.
 
 Key properties:
 

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <string>
 
 namespace {
@@ -288,11 +289,53 @@ TEST_CASE("execution graph supports explicit index insertion for replay", "[mode
   const auto e0 =
       graph.add_event_with_index(7, 3, dpor::model::SendLabel{.destination = 8, .value = "a"});
   const auto e1 =
-      graph.add_event_with_index(7, 4, dpor::model::SendLabel{.destination = 8, .value = "b"});
+      graph.add_event_with_index(7, 9, dpor::model::SendLabel{.destination = 8, .value = "b"});
+  const auto e2 = graph.add_event(7, dpor::model::SendLabel{.destination = 8, .value = "c"});
 
   REQUIRE(graph.event(e0).index == 3);
-  REQUIRE(graph.event(e1).index == 4);
+  REQUIRE(graph.event(e1).index == 9);
+  REQUIRE(graph.event(e2).index == 10);
   REQUIRE_THROWS_AS(
-      graph.add_event_with_index(7, 4, dpor::model::SendLabel{.destination = 8, .value = "c"}),
+      graph.add_event_with_index(7, 9, dpor::model::SendLabel{.destination = 8, .value = "d"}),
       dpor::precondition_error);
+  REQUIRE_THROWS_AS(
+      graph.add_event_with_index(7, 8, dpor::model::SendLabel{.destination = 8, .value = "e"}),
+      dpor::precondition_error);
+  REQUIRE(graph.events().size() == 3);
+}
+
+TEST_CASE("execution graph rejects events after the maximum explicit index", "[model][graph]") {
+  dpor::model::ExecutionGraph graph;
+  constexpr auto max_index = std::numeric_limits<dpor::model::EventIndex>::max();
+
+  const auto event = graph.add_event_with_index(
+      7, max_index, dpor::model::SendLabel{.destination = 8, .value = "a"});
+
+  REQUIRE(graph.event(event).index == max_index);
+  REQUIRE_THROWS_AS(graph.add_event(7, dpor::model::SendLabel{.destination = 8, .value = "b"}),
+                    dpor::precondition_error);
+  REQUIRE_THROWS_AS(
+      graph.add_event_with_index(7, static_cast<dpor::model::EventIndex>(max_index - 1U),
+                                 dpor::model::SendLabel{.destination = 8, .value = "c"}),
+      dpor::precondition_error);
+  REQUIRE(graph.events().size() == 1);
+}
+
+TEST_CASE("execution graph rejects thread ids above the supported maximum", "[model][graph]") {
+  dpor::model::ExecutionGraph graph;
+  constexpr auto max_thread = dpor::model::kMaxThreadId;
+
+  // The bound is inclusive: the highest supported id still works.
+  const auto event =
+      graph.add_event(max_thread, dpor::model::SendLabel{.destination = 0, .value = "a"});
+  REQUIRE(graph.event(event).thread == max_thread);
+
+  REQUIRE_THROWS_AS(
+      graph.add_event(max_thread + 1U, dpor::model::SendLabel{.destination = 0, .value = "b"}),
+      dpor::precondition_error);
+  REQUIRE_THROWS_AS(
+      graph.add_event_with_index(std::numeric_limits<dpor::model::ThreadId>::max(), 0,
+                                 dpor::model::SendLabel{.destination = 0, .value = "c"}),
+      dpor::precondition_error);
+  REQUIRE(graph.events().size() == 1);
 }

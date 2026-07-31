@@ -177,9 +177,10 @@ materialized owned graphs, so enqueuing them incurs no additional copy.
 ### Block / Reschedule Paths
 
 - Plain `Block` append continues locally.
-- Blocked-receive reschedule materializes an owned unblocked graph and explores
-  it on the current worker as a tail-like owned child context at the same DPOR
-  tree depth.
+- Blocked-receive reschedule first performs its trace, next-step, and
+  unread-send viability checks on the original graph. Only a viable candidate
+  materializes an owned unblocked graph, which is explored on the current
+  worker as a tail-like owned child context at the same DPOR tree depth.
 
 ## Ownership Invariant
 

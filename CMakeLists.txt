@@ -17,6 +17,8 @@ option(DPOR_BUILD_EXAMPLES "Build example targets" ON)
 option(DPOR_BUILD_BENCHMARKS "Build standalone benchmark targets" ON)
 option(DPOR_ENABLE_WARNINGS "Enable strict compiler warnings" ON)
 option(DPOR_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+option(DPOR_VERIFY_GRAPH_INVARIANTS
+       "Verify execution-graph append preconditions on the hot path" ON)
 
 if(DPOR_ENABLE_WARNINGS)
   include(cmake/CompilerWarnings.cmake)
@@ -28,6 +30,14 @@ add_library(dpor INTERFACE)
 add_library(dpor::dpor ALIAS dpor)
 
 target_compile_features(dpor INTERFACE cxx_std_20)
+
+# Scoped to BUILD_INTERFACE so this build tree (and therefore the test suite)
+# checks the append preconditions, while installed consumers get the unchecked
+# hot path. Consumers that compile the headers directly, such as the autotools
+# stellar-core integration, never see it unless they define it themselves.
+if(DPOR_VERIFY_GRAPH_INVARIANTS)
+  target_compile_definitions(dpor INTERFACE $<BUILD_INTERFACE:DPOR_VERIFY_GRAPH_INVARIANTS>)
+endif()
 
 set_target_properties(
   dpor

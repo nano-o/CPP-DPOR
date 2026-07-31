@@ -16,6 +16,7 @@
 #include "dpor/model/relation.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <iterator>
 #include <limits>
@@ -187,8 +188,8 @@ class ReadsFromRelationT {
 // during exploration, so this is tuned for the shape the exploration path
 // actually produces: indices assigned by add_event() are consecutive from 0,
 // which collapses to a single counter that copies without allocating. Only the
-// replay/import path, which can supply arbitrary indices, spills into the
-// side vector.
+// replay/import path, which can supply sparse (but monotonically inserted)
+// indices, spills into the side vector.
 class UsedEventIndexSet {
  public:
   [[nodiscard]] bool contains(EventIndex index) const noexcept {
@@ -265,34 +266,29 @@ class ExecutionGraphT {
   // Normal insertion path: assign event index automatically per thread.
   [[nodiscard]] EventId add_event(ThreadId thread, EventLabelT<ValueT> label) {
     const auto index = next_event_index(thread);
-    return add_event_with_index(thread, index, std::move(label));
+    return append_event_unchecked(thread, index, std::move(label));
   }
 
-  // Replay/import path when event indices come from external traces.
+  // Replay/import path when event indices come from external traces. Imports
+  // may contain gaps, but must preserve the producer's per-thread event order.
   [[nodiscard]] EventId add_event_with_index(ThreadId thread, EventIndex index,
                                              EventLabelT<ValueT> label) {
     ensure_thread_storage(thread);
     auto& used_indices = used_event_indices_by_thread_[thread];
+    // Keep this check even though the ordering check below rejects every index
+    // below next_index: at EventIndex saturation next_index sticks at max, so
+    // re-inserting max passes `index < next_index` and this is the only thing
+    // that catches it. It is not redundant.
     if (used_indices.contains(index)) {
       throw precondition_error("event index already used in this thread");
     }
-    used_indices.insert(index);
 
-    auto& next_index = next_event_index_by_thread_[thread];
-    if (index >= next_index) {
-      if (index == std::numeric_limits<EventIndex>::max()) {
-        next_index = index;
-      } else {
-        next_index = static_cast<EventIndex>(index + 1);
-      }
+    if (index < next_event_index_by_thread_[thread]) {
+      throw precondition_error(
+          "event indices must be inserted in increasing order within each thread");
     }
 
-    events_.push_back(Event{
-        .thread = thread,
-        .index = index,
-        .label = std::move(label),
-    });
-    return events_.size() - 1U;
+    return append_event_unchecked(thread, index, std::move(label));
   }
 
   void set_reads_from_source(EventId receive_event_id, ReadsFromSource source) {
@@ -389,6 +385,48 @@ class ExecutionGraphT {
   friend class ExplorationGraphT;
 
  private:
+  // Common append after the caller has established that thread storage exists,
+  // that index is unused, and that it does not precede an existing event in
+  // this thread. add_event() obtains the next available index by construction;
+  // only explicit imports need to check the index preconditions. All three are
+  // verified under DPOR_VERIFY_GRAPH_INVARIANTS, so a caller that skips
+  // ensure_thread_storage() or bypasses the index checks fails loudly in builds
+  // that opt in instead of corrupting the per-thread bookkeeping.
+  //
+  // The verification is gated rather than tied to NDEBUG on purpose. The
+  // used-index probe is the work this helper exists to avoid, and it degrades
+  // to a linear scan on sparse replay/import graphs. Consumers compile these
+  // headers without NDEBUG -- the stellar-core integration builds them at -O2
+  // and never defines it -- so a bare assert would reinstate that cost in
+  // exactly the builds meant to avoid it. The name says unchecked because that
+  // is what every build without the flag gets.
+  [[nodiscard]] EventId append_event_unchecked(ThreadId thread, EventIndex index,
+                                               EventLabelT<ValueT> label) {
+#ifdef DPOR_VERIFY_GRAPH_INVARIANTS
+    assert(static_cast<std::size_t>(thread) < used_event_indices_by_thread_.size());
+    assert(static_cast<std::size_t>(thread) < next_event_index_by_thread_.size());
+    assert(index >= next_event_index_by_thread_[thread]);
+    assert(!used_event_indices_by_thread_[thread].contains(index));
+#endif
+
+    auto& used_indices = used_event_indices_by_thread_[thread];
+    used_indices.insert(index);
+
+    auto& next_index = next_event_index_by_thread_[thread];
+    if (index == std::numeric_limits<EventIndex>::max()) {
+      next_index = index;
+    } else {
+      next_index = static_cast<EventIndex>(index + 1);
+    }
+
+    events_.push_back(Event{
+        .thread = thread,
+        .index = index,
+        .label = std::move(label),
+    });
+    return events_.size() - 1U;
+  }
+
   template <typename Callback>
   void for_each_validated_rf_edge(
       Callback&& callback) const {  // NOLINT(cppcoreguidelines-missing-std-forward)
@@ -416,9 +454,14 @@ class ExecutionGraphT {
     }
   }
 
+  // The bound is checked only when the thread is new, so the common path where
+  // storage already exists stays a single size comparison.
   void ensure_thread_storage(ThreadId thread) {
     const auto index = static_cast<std::size_t>(thread);
     if (index >= next_event_index_by_thread_.size()) {
+      if (thread > kMaxThreadId) {
+        throw precondition_error("thread id exceeds the maximum supported thread id");
+      }
       next_event_index_by_thread_.resize(index + 1, 0);
       used_event_indices_by_thread_.resize(index + 1);
     }
@@ -479,7 +522,7 @@ class ExecutionGraphT {
     return next_index;
   }
 
-  // Produces per-thread event sequences sorted by declared per-thread index.
+  // Produces per-thread event sequences ordered by declared per-thread index.
   // These sequences are the canonical input for ProgramOrderRelation.
   [[nodiscard]] std::vector<std::vector<NodeId>> derive_thread_event_sequences() const {
     std::vector<std::vector<EventId>> event_ids_by_thread;
@@ -498,22 +541,23 @@ class ExecutionGraphT {
       if (event_ids.empty()) {
         continue;
       }
-      std::sort(event_ids.begin(), event_ids.end(), [&](const EventId lhs, const EventId rhs) {
-        const auto lhs_index = events_[lhs].index;
-        const auto rhs_index = events_[rhs].index;
-        if (lhs_index != rhs_index) {
-          return lhs_index < rhs_index;
-        }
-        return lhs < rhs;
-      });
-
+      // Events are appended in ascending event id and insertion enforces
+      // strictly increasing per-thread indices, so each thread's ids already
+      // arrive in program order. Validate instead of sorting: a sort here would
+      // silently repair a broken insertion invariant and hand back a plausible
+      // but wrong program order.
       for (std::size_t i = 1; i < event_ids.size(); ++i) {
-        const auto previous = event_ids[i - 1];
-        const auto current = event_ids[i];
-        if (events_[previous].index == events_[current].index) {
+        const auto previous_index = events_[event_ids[i - 1]].index;
+        const auto current_index = events_[event_ids[i]].index;
+        if (previous_index == current_index) {
           throw internal_error(
               "two events in the same thread have the same event index; program order is "
               "ambiguous");
+        }
+        if (current_index < previous_index) {
+          throw internal_error(
+              "events in the same thread are not in increasing event index order; program "
+              "order is ambiguous");
         }
       }
 

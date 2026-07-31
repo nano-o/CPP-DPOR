@@ -12,6 +12,9 @@ Historical note:
   were current when those measurements and plans were written. References to
   recursive `visit()` or to "introducing" local rollback are historical unless
   a section explicitly says otherwise.
+- References below to a per-thread `unordered_set<EventIndex>` are also
+  historical. Phase 7 replaced it with a dense-prefix/sparse-tail
+  `UsedEventIndexSet` while retaining sparse replay/import support.
 
 ## Constraint
 
@@ -795,6 +798,101 @@ Phase 6 closeout:
 2. defer Landing 3 unless a fresh profile makes `restrict()` / blocked-receive materialization dominant again
 3. move the next performance phase toward `thread_trace()`, unread-send tracking, and related repeatedly recomputed derived state
 
+### Phase 7: Hot-Path Derived-State And Materialization Cleanup
+
+Commit: `5f48e8b`
+
+Phase 7 followed the post-Phase-6 profile across the remaining graph,
+consistency, and revisit hot paths:
+
+1. The FIFO `G|Previous` tiebreaker now evaluates reachability and formal FIFO
+   clauses (b) and (c) directly under a keep mask. The old restriction-based
+   implementation remains as
+   `get_cons_tiebreaker_masked_via_restriction()` for differential builds.
+2. `revisit_condition()` tests membership in `Previous` on demand for the
+   non-receive branch. The receive gate runs before the `Deleted` scan, and the
+   scan builds the keep mask directly.
+3. Blocked-receive rescheduling performs trace, step, and unread-send viability
+   checks on the original graph and materializes the graph without its `Block`
+   event only for a viable child.
+4. The non-masked consistency tiebreaker materializes one rewritten graph and
+   rebinds its `rf` source per candidate. Its acyclicity verdict is still
+   computed against the original graph before each rebind.
+5. PORF construction now uses CSR adjacency, one flat row-major vector-clock
+   buffer, reusable per-worker scratch, and a stack for Kahn's ready set. No
+   consumer depends on which valid topological order is produced.
+6. Restriction uses a reserved bulk builder that reconstructs every logical and
+   derived graph field without filling an undo log that the independent result
+   would immediately discard.
+7. Stored `insertion_order_` / `insertion_position_` state was removed. Since
+   every insertion appends, insertion order is the identity on event ids and
+   the diagnostic API materializes it on demand.
+8. Per-thread used event indices now use `UsedEventIndexSet`: the normal dense
+   prefix copies as a counter, while sparse explicit replay/import indices use
+   a small side vector.
+9. `validate_graph()` reuses flat thread-local byte buffers, including a
+   saturating read count sufficient to distinguish zero, one, and multiple
+   readers. FIFO channel construction no longer sorts buckets whose input is
+   already in sender-thread index order.
+10. `thread_trace_into()` reuses caller-owned storage and leaves unchanged
+    prefix entries in place, avoiding allocation and expensive payload-copy
+    traffic on repeated trace queries.
+
+Correctness validation for the landing included 277/277 tests plus differential
+comparison of the masked FIFO tiebreaker against the retained restriction-based
+reference over roughly 21 million executions. The differential mode is enabled
+with `DPOR_VERIFY_MASKED_TIEBREAKER`; it costs about 2.2x and must never be part
+of default build flags.
+
+No separate standalone Phase 7 timing was recorded in this document. Future
+work should begin with a fresh profile rather than assuming that the
+post-Phase-6 hotspot ordering still applies.
+
+#### Phase 7 follow-up: insertion-order hardening
+
+A follow-up hardened the two `ExecutionGraphT` insertion paths rather than
+chasing a profile:
+
+- `add_event()` now appends through a shared `append_event_unchecked()` helper
+  instead of routing through `add_event_with_index()`, dropping a redundant
+  used-index probe. The helper verifies all three preconditions (thread storage
+  present, index unused, index not preceding the thread's last event) under
+  `DPOR_VERIFY_GRAPH_INVARIANTS`, so builds that opt in still catch a caller
+  that bypasses them.
+
+  These checks are gated rather than tied to `NDEBUG` on purpose. The used-index
+  probe is exactly the work this change removed from the hot path, and it is a
+  linear scan on sparse replay/import graphs. Consumers compile these headers
+  without `NDEBUG` — the stellar-core integration builds them at `-O2` and never
+  defines it — so a bare `assert` would have reinstated the cost in precisely
+  the builds the change was meant to speed up. The `DPOR_VERIFY_GRAPH_INVARIANTS`
+  CMake option defaults to on and is scoped to `BUILD_INTERFACE`, so this build
+  tree and its test suite stay checked while consumers get the unchecked path.
+- `add_event_with_index()` additionally rejects an index below the thread's next
+  index. Explicit replay/import indices may still contain gaps, but must arrive
+  in strictly increasing per-thread order. Its used-index check is retained
+  deliberately: at `EventIndex` saturation the next index sticks at the maximum,
+  so re-inserting the maximum passes the ordering check and only the used-index
+  check rejects it.
+- Thread ids above `kMaxThreadId` are rejected. They index internal storage
+  directly, so an out-of-range id from an imported trace would otherwise attempt
+  a multi-gigabyte resize. The bound is tested only when the thread is new, so
+  the steady-state path stays a single size comparison.
+
+The ordering rule makes the per-thread monotonicity invariant uniform across
+both insertion paths, which retires the last sort over per-thread events.
+Phase 3 had already removed the sort in `build_porf_graph_structure()` on the
+grounds that `ExplorationGraphT::add_event()` guarantees monotonic indices; that
+argument did not extend to `ExecutionGraphT::derive_thread_event_sequences()`,
+whose input could come from an unvalidated import, so its sort survived. It is
+now a linear validation pass that raises `internal_error` on a duplicate or
+decreasing index instead of sorting a broken graph into a plausible but
+unfaithful program order.
+
+Validated at 280/280 tests in Debug and Release, with and without
+`DPOR_VERIFY_GRAPH_INVARIANTS`, and with the stellar-core integration's
+13-scenario execution-count fingerprint unchanged.
+
 ## Recorded Landing Order
 
 1. example-local structured `ValueT`
@@ -808,11 +906,16 @@ Phase 6 closeout:
 9. Phase 5 Landing 2: reference-based forward recursion in `visit()`, while leaving revisit materialization intentionally unchanged
 10. Phase 5.5: densify remaining hash maps and hash sets in PORF cache construction, `restrict()`, `revisit_condition()`, and `backward_revisit()`
 11. Phase 6: completed with the backward-revisit `with_rf()` copy removal and the masked `G|Previous` tiebreaker path; do not prioritize Landing 3 without a fresh profile
-12. reserve hot vectors and other minor adjacency-building cleanups where perf justifies them
+12. Phase 7: masked FIFO checks, delayed restriction, reusable PORF/validation
+    scratch, bulk restriction construction, compact used-index tracking, and
+    trace-buffer reuse
+13. Phase 7 follow-up: insertion-order hardening on both `ExecutionGraphT`
+    insertion paths, retiring the last per-thread event sort
+14. reserve hot vectors and other minor adjacency-building cleanups where perf justifies them
 
 ## Why This Order
 
-This order reflects the sequence that was preferred while Phases 0-6 were being
+This order reflects the sequence that was preferred while Phases 0-7 were being
 landed. It balances:
 
 - immediate wins
@@ -823,7 +926,16 @@ landed. It balances:
 At the time, it also avoided paying the complexity cost of a rollback-based
 redesign before the cheaper and more local wins had been measured.
 
-After Phase 2, the event-ID cleanup removed a large chunk of graph-copy overhead, so Phases 5 and 6 needed to stay perf-gated. After Phase 4, that gating pointed toward Phase 5: Phase 4 fixed the forward-path cycle/PORF structure cleanly, but the remaining profile was still too allocator-heavy for more PORF-local work. Phase 5 delivered the forward-path copy elimination. Phase 5.5 cleaned up the newly exposed hash-map and reallocation hotspots. Phase 6 then removed the obvious revisit-only extra materialization costs and paid off. The remaining profile shape no longer points first at `revisit_condition()` materialization; it now points more strongly at repeatedly recomputed derived state such as `thread_trace()`, unread-send discovery, and the remaining PORF / restriction work.
+After Phase 2, the event-ID cleanup removed a large chunk of graph-copy
+overhead, so Phases 5 and 6 needed to stay perf-gated. After Phase 4, that
+gating pointed toward Phase 5: Phase 4 fixed the forward-path cycle/PORF
+structure cleanly, but the remaining profile was still too allocator-heavy for
+more PORF-local work. Phase 5 delivered the forward-path copy elimination.
+Phase 5.5 cleaned up the newly exposed hash-map and reallocation hotspots.
+Phase 6 then removed the obvious revisit-only extra materialization costs.
+Phase 7 followed the resulting profile into trace reuse, validation, remaining
+restriction timing, and PORF representation. A new phase now requires fresh
+measurement rather than carrying the Phase 6 ranking forward again.
 
 ## Acceptance Criteria
 
@@ -1005,4 +1117,7 @@ The plan is:
 - structural second
 - explicit about the worker-local versus parallel-task boundary
 
-Phases 1–6 are complete. The next likely target is incremental derived-state work, especially `thread_trace()` and unread-send tracking, with any further revisit-local materialization work kept perf-gated.
+Phases 1–7 are complete. Phase 7 consumed the specific follow-ups identified
+by the Phase 6 profile, so the next target should be selected from a fresh
+end-to-end profile. Further semantic shortcuts or materialization changes must
+remain correctness- and performance-gated.

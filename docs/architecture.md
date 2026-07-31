@@ -46,16 +46,29 @@ that DPOR explores against.
 ### Graphs and Reachability
 
 - **`ExecutionGraphT`** stores events plus the reads-from (`rf`) relation. A
-  receive reads either from a send or from bottom.
+  receive reads either from a send or from bottom. Events are append-only and
+  both insertion paths enforce strictly increasing per-thread event indices, so
+  ascending event id is program order within a thread. `po_relation()` checks
+  that invariant rather than sorting to restore it, so a violation surfaces as
+  an `internal_error` instead of a silently wrong program order. The append
+  helper's own preconditions are verified in `DPOR_VERIFY_GRAPH_INVARIANTS`
+  builds, which this build tree enables by default and consumers do not.
 - **`ExplorationGraphT`** wraps `ExecutionGraphT` with DPOR-specific state:
-  insertion order, rollback support, thread-local metadata, and cached
-  `(po ∪ rf)+` reachability.
+  rollback support, per-thread metadata, and cached `(po ∪ rf)+`
+  reachability. Event insertion is append-only, so event ids already encode
+  insertion order; the diagnostic `insertion_order()` API materializes
+  `[0, ..., event_count - 1]` on demand.
 - **`PorfCache`** is a lazy vector-clock cache used by `ExplorationGraphT` to
   accelerate hot-path reachability and cycle checks on acyclic graphs. It is
   part of the exploration-graph architecture rather than a detached benchmark
   optimization: DPOR relies on these cached reachability queries in its hot
   path, while graph mutations invalidate the cache and copies can reuse it
-  until they diverge.
+  until they diverge. Cache construction uses CSR adjacency, flat row-major
+  vector clocks, and reusable per-worker scratch buffers. Kahn's ready set is a
+  stack; no consumer depends on which valid topological order is chosen.
+- Restrictions rebuild an owned graph through a bulk append path. That path
+  reserves storage and reconstructs all derived metadata without populating an
+  undo log that the new independent graph would immediately discard.
 - The model layer also includes lightweight relation helpers. The most
   important production-facing pieces are **`ProgramOrderRelation`** and
   **`ExplicitRelation`**, which provide views over `po` and `rf`. The generic
@@ -113,9 +126,11 @@ exploration engine.
   - non-blocking receive branching over compatible sends plus the bottom branch
   - backward revisiting to recover alternative message matches and
     interleavings
-- Revisit and tiebreaker logic are communication-model aware. In particular,
-  FIFO point-to-point runs use conservative consistency checks rather than the
-  async-only masked shortcut.
+- Revisit and tiebreaker logic are communication-model aware. The masked
+  `G|Previous` tiebreaker evaluates reachability and the formal FIFO clauses
+  directly against the keep mask, without materializing the restriction. The
+  former restriction-based implementation remains available as a differential
+  oracle in `DPOR_VERIFY_MASKED_TIEBREAKER` builds.
 
 ### Results and Observers
 

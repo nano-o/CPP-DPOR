@@ -314,8 +314,9 @@ The library's deliberate contract and invariant exceptions derive from
 - `dpor::internal_error` — a library invariant was violated. Always a bug in
   dpor itself; please report it.
 - `dpor::precondition_error` — the caller violated a documented API
-  precondition (non-compact thread ids, malformed rf edges, `porf_contains`
-  on a cyclic graph, both terminal-observer aliases set, ...).
+  precondition (non-compact or out-of-range thread ids, malformed rf edges,
+  out-of-order explicit event indices within a thread, `porf_contains` on a
+  cyclic graph, both terminal-observer aliases set, ...).
 - `dpor::user_code_error` — an exception escaped a user callback, or a
   callback returned an illegal result (e.g., a thread function returning
   `BlockLabel`, or violating determinism on the blocked-receive reschedule
@@ -388,10 +389,37 @@ Useful APIs include:
 
 Reads-from entries map a receive either to a send or to bottom.
 
+Both insertion paths keep each thread's events strictly increasing in event
+index, which is what makes ascending event id equal program order within a
+thread. `add_event()` derives the next per-thread index by construction and
+appends without further checks, so the monotonic-index validation applies only
+to explicit replay/import insertion. `add_event_with_index()` is that path:
+gaps are allowed, but an index that repeats or precedes the thread's last index
+is a `precondition_error`. A later `add_event()` on the thread resumes *past*
+the highest index imported so far rather than backfilling a gap, so importing
+index 9 makes the next automatic index 10.
+
+Both insertion paths also reject a thread id above
+`dpor::model::kMaxThreadId`. Thread ids
+index internal storage directly, so the graph layer caps them independently of
+the `Program`-level compact-thread-id validation, which imports bypass.
+
+`po_relation()` validates rather than repairs: if a thread's events are not in
+strictly increasing index order it throws `internal_error` instead of sorting
+them into a plausible but unfaithful program order.
+
+`add_event()` itself appends without re-checking what it just derived. Build
+with `DPOR_VERIFY_GRAPH_INVARIANTS` to verify the append preconditions on every
+insertion; the option is on for this project's own build tree and off for
+consumers, since the checks sit on the hottest path and one of them is linear
+for sparse imported indices.
+
 ### `ExplorationGraphT<ValueT>`
 
 `ExplorationGraphT` wraps `ExecutionGraphT` with DPOR-specific state such as
-insertion order, rollback support, and cached `(po ∪ rf)+` reachability.
+rollback support, per-thread derived metadata, and cached `(po ∪ rf)+`
+reachability. Events are append-only, so insertion order is identical to
+ascending event id and is materialized on demand rather than stored twice.
 
 Inspection APIs:
 

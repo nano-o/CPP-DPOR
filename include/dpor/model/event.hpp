@@ -33,6 +33,15 @@ using ThreadId = std::uint32_t;
 using EventIndex = std::uint32_t;
 using Value = std::string;
 
+// Upper bound on thread ids accepted by the graph layer. Because thread ids
+// index internal vectors directly, an unbounded id turns a typo in an imported
+// trace into a multi-gigabyte allocation that fails as bad_alloc at best and an
+// OOM kill under overcommit at worst. The graph layer is reachable without
+// going through Program::validate_compact_thread_ids(), so it enforces its own
+// cap: far above any realistic program, but low enough to keep the worst-case
+// per-thread storage bounded.
+inline constexpr ThreadId kMaxThreadId = (1U << 20U) - 1U;
+
 enum class CommunicationModel : std::uint8_t { Async, FifoP2P };
 
 enum class ReceiveMode : std::uint8_t { Blocking, NonBlocking };

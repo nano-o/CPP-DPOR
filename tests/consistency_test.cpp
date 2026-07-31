@@ -172,6 +172,23 @@ TEST_CASE("fifo p2p rejects receive that skips unread earlier matching send",
   REQUIRE_FALSE(has_issue(result, ConsistencyIssueCode::FifoP2PReceiveOrderViolation));
 }
 
+TEST_CASE("fifo p2p preserves sender order for sparse imported indices",
+          "[model][consistency][fifo_p2p]") {
+  ExecutionGraph graph;
+  static_cast<void>(graph.add_event_with_index(1, 3, SendLabel{.destination = 2, .value = "a"}));
+  const auto later_send =
+      graph.add_event_with_index(1, 9, SendLabel{.destination = 2, .value = "b"});
+  const auto receive = graph.add_event_with_index(2, 4, make_receive_label<Value>());
+  graph.set_reads_from(receive, later_send);
+
+  const FifoP2PConsistencyChecker checker;
+  const auto result = checker.check(graph);
+
+  REQUIRE_FALSE(result.is_consistent());
+  REQUIRE(has_issue(result, ConsistencyIssueCode::FifoP2PUnreadEarlierMatchingSend));
+  REQUIRE_FALSE(has_issue(result, ConsistencyIssueCode::FifoP2PReceiveOrderViolation));
+}
+
 TEST_CASE("fifo p2p allows selective receive to skip earlier non-matching send",
           "[model][consistency][fifo_p2p]") {
   ExecutionGraph graph;
