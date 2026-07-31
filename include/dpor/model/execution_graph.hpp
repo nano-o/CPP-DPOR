@@ -183,6 +183,75 @@ class ReadsFromRelationT {
   std::size_t size_{0};
 };
 
+// Set of per-thread event indices already in use. Graphs are copied constantly
+// during exploration, so this is tuned for the shape the exploration path
+// actually produces: indices assigned by add_event() are consecutive from 0,
+// which collapses to a single counter that copies without allocating. Only the
+// replay/import path, which can supply arbitrary indices, spills into the
+// side vector.
+class UsedEventIndexSet {
+ public:
+  [[nodiscard]] bool contains(EventIndex index) const noexcept {
+    return index < dense_end_ || find_sparse(index) != sparse_.end();
+  }
+
+  void insert(EventIndex index) {
+    if (index == dense_end_ && index != std::numeric_limits<EventIndex>::max()) {
+      ++dense_end_;
+      absorb_sparse();
+      return;
+    }
+    sparse_.push_back(index);
+  }
+
+  // Returns the number of elements removed, matching std::unordered_set::erase.
+  std::size_t erase(EventIndex index) {
+    const auto it = find_sparse(index);
+    if (it != sparse_.end()) {
+      *it = sparse_.back();
+      sparse_.pop_back();
+      return 1U;
+    }
+    if (index >= dense_end_) {
+      return 0U;
+    }
+    // Erasing inside the dense prefix: everything above the hole stays used,
+    // so demote it to the sparse side.
+    for (EventIndex above = index + 1U; above < dense_end_; ++above) {
+      sparse_.push_back(above);
+    }
+    dense_end_ = index;
+    return 1U;
+  }
+
+ private:
+  [[nodiscard]] std::vector<EventIndex>::const_iterator find_sparse(
+      EventIndex index) const noexcept {
+    return std::find(sparse_.begin(), sparse_.end(), index);
+  }
+
+  [[nodiscard]] std::vector<EventIndex>::iterator find_sparse(EventIndex index) noexcept {
+    return std::find(sparse_.begin(), sparse_.end(), index);
+  }
+
+  void absorb_sparse() {
+    bool absorbed = true;
+    while (absorbed && !sparse_.empty()) {
+      absorbed = false;
+      const auto it = find_sparse(dense_end_);
+      if (it != sparse_.end() && dense_end_ != std::numeric_limits<EventIndex>::max()) {
+        ++dense_end_;
+        *it = sparse_.back();
+        sparse_.pop_back();
+        absorbed = true;
+      }
+    }
+  }
+
+  EventIndex dense_end_{0};
+  std::vector<EventIndex> sparse_;
+};
+
 template <typename ValueT>
 class ExecutionGraphT {
  public:
@@ -190,6 +259,8 @@ class ExecutionGraphT {
   using Event = EventT<ValueT>;
   using ReadsFromSource = ReadsFromSourceT<EventId>;
   using ReadsFromRelation = ReadsFromRelationT<EventId>;
+
+  void reserve_events(std::size_t capacity) { events_.reserve(capacity); }
 
   // Normal insertion path: assign event index automatically per thread.
   [[nodiscard]] EventId add_event(ThreadId thread, EventLabelT<ValueT> label) {
@@ -202,7 +273,7 @@ class ExecutionGraphT {
                                              EventLabelT<ValueT> label) {
     ensure_thread_storage(thread);
     auto& used_indices = used_event_indices_by_thread_[thread];
-    if (used_indices.find(index) != used_indices.end()) {
+    if (used_indices.contains(index)) {
       throw precondition_error("event index already used in this thread");
     }
     used_indices.insert(index);
@@ -398,7 +469,7 @@ class ExecutionGraphT {
     auto& next_index = next_event_index_by_thread_[thread];
     auto& used_indices = used_event_indices_by_thread_[thread];
 
-    while (used_indices.find(next_index) != used_indices.end()) {
+    while (used_indices.contains(next_index)) {
       if (next_index == kMaxIndex) {
         throw precondition_error("no available event index for thread");
       }
@@ -455,7 +526,7 @@ class ExecutionGraphT {
   std::vector<Event> events_;
   ReadsFromRelation reads_from_;
   std::vector<EventIndex> next_event_index_by_thread_;
-  std::vector<std::unordered_set<EventIndex>> used_event_indices_by_thread_;
+  std::vector<UsedEventIndexSet> used_event_indices_by_thread_;
 };
 
 using ExecutionGraph = ExecutionGraphT<Value>;

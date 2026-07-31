@@ -15,6 +15,7 @@
 #include "dpor/model/exploration_graph.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -24,6 +25,7 @@
 #include <exception>
 #include <functional>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <queue>
@@ -455,7 +457,16 @@ compute_next_event(const ProgramT<ValueT>& program, const model::ExplorationGrap
     }
 
     const auto& thread_fn = program.threads.at(tid);
-    const auto trace = graph.thread_trace(tid);
+    // One reused buffer per thread id: the trace is only read for the duration
+    // of the thread-function call below, and thread functions never re-enter
+    // the exploration loop. Keeping the buffers separate per thread lets
+    // thread_trace_into() leave the unchanged prefix in place across calls.
+    thread_local std::vector<ThreadTraceT<ValueT>> trace_buffers;
+    if (static_cast<std::size_t>(tid) >= trace_buffers.size()) {
+      trace_buffers.resize(static_cast<std::size_t>(tid) + 1U);
+    }
+    auto& trace = trace_buffers[static_cast<std::size_t>(tid)];
+    graph.thread_trace_into(tid, trace);
     const auto step = graph.thread_event_count(tid);
     const auto next_label = invoke_user_code(UserCallbackKind::ThreadFunction, tid,
                                              [&]() { return thread_fn(trace, step); });
@@ -491,14 +502,14 @@ compute_next_event(const ProgramT<ValueT>& program, const model::ExplorationGrap
 
 // Compute the "Previous" set: {e' ∈ G.E | e' ≤_G e ∨ ⟨e', s⟩ ∈ G.porf}.
 template <typename ValueT>
-[[nodiscard]] inline std::vector<std::uint8_t> compute_previous_set(
-    const model::ExplorationGraphT<ValueT>& graph,
-    typename model::ExplorationGraphT<ValueT>::EventId e,
-    typename model::ExplorationGraphT<ValueT>::EventId s) {
+inline void compute_previous_set_into(const model::ExplorationGraphT<ValueT>& graph,
+                                      typename model::ExplorationGraphT<ValueT>::EventId e,
+                                      typename model::ExplorationGraphT<ValueT>::EventId s,
+                                      std::vector<std::uint8_t>& result) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
 
   const auto n = graph.event_count();
-  std::vector<std::uint8_t> result(n, 0);
+  result.assign(n, 0);
   for (EvId ep = 0; ep < n; ++ep) {
     // e' ≤_G e: ep was inserted before or at e.
     if (graph.inserted_before_or_equal(ep, e)) {
@@ -510,7 +521,15 @@ template <typename ValueT>
       result[ep] = 1;
     }
   }
+}
 
+template <typename ValueT>
+[[nodiscard]] inline std::vector<std::uint8_t> compute_previous_set(
+    const model::ExplorationGraphT<ValueT>& graph,
+    typename model::ExplorationGraphT<ValueT>::EventId e,
+    typename model::ExplorationGraphT<ValueT>::EventId s) {
+  std::vector<std::uint8_t> result;
+  compute_previous_set_into(graph, e, s, result);
   return result;
 }
 
@@ -521,22 +540,46 @@ class MaskedPorfContext {
  public:
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
 
-  MaskedPorfContext(const model::ExplorationGraphT<ValueT>& graph,
-                    const std::vector<std::uint8_t>& keep_mask)
-      : graph_(graph),
-        keep_mask_(keep_mask),
-        kept_position_in_thread_(graph.event_count(), kNoPosition),
-        consumed_send_mask_(graph.event_count(), 0),
-        rf_successors_by_send_(graph.event_count()) {
-    if (keep_mask_.size() != graph_.event_count()) {
+  // Default-construct then reset(): instances are reused per worker, and the
+  // FIFO tables are only built when the communication model needs them, so
+  // there is no two-argument convenience constructor.
+  MaskedPorfContext() = default;
+
+  // Rebinds the context to a new (graph, mask) pair, reusing the buffers.
+  // Instances are constructed once per tiebreaker query on a hot path, so the
+  // engine keeps one per worker and resets it instead of reallocating.
+  // `build_fifo` additionally prepares the per-channel send ordering and
+  // filtered consumer table that the FifoP2P clause checks need, in the same
+  // two passes over the graph.
+  void reset(const model::ExplorationGraphT<ValueT>& graph,
+             const std::vector<std::uint8_t>& keep_mask, const bool build_fifo) {
+    graph_ = &graph;
+    keep_mask_ = &keep_mask;
+    if (keep_mask.size() != graph.event_count()) {
       throw internal_error("keep mask size must match event count");
     }
 
-    for (const auto event_id : graph_.insertion_order()) {
+    const auto n = graph.event_count();
+    kept_position_in_thread_.assign(n, kNoPosition);
+    consumed_send_mask_.assign(n, 0);
+    rf_consumer_.assign(n, kNoEvent);
+    extra_rf_consumers_.clear();
+    for (auto& thread_events : kept_events_by_thread_) {
+      thread_events.clear();
+    }
+
+    fifo_ = build_fifo;
+    if (fifo_) {
+      fifo_consumer_.assign(n, kNoEvent);
+      channel_keys_.clear();
+      active_channels_ = 0;
+    }
+
+    for (EvId event_id = 0; event_id < n; ++event_id) {
       if (!keeps(event_id)) {
         continue;
       }
-      const auto& evt = graph_.event(event_id);
+      const auto& evt = graph.event(event_id);
       const auto thread_index = static_cast<std::size_t>(evt.thread);
       if (thread_index >= kept_events_by_thread_.size()) {
         kept_events_by_thread_.resize(thread_index + 1);
@@ -544,9 +587,34 @@ class MaskedPorfContext {
       auto& thread_events = kept_events_by_thread_[thread_index];
       kept_position_in_thread_[event_id] = thread_events.size();
       thread_events.push_back(event_id);
+
+      if (!fifo_) {
+        continue;
+      }
+      // Ascending event id, which within one sender thread is ascending
+      // per-thread index -- exactly the order group_fifo_sends() produces, so
+      // the channel buckets need no sort.
+      const auto* send_label = model::as_send(evt);
+      if (send_label == nullptr) {
+        continue;
+      }
+      const auto key = std::pair{evt.thread, send_label->destination};
+      const auto found = std::find(channel_keys_.begin(), channel_keys_.end(), key);
+      std::size_t channel = 0;
+      if (found != channel_keys_.end()) {
+        channel = static_cast<std::size_t>(found - channel_keys_.begin());
+      } else {
+        channel = active_channels_++;
+        if (channel >= channels_.size()) {
+          channels_.emplace_back();
+        }
+        channels_[channel].clear();
+        channel_keys_.push_back(key);
+      }
+      channels_[channel].push_back(event_id);
     }
 
-    for (const auto& [recv_id, source] : graph_.reads_from()) {
+    for (const auto& [recv_id, source] : graph.reads_from()) {
       if (!keeps(recv_id) || source.is_bottom()) {
         continue;
       }
@@ -555,70 +623,206 @@ class MaskedPorfContext {
         continue;
       }
       consumed_send_mask_[send_id] = 1U;
-      rf_successors_by_send_[send_id].push_back(recv_id);
+      // A send has at most one reader in a consistent graph; keep a flat slot
+      // for that case and spill the (never expected) rest to the side list.
+      if (rf_consumer_[send_id] == kNoEvent) {
+        rf_consumer_[send_id] = recv_id;
+      } else {
+        extra_rf_consumers_.emplace_back(send_id, recv_id);
+      }
+
+      if (!fifo_) {
+        continue;
+      }
+      // Mirror compute_send_consumers(), which drops rf edges that fail the
+      // destination/value checks.
+      const auto& recv_evt = graph.event(recv_id);
+      const auto& send_evt = graph.event(send_id);
+      const auto* recv_label = model::as_receive(recv_evt);
+      const auto* send_label = model::as_send(send_evt);
+      if (recv_label != nullptr && send_label != nullptr &&
+          send_label->destination == recv_evt.thread &&
+          recv_label->accepts(send_label->value)) {
+        fifo_consumer_[send_id] = recv_id;
+      }
     }
   }
 
+  // True when rebinding rf(recv) to `candidate` violates a FifoP2P clause.
+  //
+  // Everything validate_graph() could report is already excluded for these
+  // candidates -- the graph is consistent, the candidate filter guarantees the
+  // unread/destination/value conditions, and missing reads are tolerated for
+  // every receive except recv, which the rewrite gives a source. What remains
+  // is the causal-cycle test, answered by reachable_from(), and the two FIFO
+  // clauses below. The verdicts survive being evaluated on the unrestricted
+  // graph because restriction renumbers ids and per-thread indices densely and
+  // order-preservingly, and both clauses only compare per-thread indices of two
+  // receives on the same thread.
+  [[nodiscard]] bool fifo_rewrite_violates(const EvId recv, const EvId candidate,
+                                           const EvId previous_source) {
+    std::array<std::pair<EvId, EvId>, 2> saved{};
+    std::size_t saved_count = 0;
+    const auto assign = [&](const EvId send_id, const EvId consumer) {
+      saved[saved_count++] = {send_id, fifo_consumer_[send_id]};
+      fifo_consumer_[send_id] = consumer;
+    };
+
+    if (previous_source != kNoEvent && previous_source != candidate) {
+      assign(previous_source, kNoEvent);
+    }
+    assign(candidate, recv);
+
+    const bool violated = fifo_clause_b_violated() || fifo_clause_c_violated();
+
+    while (saved_count > 0) {
+      --saved_count;
+      fifo_consumer_[saved[saved_count].first] = saved[saved_count].second;
+    }
+    return violated;
+  }
+
   [[nodiscard]] bool keeps(EvId event_id) const noexcept {
-    return event_id < keep_mask_.size() && keep_mask_[event_id] != 0U;
+    return event_id < keep_mask_->size() && (*keep_mask_)[event_id] != 0U;
   }
 
   [[nodiscard]] bool send_is_unread(EvId send_id) const noexcept {
     return keeps(send_id) && consumed_send_mask_[send_id] == 0U;
   }
 
-  [[nodiscard]] std::vector<std::uint8_t> reachable_from(EvId from) const {
-    if (!graph_.is_valid_event_id(from)) {
+  // Returns a buffer owned by this context; valid until the next call.
+  [[nodiscard]] const std::vector<std::uint8_t>& reachable_from(EvId from) {
+    if (!graph_->is_valid_event_id(from)) {
       throw internal_error("event id not found in masked PORF context");
     }
     if (!keeps(from)) {
       throw internal_error("masked PORF reachability requires a kept source event");
     }
 
-    std::vector<std::uint8_t> reachable(graph_.event_count(), 0);
-    std::vector<EvId> pending;
-    pending.reserve(graph_.event_count());
-    append_successors(from, pending);
+    reachable_.assign(graph_->event_count(), 0);
+    pending_.clear();
+    append_successors(from, pending_);
 
     std::size_t cursor = 0;
-    while (cursor < pending.size()) {
-      const auto current = pending[cursor++];
-      if (reachable[current] != 0U) {
+    while (cursor < pending_.size()) {
+      const auto current = pending_[cursor++];
+      if (reachable_[current] != 0U) {
         continue;
       }
-      reachable[current] = 1U;
-      append_successors(current, pending);
+      reachable_[current] = 1U;
+      append_successors(current, pending_);
     }
 
-    return reachable;
+    return reachable_;
   }
 
  private:
   static constexpr std::size_t kNoPosition = std::numeric_limits<std::size_t>::max();
+  static constexpr EvId kNoEvent = model::ExplorationGraphT<ValueT>::kNoSource;
 
-  void append_successors(EvId from, std::vector<EvId>& pending) const {
-    const auto thread_index = static_cast<std::size_t>(graph_.event(from).thread);
-    if (thread_index < kept_events_by_thread_.size()) {
-      const auto& thread_events = kept_events_by_thread_[thread_index];
-      const auto position = kept_position_in_thread_[from];
-      if (position != kNoPosition) {
-        for (std::size_t i = position + 1; i < thread_events.size(); ++i) {
-          pending.push_back(thread_events[i]);
+  // A receive consumes a send while an unread, earlier, matching send on the
+  // same channel is still available.
+  [[nodiscard]] bool fifo_clause_b_violated() const {
+    for (std::size_t channel_index = 0; channel_index < active_channels_; ++channel_index) {
+      const auto& channel = channels_[channel_index];
+      for (std::size_t later = 0; later < channel.size(); ++later) {
+        const auto consumer = fifo_consumer_[channel[later]];
+        if (consumer == kNoEvent) {
+          continue;
+        }
+        const auto* receive_label = model::as_receive(graph_->event(consumer));
+        if (receive_label == nullptr) {
+          continue;
+        }
+        for (std::size_t earlier = 0; earlier < later; ++earlier) {
+          const auto earlier_send_id = channel[earlier];
+          if (fifo_consumer_[earlier_send_id] != kNoEvent) {
+            continue;
+          }
+          const auto* earlier_send = model::as_send(graph_->event(earlier_send_id));
+          if (earlier_send != nullptr && receive_label->accepts(earlier_send->value)) {
+            return true;
+          }
         }
       }
     }
+    return false;
+  }
 
-    for (const auto recv_id : rf_successors_by_send_[from]) {
-      pending.push_back(recv_id);
+  // Two receives on one thread consume the same channel out of order.
+  [[nodiscard]] bool fifo_clause_c_violated() const {
+    for (std::size_t channel_index = 0; channel_index < active_channels_; ++channel_index) {
+      const auto& channel = channels_[channel_index];
+      for (std::size_t later = 0; later < channel.size(); ++later) {
+        const auto earlier_receive_id = fifo_consumer_[channel[later]];
+        if (earlier_receive_id == kNoEvent) {
+          continue;
+        }
+        const auto& earlier_receive_evt = graph_->event(earlier_receive_id);
+        const auto* earlier_receive = model::as_receive(earlier_receive_evt);
+        if (earlier_receive == nullptr) {
+          continue;
+        }
+        for (std::size_t earlier = 0; earlier < later; ++earlier) {
+          const auto earlier_send_id = channel[earlier];
+          const auto later_receive_id = fifo_consumer_[earlier_send_id];
+          if (later_receive_id == kNoEvent) {
+            continue;
+          }
+          const auto& later_receive_evt = graph_->event(later_receive_id);
+          if (later_receive_evt.thread != earlier_receive_evt.thread ||
+              later_receive_evt.index <= earlier_receive_evt.index) {
+            continue;
+          }
+          const auto* earlier_send = model::as_send(graph_->event(earlier_send_id));
+          if (earlier_send != nullptr && earlier_receive->accepts(earlier_send->value)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  void append_successors(EvId from, std::vector<EvId>& pending) const {
+    const auto thread_index = static_cast<std::size_t>(graph_->event(from).thread);
+    if (thread_index < kept_events_by_thread_.size()) {
+      const auto& thread_events = kept_events_by_thread_[thread_index];
+      const auto position = kept_position_in_thread_[from];
+      // Only the immediate program-order successor: the BFS expands whatever
+      // it marks, so transitivity within the thread comes for free and the
+      // edge count stays linear instead of quadratic.
+      if (position != kNoPosition && position + 1 < thread_events.size()) {
+        pending.push_back(thread_events[position + 1]);
+      }
+    }
+
+    if (rf_consumer_[from] != kNoEvent) {
+      pending.push_back(rf_consumer_[from]);
+    }
+    if (!extra_rf_consumers_.empty()) {
+      for (const auto& [send_id, recv_id] : extra_rf_consumers_) {
+        if (send_id == from) {
+          pending.push_back(recv_id);
+        }
+      }
     }
   }
 
-  const model::ExplorationGraphT<ValueT>& graph_;
-  const std::vector<std::uint8_t>& keep_mask_;
+  const model::ExplorationGraphT<ValueT>* graph_{nullptr};
+  const std::vector<std::uint8_t>* keep_mask_{nullptr};
   std::vector<std::vector<EvId>> kept_events_by_thread_;
   std::vector<std::size_t> kept_position_in_thread_;
   std::vector<std::uint8_t> consumed_send_mask_;
-  std::vector<std::vector<EvId>> rf_successors_by_send_;
+  std::vector<EvId> rf_consumer_;
+  std::vector<std::pair<EvId, EvId>> extra_rf_consumers_;
+  std::vector<std::uint8_t> reachable_;
+  std::vector<EvId> pending_;
+  bool fifo_{false};
+  std::vector<EvId> fifo_consumer_;
+  std::vector<std::vector<EvId>> channels_;
+  std::vector<std::pair<model::ThreadId, model::ThreadId>> channel_keys_;
+  std::size_t active_channels_{0};
 };
 
 template <typename ValueT>
@@ -741,14 +945,84 @@ template <typename ValueT>
 
   // Return the first candidate that remains consistent under the configured
   // communication model.
+  //
+  // Candidates differ only in rf(recv), so the rewritten graph is materialized
+  // once and rebound in place for later candidates instead of being copied
+  // afresh for each. The acyclicity verdict is still computed against the
+  // original graph, exactly as a per-candidate copy would.
+  const bool needs_rewritten_graph =
+      communication_model != model::CommunicationModel::Async || allow_non_target_missing_reads;
+  model::ExplorationGraphT<ValueT> rewritten;
+  bool rewritten_initialized = false;
   for (const auto& candidate : candidates) {
-    if (rf_rewrite_is_consistent(graph, recv, candidate.send_id, communication_model,
-                                 allow_non_target_missing_reads)) {
+    if (!needs_rewritten_graph) {
+      if (!rewiring_recv_creates_cycle(graph, recv, candidate.send_id)) {
+        return candidate.send_id;
+      }
+      continue;
+    }
+
+    const bool preserves_acyclicity =
+        graph.is_known_acyclic() && !rewiring_recv_creates_cycle(graph, recv, candidate.send_id);
+    if (rewritten_initialized) {
+      rewritten.rebind_rf(recv, candidate.send_id, preserves_acyclicity);
+    } else {
+      rewritten = preserves_acyclicity
+                      ? graph.with_rf_preserving_known_acyclicity(recv, candidate.send_id)
+                      : graph.with_rf(recv, candidate.send_id);
+      rewritten_initialized = true;
+    }
+
+    const auto consistency =
+        allow_non_target_missing_reads
+            ? check_consistency_allowing_missing_reads_except(rewritten, recv,
+                                                              communication_model)
+            : check_consistency(rewritten, communication_model);
+    if (consistency.is_consistent()) {
       return candidate.send_id;
     }
   }
 
   throw internal_error("get_cons_tiebreaker invariant violated: no consistent source found");
+}
+
+// Reference implementation of the FifoP2P tiebreaker: materializes G|keep and
+// runs the full consistency checker. Kept so DPOR_VERIFY_MASKED_TIEBREAKER
+// builds can cross-check the mask-based fast path against it.
+template <typename ValueT>
+[[nodiscard]] inline typename model::ExplorationGraphT<ValueT>::EventId
+get_cons_tiebreaker_masked_via_restriction(
+    const model::ExplorationGraphT<ValueT>& graph, const std::vector<std::uint8_t>& keep_mask,
+    typename model::ExplorationGraphT<ValueT>::EventId recv,
+    const model::CommunicationModel communication_model) {
+  using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
+
+  auto restricted = model::detail::restrict_masked(graph, keep_mask);
+
+  std::vector<EvId> new_to_old;
+  new_to_old.reserve(restricted.event_count());
+  EvId remapped_recv = model::ExplorationGraphT<ValueT>::kNoSource;
+  for (EvId old_id = 0; old_id < graph.event_count(); ++old_id) {
+    if (old_id >= keep_mask.size() || keep_mask[old_id] == 0U) {
+      continue;
+    }
+    if (old_id == recv) {
+      remapped_recv = static_cast<EvId>(new_to_old.size());
+    }
+    new_to_old.push_back(old_id);
+  }
+
+  if (remapped_recv == model::ExplorationGraphT<ValueT>::kNoSource) {
+    throw internal_error("get_cons_tiebreaker invariant violated: event missing from keep mask");
+  }
+
+  const auto remapped_send =
+      get_cons_tiebreaker(restricted, remapped_recv, communication_model, true);
+  if (remapped_send >= new_to_old.size()) {
+    throw internal_error(
+        "get_cons_tiebreaker invariant violated: remapped send missing from restricted graph");
+  }
+  return new_to_old[remapped_send];
 }
 
 template <typename ValueT>
@@ -758,36 +1032,13 @@ template <typename ValueT>
     const model::CommunicationModel communication_model = model::CommunicationModel::Async) {
   using EvId = typename model::ExplorationGraphT<ValueT>::EventId;
 
-  if (communication_model != model::CommunicationModel::Async) {
-    auto restricted = model::detail::restrict_masked(graph, keep_mask);
-
-    std::vector<EvId> new_to_old;
-    new_to_old.reserve(restricted.event_count());
-    EvId remapped_recv = model::ExplorationGraphT<ValueT>::kNoSource;
-    for (const auto old_id : graph.insertion_order()) {
-      if (old_id >= keep_mask.size() || keep_mask[old_id] == 0U) {
-        continue;
-      }
-      if (old_id == recv) {
-        remapped_recv = static_cast<EvId>(new_to_old.size());
-      }
-      new_to_old.push_back(old_id);
-    }
-
-    if (remapped_recv == model::ExplorationGraphT<ValueT>::kNoSource) {
-      throw internal_error("get_cons_tiebreaker invariant violated: event missing from keep mask");
-    }
-
-    const auto remapped_send =
-        get_cons_tiebreaker(restricted, remapped_recv, communication_model, true);
-    if (remapped_send >= new_to_old.size()) {
-      throw internal_error(
-          "get_cons_tiebreaker invariant violated: remapped send missing from restricted graph");
-    }
-    return new_to_old[remapped_send];
-  }
-
-  const MaskedPorfContext<ValueT> masked_graph(graph, keep_mask);
+  // Reused per worker: this runs once per revisit-condition query on a
+  // blocking receive, which is the hottest allocation site in the engine.
+  // Safe because the context is only live for the body of this function and
+  // nothing it calls re-enters here.
+  thread_local MaskedPorfContext<ValueT> masked_graph;
+  masked_graph.reset(graph, keep_mask,
+                     communication_model == model::CommunicationModel::FifoP2P);
   if (!masked_graph.keeps(recv)) {
     throw internal_error("get_cons_tiebreaker invariant violated: event missing from keep mask");
   }
@@ -855,13 +1106,33 @@ template <typename ValueT>
     return a.send_id < b.send_id;
   });
 
-  const auto reachable_from_recv = masked_graph.reachable_from(recv);
+  const auto& reachable_from_recv = masked_graph.reachable_from(recv);
+  const bool fifo_model = communication_model == model::CommunicationModel::FifoP2P;
+
   for (const auto& candidate : candidates) {
-    if (reachable_from_recv[candidate.send_id] == 0U) {
-      return candidate.send_id;
+    if (reachable_from_recv[candidate.send_id] != 0U) {
+      continue;
     }
+    if (fifo_model &&
+        masked_graph.fifo_rewrite_violates(recv, candidate.send_id, current_rf_source)) {
+      continue;
+    }
+#ifdef DPOR_VERIFY_MASKED_TIEBREAKER
+    {
+      const auto reference =
+          get_cons_tiebreaker_masked_via_restriction(graph, keep_mask, recv, communication_model);
+      if (reference != candidate.send_id) {
+        throw internal_error("masked tiebreaker disagreed with the restriction-based reference");
+      }
+    }
+#endif
+    return candidate.send_id;
   }
 
+#ifdef DPOR_VERIFY_MASKED_TIEBREAKER
+  static_cast<void>(get_cons_tiebreaker_masked_via_restriction(graph, keep_mask, recv,
+                                                               communication_model));
+#endif
   throw internal_error("get_cons_tiebreaker invariant violated: no consistent source found");
 }
 
@@ -902,29 +1173,31 @@ template <typename ValueT>
     return nd->value == *min_it;
   }
 
+  // Membership in Previous(e, s) = {e' | e' <=_G e} U porf-prefix(s), tested
+  // one event at a time so the callers below never have to materialize the
+  // whole set just to ask about a single event.
+  const auto in_previous = [&graph, e, s](const EvId ep) {
+    return ep < graph.event_count() &&
+           (graph.inserted_before_or_equal(ep, e) || graph.porf_contains(ep, s));
+  };
+
   // Non-receive event (send, block, error): check that no receive in Previous
-  // reads from e.
+  // reads from e. Scanning the reads-from relation for readers of e and
+  // testing those is equivalent to scanning Previous for readers, and avoids
+  // an O(n) porf query per event plus the Previous allocation.
   if (!model::is_receive(evt)) {
-    const auto previous = compute_previous_set(graph, e, s);
-    for (EvId ep = 0; ep < previous.size(); ++ep) {
-      if (previous[ep] == 0U) {
-        continue;
-      }
-      if (model::is_receive(graph.event(ep))) {
-        auto it = graph.reads_from().find(ep);
-        if (it != graph.reads_from().end() && it->second.is_send() && it->second.send_id() == e) {
-          return false;  // A receive in Previous reads from e.
-        }
-      }
-    }
-    return true;
+    const auto& rf = graph.reads_from();
+    return std::ranges::none_of(rf, [&graph, e, &in_previous](const auto& entry) {
+      const auto& [receive_id, source] = entry;
+      return source.is_send() && source.send_id() == e &&
+             model::is_receive(graph.event(receive_id)) && in_previous(receive_id);
+    });
   }
 
   // Receive: rf(e) == get_cons_tiebreaker(G|Previous, e)
   // Must Algorithm 1 requires the tiebreaker to be computed on G restricted
   // to the Previous set, not the full graph.
-  const auto previous = compute_previous_set(graph, e, s);
-  if (previous[e] == 0U) {
+  if (!in_previous(e)) {
     throw internal_error("revisit_condition invariant violated: event missing from Previous");
   }
 
@@ -939,12 +1212,15 @@ template <typename ValueT>
         "revisit_condition invariant violated: blocking receive reads from bottom");
   }
   const auto current_rf_original = rf_it->second.send_id();
-  if (current_rf_original == kNoSource || current_rf_original >= previous.size() ||
-      previous[current_rf_original] == 0U) {
+  if (current_rf_original == kNoSource || !in_previous(current_rf_original)) {
     // This is a normal blocking-receive failure case, not an invariant break.
     return false;
   }
 
+  // Only now is the full set needed, as the tiebreaker's keep mask. The buffer
+  // is per worker and only live for the call below.
+  thread_local std::vector<std::uint8_t> previous;
+  compute_previous_set_into(graph, e, s, previous);
   const auto tiebreaker = get_cons_tiebreaker_masked(graph, previous, e, communication_model);
   return current_rf_original == tiebreaker;
 }
@@ -1660,7 +1936,18 @@ template <typename ValueT>
       continue;
     }
 
-    std::vector<std::uint8_t> deleted(graph.event_count(), 0);
+    // The receive's own revisit condition is by far the most selective test
+    // here, and it does not depend on Deleted, so evaluate it before paying
+    // for the Deleted scan (which is itself O(n) porf queries).
+    if (!revisit_condition(graph, recv_id, send_id, communication_model)) {
+      continue;
+    }
+
+    // keep_mask is the complement of Deleted; build it directly. The buffer is
+    // per worker and stays live only until the child graph is materialized.
+    thread_local std::vector<std::uint8_t> keep_mask;
+    keep_mask.assign(graph.event_count(), 1);
+    bool all_pass = true;
     for (EvId ep = 0; ep < graph.event_count(); ++ep) {
       if (ep == recv_id || ep == send_id) {
         continue;
@@ -1668,19 +1955,10 @@ template <typename ValueT>
       if (graph.inserted_before_or_equal(ep, recv_id)) {
         continue;
       }
-      if (!graph.porf_contains(ep, send_id)) {
-        deleted[ep] = 1;
-      }
-    }
-
-    if (!revisit_condition(graph, recv_id, send_id, communication_model)) {
-      continue;
-    }
-    bool all_pass = true;
-    for (EvId ep = 0; ep < deleted.size(); ++ep) {
-      if (deleted[ep] == 0U) {
+      if (graph.porf_contains(ep, send_id)) {
         continue;
       }
+      keep_mask[ep] = 0;
       if (!revisit_condition(graph, ep, send_id, communication_model)) {
         all_pass = false;
         break;
@@ -1690,19 +1968,13 @@ template <typename ValueT>
       continue;
     }
 
-    std::vector<std::uint8_t> keep_mask(graph.event_count(), 1);
-    for (EvId ep = 0; ep < graph.event_count(); ++ep) {
-      if (deleted[ep] != 0U) {
-        keep_mask[ep] = 0;
-      }
-    }
-
     auto restricted = model::detail::restrict_masked(graph, keep_mask);
 
     EvId new_recv_id = model::ExplorationGraphT<ValueT>::kNoSource;
     EvId new_send_id = model::ExplorationGraphT<ValueT>::kNoSource;
     EvId new_id = 0;
-    for (const auto old_id : graph.insertion_order()) {
+    // Ascending event id is insertion order; see ExplorationGraphT::add_event().
+    for (EvId old_id = 0; old_id < graph.event_count(); ++old_id) {
       if (keep_mask[old_id] == 0U) {
         continue;
       }
@@ -1740,7 +2012,7 @@ inline void for_each_backward_revisit_child(
     const model::CommunicationModel communication_model,
     StopFn&& should_stop,       // NOLINT(cppcoreguidelines-missing-std-forward)
     EmitFn&& emit_revisited) {  // NOLINT(cppcoreguidelines-missing-std-forward)
-  const auto receives = graph.receives_in_destination(send_id);
+  const auto& receives = graph.receives_in_destination(send_id);
   std::size_t receive_index = 0;
   while (!should_stop()) {
     auto next =
@@ -1774,13 +2046,19 @@ template <typename ValueT, typename ExecutorT>
       continue;
     }
 
-    std::vector<std::uint8_t> keep_mask(graph.event_count(), 1);
-    keep_mask[last_id] = 0;
-    auto unblocked_graph = model::detail::restrict_masked(graph, keep_mask);
-
+    // Everything below is asked of the graph with this thread's trailing Block
+    // event removed, but none of it can actually observe that event: a Block is
+    // neither a receive nor an ND choice so thread_trace() skips it, its
+    // removal just decrements the thread's event count, and it is neither a
+    // send nor a reader so it cannot affect unread-send state. Answer the
+    // questions on `graph` and only materialize the restricted child once this
+    // candidate is known to be viable -- that restriction was otherwise an
+    // O(event count) graph rebuild per blocked thread per maximality check,
+    // discarded in the common case.
     const auto& thread_fn = program.threads.at(tid);
-    const auto trace = unblocked_graph.thread_trace(tid);
-    const auto step = unblocked_graph.thread_event_count(tid);
+    thread_local ThreadTraceT<ValueT> trace;
+    graph.thread_trace_into(tid, trace);
+    const auto step = graph.thread_event_count(tid) - 1U;
     const auto next_label = invoke_user_code(UserCallbackKind::ThreadFunction, tid,
                                              [&]() { return thread_fn(trace, step); });
 
@@ -1809,13 +2087,15 @@ template <typename ValueT, typename ExecutorT>
                             "determinism requires the same blocking receive for the same "
                             "(trace, step)");
     }
-    if (!has_compatible_unread_send(unblocked_graph, tid, *recv)) {
+    if (!has_compatible_unread_send(graph, tid, *recv)) {
       continue;
     }
 
+    std::vector<std::uint8_t> keep_mask(graph.event_count(), 1);
+    keep_mask[last_id] = 0;
     return BlockedReceiveRescheduleResult<ValueT>{
         .kind = BlockedReceiveRescheduleKind::Ready,
-        .graph = std::move(unblocked_graph),
+        .graph = model::detail::restrict_masked(graph, keep_mask),
     };
   }
 

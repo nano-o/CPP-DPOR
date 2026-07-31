@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <map>
+#include <limits>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -79,9 +80,14 @@ template <typename ValueT, bool CollectValidRfEdges, typename MissingReadsTolera
   ValidationPassResultT<ValueT> validation;
 
   const auto event_count = graph.events().size();
-  std::vector<bool> receive_has_source(event_count, false);
-  std::unordered_map<EventId, std::size_t> send_read_count;
-  send_read_count.reserve(graph.reads_from().size());
+  // Reused per worker: this runs for every consistency check, and both tables
+  // are indexed by event id, so a hash map bought nothing over a flat vector.
+  thread_local std::vector<std::uint8_t> receive_has_source_storage;
+  thread_local std::vector<std::uint8_t> send_read_count_storage;
+  receive_has_source_storage.assign(event_count, 0);
+  send_read_count_storage.assign(event_count, 0);
+  auto& receive_has_source = receive_has_source_storage;
+  auto& send_read_count = send_read_count_storage;
   if constexpr (CollectValidRfEdges) {
     validation.valid_rf_edges.reserve(graph.reads_from().size());
   }
@@ -109,7 +115,7 @@ template <typename ValueT, bool CollectValidRfEdges, typename MissingReadsTolera
       continue;
     }
 
-    receive_has_source[receive_id] = true;
+    receive_has_source[receive_id] = 1U;
 
     const auto& receive_event = graph.event(receive_id);
     bool has_valid_endpoint_kinds = true;
@@ -155,7 +161,9 @@ template <typename ValueT, bool CollectValidRfEdges, typename MissingReadsTolera
     }
 
     auto& read_count = send_read_count[source_id];
-    ++read_count;
+    if (read_count < std::numeric_limits<std::uint8_t>::max()) {
+      ++read_count;
+    }
     if (read_count > 1U) {
       add_issue(validation.result, ConsistencyIssueCode::SendConsumedMultipleTimes,
                 "send event " + std::to_string(source_id) +
@@ -182,7 +190,7 @@ template <typename ValueT, bool CollectValidRfEdges, typename MissingReadsTolera
   }
 
   for (EventId event_id = 0; event_id < event_count; ++event_id) {
-    if (!is_receive(graph.event(event_id)) || receive_has_source[event_id] ||
+    if (!is_receive(graph.event(event_id)) || receive_has_source[event_id] != 0U ||
         missing_reads_tolerance(event_id)) {
       continue;
     }
@@ -291,16 +299,9 @@ group_fifo_sends(const ExecutionGraphT<ValueT>& graph) {
     grouped[{graph.event(send_id).thread, send->destination}].push_back(send_id);
   }
 
-  for (auto& [_, send_ids] : grouped) {
-    std::sort(send_ids.begin(), send_ids.end(), [&](const EventId lhs, const EventId rhs) {
-      const auto& lhs_event = graph.event(lhs);
-      const auto& rhs_event = graph.event(rhs);
-      if (lhs_event.index != rhs_event.index) {
-        return lhs_event.index < rhs_event.index;
-      }
-      return lhs < rhs;
-    });
-  }
+  // send_event_ids() is ascending by event id, and within one sender thread
+  // ascending id is ascending per-thread index, so each channel's bucket is
+  // already in the order this function is specified to produce.
   return grouped;
 }
 

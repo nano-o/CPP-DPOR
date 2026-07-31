@@ -46,6 +46,7 @@
 #include <memory>
 #include <optional>
 #include <queue>
+#include <span>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -72,11 +73,22 @@ struct ThreadState {
 };
 
 struct PorfCache {
-  std::vector<std::vector<std::size_t>> clocks;
+  // Vector clocks, stored as one flat row-major buffer of num_threads columns
+  // rather than a vector-of-vectors: the cache is rebuilt from scratch for
+  // every graph copy, and a per-event allocation there dominated the rebuild.
+  std::vector<std::size_t> clocks;
   std::vector<std::size_t> position_in_thread;
   std::vector<std::size_t> thread_clock_index;
   std::size_t num_threads{0};
   bool has_cycle{false};
+
+  [[nodiscard]] std::span<const std::size_t> clock_row(std::size_t event_id) const noexcept {
+    return std::span<const std::size_t>(clocks).subspan(event_id * num_threads, num_threads);
+  }
+
+  [[nodiscard]] std::span<std::size_t> clock_row(std::size_t event_id) noexcept {
+    return std::span<std::size_t>(clocks).subspan(event_id * num_threads, num_threads);
+  }
 };
 
 template <typename ValueT>
@@ -91,8 +103,6 @@ class ExplorationGraphT {
   ExplorationGraphT() = default;
   ExplorationGraphT(const ExplorationGraphT& other)
       : graph_(other.graph_),
-        insertion_order_(other.insertion_order_),
-        insertion_position_(other.insertion_position_),
         thread_state_(other.thread_state_),
         thread_event_ids_(other.thread_event_ids_),
         receive_event_ids_by_thread_(other.receive_event_ids_by_thread_),
@@ -110,8 +120,6 @@ class ExplorationGraphT {
     }
 
     graph_ = other.graph_;
-    insertion_order_ = other.insertion_order_;
-    insertion_position_ = other.insertion_position_;
     thread_state_ = other.thread_state_;
     thread_event_ids_ = other.thread_event_ids_;
     receive_event_ids_by_thread_ = other.receive_event_ids_by_thread_;
@@ -177,9 +185,10 @@ class ExplorationGraphT {
         .previous_thread_state = previous_thread_state,
         .previous_next_event_index = previous_next_event_index,
     });
-    insertion_order_.push_back(id);
-    assert(id == insertion_position_.size());
-    insertion_position_.push_back(insertion_order_.size() - 1U);
+    // Insertion order is the identity on event ids: add_event() is the only
+    // insertion path and always appends, and restrict_from_keep_mask() rebuilds
+    // in ascending order, so no explicit order/position table is kept.
+    assert(id + 1U == graph_.events().size());
     porf_cache_ = nullptr;
 
     if (thread_index >= thread_state_.size()) {
@@ -251,16 +260,23 @@ class ExplorationGraphT {
     return graph_.reads_from();
   }
 
-  [[nodiscard]] const std::vector<EventId>& insertion_order() const noexcept {
-    return insertion_order_;
+  // Insertion order is the identity on event ids (see add_event()), so this is
+  // materialized on demand rather than stored. It is a diagnostic/test-facing
+  // accessor: hot paths iterate event ids directly instead of calling it.
+  [[nodiscard]] std::vector<EventId> insertion_order() const {
+    std::vector<EventId> order(event_count());
+    for (EventId id = 0; id < order.size(); ++id) {
+      order[id] = id;
+    }
+    return order;
   }
 
   // Returns true if event a was inserted before event b (<=_G).
   [[nodiscard]] bool inserted_before_or_equal(EventId a, EventId b) const {
-    if (a >= insertion_position_.size() || b >= insertion_position_.size()) {
+    if (a >= event_count() || b >= event_count()) {
       throw precondition_error("event id not found in insertion order");
     }
-    return insertion_position_[a] <= insertion_position_[b];
+    return a <= b;
   }
 
   [[nodiscard]] ProgramOrderRelation po_relation() const { return graph_.po_relation(); }
@@ -271,7 +287,9 @@ class ExplorationGraphT {
     return graph_.receive_event_ids();
   }
 
-  [[nodiscard]] std::vector<EventId> send_event_ids() const { return send_event_ids_; }
+  [[nodiscard]] const std::vector<EventId>& send_event_ids() const noexcept {
+    return send_event_ids_;
+  }
 
   [[nodiscard]] std::vector<EventId> unread_send_event_ids() const {
     std::vector<EventId> unread;
@@ -353,35 +371,57 @@ class ExplorationGraphT {
   // (guaranteed by add_event's auto-indexing), so no sort is needed.
   [[nodiscard]] std::vector<ObservedValueT<ValueT>> thread_trace(ThreadId tid) const {
     std::vector<ObservedValueT<ValueT>> trace;
+    thread_trace_into(tid, trace);
+    return trace;
+  }
+
+  // Same as thread_trace(), writing into a caller-owned buffer. The exploration
+  // loop materializes a thread's trace once per candidate event, so reusing one
+  // buffer keeps an allocation off the hottest path in the engine.
+  //
+  // Entries already holding the right value are left untouched rather than
+  // reassigned. Consecutive calls for one thread usually differ only near the
+  // tail, and for value types whose copy is not free (a refcount bump, say)
+  // skipping the unchanged prefix removes most of that traffic.
+  void thread_trace_into(ThreadId tid, std::vector<ObservedValueT<ValueT>>& trace) const {
+    std::size_t written = 0;
+    const auto emit = [&trace, &written](const auto& value) {
+      if (written < trace.size()) {
+        if (!(trace[written] == value)) {
+          trace[written] = ObservedValueT<ValueT>{value};
+        }
+      } else {
+        trace.emplace_back(value);
+      }
+      ++written;
+    };
+
     const auto thread_index = static_cast<std::size_t>(tid);
-    if (thread_index >= thread_event_ids_.size()) {
-      return trace;
-    }
+    if (thread_index < thread_event_ids_.size()) {
+      const auto& thread_events = thread_event_ids_[thread_index];
+      const auto& rf = reads_from();
 
-    const auto& thread_events = thread_event_ids_[thread_index];
-    trace.reserve(thread_events.size());
-    const auto& rf = reads_from();
-
-    for (const auto id : thread_events) {
-      const auto& evt = event(id);
-      if (const auto* recv = as_receive(evt)) {
-        auto rf_it = rf.find(id);
-        if (rf_it != rf.end()) {
-          if (rf_it->second.is_bottom()) {
-            trace.push_back(BottomValue{});
-          } else {
-            const auto& source_evt = event(rf_it->second.send_id());
-            if (const auto* send = as_send(source_evt)) {
-              trace.push_back(send->value);
+      for (const auto id : thread_events) {
+        const auto& evt = event(id);
+        if (as_receive(evt) != nullptr) {
+          auto rf_it = rf.find(id);
+          if (rf_it != rf.end()) {
+            if (rf_it->second.is_bottom()) {
+              emit(BottomValue{});
+            } else {
+              const auto& source_evt = event(rf_it->second.send_id());
+              if (const auto* send = as_send(source_evt)) {
+                emit(send->value);
+              }
             }
           }
+        } else if (const auto* nd = as_nondeterministic_choice(evt)) {
+          emit(nd->value);
         }
-      } else if (const auto* nd = as_nondeterministic_choice(evt)) {
-        trace.push_back(nd->value);
       }
     }
 
-    return trace;
+    trace.resize(written);
   }
 
   // Returns a new graph containing only the events in keep_set. Entries of
@@ -428,14 +468,21 @@ class ExplorationGraphT {
   // freshly materialized owned graphs; worker-local graphs with active rollback
   // history must continue using the undo-logging mutators.
   void rebind_rf_preserving_known_acyclicity(EventId recv, EventId send) {
+    rebind_rf(recv, send,
+              known_acyclic_ && is_valid_event_id(recv) && is_receive(event(recv)) &&
+                  is_valid_event_id(send) && is_send(event(send)));
+  }
+
+  // Same rebind, but with the caller supplying the known-acyclicity verdict.
+  // Callers that probe several rf sources for one receive can then reuse a
+  // single materialized graph instead of copying it per candidate, while still
+  // deciding acyclicity against the graph they started from.
+  void rebind_rf(EventId recv, EventId send, const bool preserve_known_acyclicity) {
     if (!event_undo_log_.empty() || !rf_undo_log_.empty()) {
       throw precondition_error(
           "rebind_rf_preserving_known_acyclicity requires clean rollback history");
     }
 
-    const bool preserve_known_acyclicity = known_acyclic_ && is_valid_event_id(recv) &&
-                                           is_receive(event(recv)) && is_valid_event_id(send) &&
-                                           is_send(event(send));
     const auto previous_source = current_reads_from_source(recv);
     const auto rebound_source = ReadsFromSource::from_send(send);
     graph_.set_reads_from_source(recv, rebound_source);
@@ -483,7 +530,7 @@ class ExplorationGraphT {
       return false;
     }
     const auto ci = cache.thread_clock_index[thread_index];
-    return cache.clocks[to][ci] >= cache.position_in_thread[from] + 1;
+    return cache.clock_row(to)[ci] >= cache.position_in_thread[from] + 1;
   }
 
   [[nodiscard]] bool has_porf_cache() const noexcept { return static_cast<bool>(porf_cache_); }
@@ -501,24 +548,24 @@ class ExplorationGraphT {
   }
 
   // Returns receive event IDs in the destination thread of the given send.
-  [[nodiscard]] std::vector<EventId> receives_in_destination(EventId send_id) const {
+  // Returned by reference: the exploration loop asks for this on every send
+  // event, and the list is already maintained per destination thread.
+  [[nodiscard]] const std::vector<EventId>& receives_in_destination(EventId send_id) const {
     const auto* send = as_send(event(send_id));
     if (send == nullptr) {
       throw precondition_error("event is not a send");
     }
-    const auto dest_thread = send->destination;
-    const auto dest_index = static_cast<std::size_t>(dest_thread);
+    const auto dest_index = static_cast<std::size_t>(send->destination);
     if (dest_index >= receive_event_ids_by_thread_.size()) {
-      return {};
+      static const std::vector<EventId> kEmpty;
+      return kEmpty;
     }
     return receive_event_ids_by_thread_[dest_index];
   }
 
   // Cycle-only check on (po ∪ rf) without materializing vector clocks.
   [[nodiscard]] bool has_causal_cycle_without_cache() const {
-    const auto porf_graph = build_porf_graph_structure();
-    const auto topo_order = compute_topological_order(porf_graph.successors, porf_graph.in_degree);
-    return topo_order.size() < event_count();
+    return !build_porf_adjacency_and_order();
   }
 
   // Cache-backed causal cycle check on (po ∪ rf).
@@ -536,8 +583,6 @@ class ExplorationGraphT {
                                                       const std::vector<std::uint8_t>& keep_mask);
 
   ExecutionGraphT<ValueT> graph_;
-  std::vector<EventId> insertion_order_;
-  std::vector<std::size_t> insertion_position_;
   std::vector<ThreadState> thread_state_;
   std::vector<std::vector<EventId>> thread_event_ids_;
   std::vector<std::vector<EventId>> receive_event_ids_by_thread_;
@@ -564,11 +609,91 @@ class ExplorationGraphT {
   std::vector<EventUndo> event_undo_log_;
   std::vector<ReadsFromUndo> rf_undo_log_;
 
-  struct PorfGraphStructure {
-    std::vector<std::vector<EventId>> thread_events;
-    std::vector<std::vector<EventId>> successors;
+  // (po U rf) adjacency in compressed-sparse-row form plus the working buffers
+  // for the topological sort. The PORF cache is rebuilt on essentially every
+  // entry into the revisit machinery, and the previous vector-of-vectors
+  // adjacency cost one heap allocation per event on every rebuild; CSR makes it
+  // two buffers, and keeping them per worker makes rebuilds allocation-free
+  // once warm.
+  struct PorfBuildScratch {
+    std::vector<std::size_t> offsets;  // size n + 1
+    std::vector<EventId> successors;   // size = edge count
     std::vector<std::size_t> in_degree;
+    std::vector<std::size_t> cursor;
+    std::vector<EventId> topo_order;
+    std::vector<EventId> ready;
+    std::vector<EventId> po_pred;
+    std::vector<EventId> rf_source;
   };
+
+  [[nodiscard]] static PorfBuildScratch& porf_build_scratch() {
+    static thread_local PorfBuildScratch scratch;
+    return scratch;
+  }
+
+  // Fills scratch.offsets/successors/in_degree, then topologically sorts into
+  // scratch.topo_order. Returns false when (po U rf) has a cycle.
+  [[nodiscard]] bool build_porf_adjacency_and_order() const {
+    auto& scratch = porf_build_scratch();
+    const auto n = event_count();
+
+    scratch.offsets.assign(n + 1U, 0U);
+    scratch.in_degree.assign(n, 0U);
+    scratch.po_pred.assign(n, kNoSource);
+
+    // Pass 1: out-degrees, shifted by one so the prefix sum lands in place.
+    for (const auto& events : thread_event_ids_) {
+      for (std::size_t i = 1; i < events.size(); ++i) {
+        ++scratch.offsets[events[i - 1] + 1U];
+        ++scratch.in_degree[events[i]];
+        scratch.po_pred[events[i]] = events[i - 1];
+      }
+    }
+    graph_.for_each_validated_rf_edge([&scratch](const EventId source_id, const EventId recv_id) {
+      ++scratch.offsets[source_id + 1U];
+      ++scratch.in_degree[recv_id];
+    });
+
+    for (EventId id = 0; id < n; ++id) {
+      scratch.offsets[id + 1U] += scratch.offsets[id];
+    }
+
+    // Pass 2: fill.
+    scratch.successors.resize(scratch.offsets[n]);
+    scratch.cursor.assign(scratch.offsets.begin(), scratch.offsets.begin() + static_cast<std::ptrdiff_t>(n));
+    for (const auto& events : thread_event_ids_) {
+      for (std::size_t i = 1; i < events.size(); ++i) {
+        scratch.successors[scratch.cursor[events[i - 1]]++] = events[i];
+      }
+    }
+    graph_.for_each_validated_rf_edge([&scratch](const EventId source_id, const EventId recv_id) {
+      scratch.successors[scratch.cursor[source_id]++] = recv_id;
+    });
+
+    // Kahn's algorithm. The consumers only need *a* valid topological order and
+    // the order's length, so a stack works as well as a queue.
+    scratch.topo_order.clear();
+    scratch.topo_order.reserve(n);
+    scratch.ready.clear();
+    for (EventId id = 0; id < n; ++id) {
+      if (scratch.in_degree[id] == 0U) {
+        scratch.ready.push_back(id);
+      }
+    }
+    while (!scratch.ready.empty()) {
+      const auto node = scratch.ready.back();
+      scratch.ready.pop_back();
+      scratch.topo_order.push_back(node);
+      for (auto edge = scratch.offsets[node]; edge < scratch.offsets[node + 1U]; ++edge) {
+        const auto succ = scratch.successors[edge];
+        if (--scratch.in_degree[succ] == 0U) {
+          scratch.ready.push_back(succ);
+        }
+      }
+    }
+
+    return scratch.topo_order.size() == n;
+  }
 
   void invalidate_known_acyclicity() {
     known_acyclic_ = false;
@@ -593,6 +718,47 @@ class ExplorationGraphT {
     return copy;
   }
 
+  // Bulk-build helpers used by restrict_from_keep_mask(). They are equivalent to
+  // add_event() on a graph with empty rollback history, minus the per-event undo
+  // record (the caller discards it) and minus repeated buffer growth.
+  void reserve_for_bulk_build(std::size_t event_capacity, std::size_t thread_capacity) {
+    graph_.reserve_events(event_capacity);
+    send_reader_counts_.reserve(event_capacity);
+    unread_send_mask_.reserve(event_capacity);
+    thread_state_.resize(thread_capacity);
+    thread_event_ids_.resize(thread_capacity);
+    receive_event_ids_by_thread_.resize(thread_capacity);
+  }
+
+  void append_event_for_bulk_build(ThreadId thread, EventLabelT<ValueT> label) {
+    const auto thread_index = static_cast<std::size_t>(thread);
+    const auto id = graph_.add_event(thread, std::move(label));
+
+    if (thread_index >= thread_state_.size()) {
+      thread_state_.resize(thread_index + 1);
+      thread_event_ids_.resize(thread_index + 1U);
+      receive_event_ids_by_thread_.resize(thread_index + 1U);
+    }
+    auto& ts = thread_state_[thread_index];
+    ts.event_count++;
+    ts.last_event_id = id;
+    thread_event_ids_[thread_index].push_back(id);
+
+    send_reader_counts_.resize(id + 1U, 0U);
+    unread_send_mask_.resize(id + 1U, 0U);
+
+    const auto& added_event = event(id);
+    if (is_receive(added_event)) {
+      receive_event_ids_by_thread_[thread_index].push_back(id);
+    }
+    if (is_send(added_event)) {
+      send_event_ids_.push_back(id);
+      unread_send_mask_[id] = 1U;
+    }
+
+    update_acyclicity_after_add_event(id);
+  }
+
   [[nodiscard]] ExplorationGraphT restrict_from_keep_mask(
       const std::vector<std::uint8_t>& keep_mask) const {
     if (keep_mask.size() != event_count()) {
@@ -605,7 +771,7 @@ class ExplorationGraphT {
     std::vector<EventId> id_map(event_count(), kNoSource);
 
     EventId new_id = 0;
-    for (const auto old_id : insertion_order_) {
+    for (EventId old_id = 0; old_id < event_count(); ++old_id) {
       if (keep_mask[old_id] == 0U) {
         continue;
       }
@@ -614,6 +780,10 @@ class ExplorationGraphT {
     }
 
     ExplorationGraphT result;
+    // Sizes are known before the rebuild, and the result's rollback history is
+    // discarded at the end of this function anyway, so grow every buffer once
+    // and skip the per-event undo bookkeeping.
+    result.reserve_for_bulk_build(kept_ids.size(), thread_state_.size());
 
     // Re-insert events in insertion order with remapped IDs.
     for (const auto old_id : kept_ids) {
@@ -622,8 +792,7 @@ class ExplorationGraphT {
 
       // Remap send destination: destinations are thread IDs, not event IDs,
       // so they stay unchanged.
-      const auto remapped_id = result.add_event(evt.thread, std::move(label));
-      static_cast<void>(remapped_id);
+      result.append_event_for_bulk_build(evt.thread, std::move(label));
     }
 
     // Remap reads-from edges.
@@ -720,17 +889,12 @@ class ExplorationGraphT {
     const bool removed_send = is_send(tail_event);
     const bool removed_receive = is_receive(tail_event);
 
-    if (insertion_order_.empty() || insertion_order_.back() != undo.event_id) {
+    if (graph_.events().empty() || graph_.events().size() - 1U != undo.event_id) {
       throw internal_error("event undo log does not match insertion order tail");
-    }
-    if (insertion_position_.size() != graph_.events().size()) {
-      throw internal_error("event undo log does not match insertion-position state");
     }
 
     graph_.rollback_last_event(undo.event_id, undo.thread, undo.event_index,
                                undo.previous_next_event_index);
-    insertion_order_.pop_back();
-    insertion_position_.pop_back();
 
     const auto thread_index = static_cast<std::size_t>(undo.thread);
     if (thread_index >= thread_state_.size()) {
@@ -811,84 +975,6 @@ class ExplorationGraphT {
   // ExplorationGraphT only grows through add_event(), which assigns fresh
   // monotonic per-thread indices. Scanning events in ID order therefore
   // already yields each thread's immediate program order.
-  [[nodiscard]] std::vector<std::vector<EventId>> build_thread_events() const {
-    return thread_event_ids_;
-  }
-
-  static void add_po_edges(const std::vector<std::vector<EventId>>& thread_events,
-                           std::vector<std::vector<EventId>>& successors,
-                           std::vector<std::size_t>& in_degree) {
-    for (const auto& events : thread_events) {
-      for (std::size_t i = 1; i < events.size(); ++i) {
-        const auto pred = events[i - 1];
-        const auto succ = events[i];
-        successors[pred].push_back(succ);
-        ++in_degree[succ];
-      }
-    }
-  }
-
-  void add_rf_edges(std::vector<std::vector<EventId>>& successors,
-                    std::vector<std::size_t>& in_degree) const {
-    graph_.for_each_validated_rf_edge([&](const EventId source_id, const EventId recv_id) {
-      successors[source_id].push_back(recv_id);
-      ++in_degree[recv_id];
-    });
-  }
-
-  [[nodiscard]] std::vector<std::size_t> compute_successor_out_degree(
-      const std::vector<std::vector<EventId>>& thread_events) const {
-    std::vector<std::size_t> out_degree(event_count(), 0);
-    for (const auto& events : thread_events) {
-      for (std::size_t i = 1; i < events.size(); ++i) {
-        ++out_degree[events[i - 1]];
-      }
-    }
-    graph_.for_each_validated_rf_edge(
-        [&](const EventId source_id, const EventId /*recv_id*/) { ++out_degree[source_id]; });
-    return out_degree;
-  }
-
-  [[nodiscard]] PorfGraphStructure build_porf_graph_structure() const {
-    PorfGraphStructure porf_graph;
-    porf_graph.thread_events = build_thread_events();
-    porf_graph.successors.assign(event_count(), {});
-    porf_graph.in_degree.assign(event_count(), 0);
-    const auto out_degree = compute_successor_out_degree(porf_graph.thread_events);
-    for (EventId id = 0; id < event_count(); ++id) {
-      porf_graph.successors[id].reserve(out_degree[id]);
-    }
-    add_po_edges(porf_graph.thread_events, porf_graph.successors, porf_graph.in_degree);
-    add_rf_edges(porf_graph.successors, porf_graph.in_degree);
-    return porf_graph;
-  }
-
-  [[nodiscard]] static std::vector<EventId> compute_topological_order(
-      const std::vector<std::vector<EventId>>& successors,
-      const std::vector<std::size_t>& in_degree_input) {
-    auto in_degree = in_degree_input;
-    std::queue<EventId> ready;
-    for (EventId id = 0; id < successors.size(); ++id) {
-      if (in_degree[id] == 0) {
-        ready.push(id);
-      }
-    }
-
-    std::vector<EventId> topo_order;
-    topo_order.reserve(successors.size());
-    while (!ready.empty()) {
-      const auto node = ready.front();
-      ready.pop();
-      topo_order.push_back(node);
-      for (const auto succ : successors[node]) {
-        if (--in_degree[succ] == 0) {
-          ready.push(succ);
-        }
-      }
-    }
-    return topo_order;
-  }
-
   void ensure_porf_cache() const {
     if (porf_cache_) {
       return;
@@ -902,13 +988,13 @@ class ExplorationGraphT {
       return;
     }
 
-    auto porf_graph = build_porf_graph_structure();
+    const bool acyclic = build_porf_adjacency_and_order();
+    auto& scratch = porf_build_scratch();
 
     // Assign dense clock indices per thread.
-    cache->thread_clock_index.assign(porf_graph.thread_events.size(), kNoSource);
-    for (std::size_t tid = 0; tid < porf_graph.thread_events.size(); ++tid) {
-      const auto& evts = porf_graph.thread_events[tid];
-      if (evts.empty()) {
+    cache->thread_clock_index.assign(thread_event_ids_.size(), kNoSource);
+    for (std::size_t tid = 0; tid < thread_event_ids_.size(); ++tid) {
+      if (thread_event_ids_[tid].empty()) {
         continue;
       }
       cache->thread_clock_index[tid] = cache->num_threads++;
@@ -916,15 +1002,13 @@ class ExplorationGraphT {
 
     // Compute position_in_thread for each event.
     cache->position_in_thread.resize(n, 0);
-    for (const auto& evts : porf_graph.thread_events) {
+    for (const auto& evts : thread_event_ids_) {
       for (std::size_t pos = 0; pos < evts.size(); ++pos) {
         cache->position_in_thread[evts[pos]] = pos;
       }
     }
 
-    const auto topo_order = compute_topological_order(porf_graph.successors, porf_graph.in_degree);
-
-    if (topo_order.size() < n) {
+    if (!acyclic) {
       cache->has_cycle = true;
       porf_cache_ = std::move(cache);
       return;
@@ -932,36 +1016,31 @@ class ExplorationGraphT {
 
     // Compute vector clocks in topological order.
     const auto width = cache->num_threads;
-    cache->clocks.resize(n, std::vector<std::size_t>(width, 0));
+    cache->clocks.assign(n * width, 0);
 
-    // Pre-compute rf target mapping: recv_id -> source_id.
-    // All edges are already validated by the adjacency-building loop above.
-    std::vector<EventId> rf_source(n, kNoSource);
+    // rf source per receive; po predecessors already came out of the adjacency
+    // build above.
+    auto& rf_source = scratch.rf_source;
+    rf_source.assign(n, kNoSource);
     for (const auto& [recv_id, source] : reads_from()) {
       if (source.is_send()) {
         rf_source[recv_id] = source.send_id();
       }
     }
+    const auto& po_pred = scratch.po_pred;
 
-    // Pre-compute po predecessor: for each event that has a po predecessor.
-    std::vector<EventId> po_pred(n, kNoSource);
-    for (const auto& evts : porf_graph.thread_events) {
-      for (std::size_t i = 1; i < evts.size(); ++i) {
-        po_pred[evts[i]] = evts[i - 1];
-      }
-    }
-
-    for (const auto id : topo_order) {
-      auto& clock = cache->clocks[id];
+    for (const auto id : scratch.topo_order) {
+      auto clock = cache->clock_row(id);
 
       // Start with po-predecessor's clock.
       if (po_pred[id] != kNoSource) {
-        clock = cache->clocks[po_pred[id]];
+        const auto po_clock = cache->clock_row(po_pred[id]);
+        std::copy(po_clock.begin(), po_clock.end(), clock.begin());
       }
 
       // Join with rf source's clock (pointwise max).
       if (rf_source[id] != kNoSource) {
-        const auto& src_clock = cache->clocks[rf_source[id]];
+        const auto src_clock = cache->clock_row(rf_source[id]);
         for (std::size_t i = 0; i < width; ++i) {
           clock[i] = std::max(clock[i], src_clock[i]);
         }
