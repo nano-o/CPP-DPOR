@@ -24,7 +24,6 @@ The executable supports the following CLI:
 --max-workers N
 --max-queued-tasks N
 --spawn-depth-cutoff N
---min-fanout N
 --progress-counter-flush-interval N
 --progress-poll-interval-steps N
 --progress-interval-ms N
@@ -43,10 +42,8 @@ The executable supports the following CLI:
 - `--parallel` switches DPOR runs from `verify()` to `verify_parallel()`. If
   `--max-workers` is omitted, worker count falls back to the library's
   hardware-based default.
-- `--max-workers`, `--max-queued-tasks`, `--spawn-depth-cutoff`, and
-  `--min-fanout` pass through to `ParallelVerifyOptions`.
-  The current executor passes a fixed fanout of `2` at its only spawn site, so
-  `--min-fanout` values above `2` disable remote spawning.
+- `--max-workers`, `--max-queued-tasks`, and `--spawn-depth-cutoff` pass
+  through to `ParallelVerifyOptions`.
 - `--progress-counter-flush-interval` and `--progress-poll-interval-steps`
   also pass through to `ParallelVerifyOptions`. Supplying any
   `ParallelVerifyOptions` flag also enables `--parallel`.
@@ -149,7 +146,7 @@ build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_ti
 build/bench-release/benchmarks/two_phase_commit_timeout/dpor_two_phase_commit_timeout_benchmark \
   --mode dpor --participants 4 --iterations 1 --no-crash \
   --parallel --max-workers 8 --max-queued-tasks 8 \
-  --spawn-depth-cutoff 2 --min-fanout 2
+  --spawn-depth-cutoff 2
 ```
 
 2PC, oracle only:

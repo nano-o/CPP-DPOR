@@ -139,7 +139,8 @@ The engine in `include/dpor/algo/dpor.hpp` implements **Algorithm 1** from the M
   frame/context stack machine
 - `backward_revisit()` — identifies alternative interleavings or message matches
 - `DporConfigT` — configuration: program, max_depth, communication_model, terminal-execution observer callback (`on_terminal_execution`; legacy alias `on_execution`), optional progress reporting, and an optional fatal-error diagnostic observer
-- `ParallelVerifyOptions` — parallel tuning: `max_workers`, `max_queued_tasks`, `spawn_depth_cutoff`, `min_fanout`, `sync_steps`, `progress_counter_flush_interval`, `progress_poll_interval_steps`
+- `ParallelVerifyOptions` — parallel tuning: `max_workers`, `max_queued_tasks`, `spawn_depth_cutoff`, `sync_steps`,
+`split_poll_interval_steps`, `progress_counter_flush_interval`, `progress_poll_interval_steps`
 
 Programs are defined via `ProgramT` / `ThreadFunctionT` in `include/dpor/algo/program.hpp`.
 Thread-function traces use `ObservedValueT` entries rather than raw payloads.

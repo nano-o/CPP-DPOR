@@ -91,16 +91,19 @@ Parallel exploration adds `ParallelVerifyOptions`:
 - `spawn_depth_cutoff{0}`: DPOR tree-depth gate for task spawning. `0` means no
   cutoff. Otherwise, a branch is only considered for remote execution when
   `child_dpor_tree_depth <= spawn_depth_cutoff`.
-- `min_fanout{2}`: spawn gate retained for scheduler tuning. The current sole
-  spawn site is a send backward-revisit branch and supplies a fixed fanout of
-  `2`; values `0` through `2` permit spawning there, while values above `2`
-  disable remote spawning.
 - `sync_steps{512}`: stop-polling interval. `0` enables the strict mode, where
   terminal publication serializes stop checks more aggressively. `> 0` is a
   relaxed mode where each worker refreshes the shared stop flag only every
   `sync_steps` internal stop polls. This reduces synchronization overhead, but
   workers may publish additional terminal executions after a callback has
   requested `Stop`.
+- `split_poll_interval_steps{1}`: how often an ND or receive frame consults
+  the idle-worker count before offering one alternative for remote execution.
+  `0` and `1` both check on every branch, which is the default. Larger values
+  keep the shared counter off the hot path at the cost of reacting to
+  starvation more slowly; that was measured slower on every benchmark workload,
+  so raising it is an escape hatch rather than a tuning knob. This only affects
+  when work is offered, never which executions are explored.
 - `progress_counter_flush_interval{1024}`: progress-counter batching threshold.
   Workers keep terminal counters locally and flush them into shared progress
   counters after this many local terminal publications. `0` uses the default

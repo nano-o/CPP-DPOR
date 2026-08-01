@@ -80,7 +80,7 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
      << " [--mode dpor|oracle|both] [--participants N] [--iterations N]"
         " [--no-crash] [--fifo] [--parallel]"
         " [--max-workers N] [--max-queued-tasks N]"
-        " [--spawn-depth-cutoff N] [--min-fanout N]"
+        " [--spawn-depth-cutoff N] [--split-poll-interval-steps N]"
         " [--progress-counter-flush-interval N]"
         " [--progress-poll-interval-steps N]"
         " [--progress-interval-ms N]\n";
@@ -176,9 +176,9 @@ struct ProgramValueType<algo::ProgramT<ValueT>> {
       options.parallel_options.spawn_depth_cutoff = parse_nonnegative_int(value, arg);
       continue;
     }
-    if (arg == "--min-fanout") {
+    if (arg == "--split-poll-interval-steps") {
       options.parallel = true;
-      options.parallel_options.min_fanout = parse_nonnegative_int(value, arg);
+      options.parallel_options.split_poll_interval_steps = parse_nonnegative_int(value, arg);
       continue;
     }
     if (arg == "--progress-interval-ms") {
@@ -384,7 +384,8 @@ inline int run_two_phase_commit_benchmark(int argc, char** argv, std::string_vie
       std::cout << " parallel=true" << " max_workers=" << options.parallel_options.max_workers
                 << " max_queued_tasks=" << options.parallel_options.max_queued_tasks
                 << " spawn_depth_cutoff=" << options.parallel_options.spawn_depth_cutoff
-                << " min_fanout=" << options.parallel_options.min_fanout
+                << " split_poll_interval_steps="
+                << options.parallel_options.split_poll_interval_steps
                 << " progress_counter_flush_interval="
                 << options.parallel_options.progress_counter_flush_interval
                 << " progress_poll_interval_steps="

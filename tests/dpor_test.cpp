@@ -7,11 +7,14 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cstddef>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -140,6 +143,187 @@ Program make_parallel_mixed_program() {
   };
 
   return program;
+}
+
+// Branches only on nondeterministic choice. There are no sends, so there are no
+// backward revisits and therefore no parallel spawn sites at all: this program
+// checks that the scheduler stays correct when every worker but one is idle.
+Program make_pure_nd_program() {
+  Program program;
+
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return NondeterministicChoiceLabel{.value = "a", .choices = {"a", "b", "c"}};
+    }
+    if (step == 1 && trace.size() == 1) {
+      return NondeterministicChoiceLabel{.value = "p", .choices = {"p", "q"}};
+    }
+    return std::nullopt;
+  };
+
+  program.threads[2] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return NondeterministicChoiceLabel{.value = "u", .choices = {"u", "v", "w"}};
+    }
+    return std::nullopt;
+  };
+
+  return program;
+}
+
+// Branches only on reads-from choice: three sends contend for two blocking
+// receives, so backward revisits -- the sole spawn site -- fire heavily.
+Program make_pure_receive_program() {
+  Program program;
+
+  program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 3, .value = "m1"};
+    }
+    if (step == 1) {
+      return SendLabel{.destination = 3, .value = "m2"};
+    }
+    return std::nullopt;
+  };
+
+  program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 3, .value = "m3"};
+    }
+    return std::nullopt;
+  };
+
+  program.threads[3] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step < 2 && trace.size() == step) {
+      return make_receive_label_from_values<Value>({"m1", "m2", "m3"});
+    }
+    return std::nullopt;
+  };
+
+  return program;
+}
+
+// Nests all three branching frame kinds: a reads-from choice feeds a
+// nondeterministic choice whose outcome selects the value of a later send,
+// which in turn creates backward revisits against a downstream receive.
+Program make_nested_mixed_program() {
+  Program program;
+
+  program.threads[1] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 2, .value = "req"};
+    }
+    if (step == 1) {
+      return SendLabel{.destination = 2, .value = "dup"};
+    }
+    return std::nullopt;
+  };
+
+  program.threads[2] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"req", "dup"}, ReceiveMode::NonBlocking);
+    }
+    if (step == 1 && trace.size() == 1) {
+      return NondeterministicChoiceLabel{.value = "ok", .choices = {"ok", "err"}};
+    }
+    if (step == 2 && trace.size() == 2) {
+      return SendLabel{
+          .destination = 3,
+          .value = trace[0].is_bottom() ? "none" : trace[1].value(),
+      };
+    }
+    return std::nullopt;
+  };
+
+  program.threads[3] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return make_receive_label_from_values<Value>({"ok", "err", "none"});
+    }
+    if (step == 1 && trace.size() == 1) {
+      return NondeterministicChoiceLabel{.value = "keep", .choices = {"keep", "drop"}};
+    }
+    return std::nullopt;
+  };
+
+  return program;
+}
+
+// ND-only, but wide and deep enough that exploration certainly outlasts helper
+// thread startup. The focused pure-ND program above is too small for that: the
+// starvation split can only engage once peers are actually parked.
+Program make_wide_nd_program() {
+  Program program;
+  for (ThreadId tid = 1; tid <= 2; ++tid) {
+    program.threads[tid] = [](const ThreadTrace& trace,
+                              std::size_t step) -> std::optional<EventLabel> {
+      if (step < 6 && trace.size() == step) {
+        return NondeterministicChoiceLabel{.value = "a", .choices = {"a", "b"}};
+      }
+      return std::nullopt;
+    };
+  }
+  return program;
+}
+
+// Receive-only counterpart: four sends contend for four blocking receives, so
+// receive frames carry several reads-from candidates each.
+Program make_wide_receive_program() {
+  Program program;
+  for (ThreadId tid = 1; tid <= 4; ++tid) {
+    program.threads[tid] = [tid](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+      if (step == 0) {
+        return SendLabel{.destination = 5, .value = "m" + std::to_string(tid)};
+      }
+      return std::nullopt;
+    };
+  }
+  program.threads[5] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step < 4 && trace.size() == step) {
+      return make_receive_label_from_values<Value>({"m1", "m2", "m3", "m4"});
+    }
+    return std::nullopt;
+  };
+  return program;
+}
+
+// Deliberately larger than the host's logical CPU count so the wait/wake path
+// is exercised with more sleepers than runnable work.
+std::size_t oversubscribed_worker_count() {
+  const auto hardware = std::thread::hardware_concurrency();
+  const std::size_t base = hardware == 0 ? 4U : static_cast<std::size_t>(hardware);
+  return std::min<std::size_t>(64U, std::max<std::size_t>(8U, base * 2U));
+}
+
+// Aggregate counts cannot catch a scheduler that drops one execution and
+// duplicates another, so every parallel check compares exact signature sets
+// against both sequential exploration and the oracle.
+void require_parallel_matches_sequential_and_oracle(const Program& program,
+                                                    const std::vector<std::size_t>& worker_counts,
+                                                    const std::size_t max_queued_tasks) {
+  const auto oracle = dpor::test_support::collect_oracle_stats(program);
+  const auto sequential =
+      collect_observed_executions(program, [](const DporConfig& config) { return verify(config); });
+
+  REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(sequential.unique == oracle.signatures);
+
+  for (const auto workers : worker_counts) {
+    CAPTURE(workers, max_queued_tasks);
+    const auto parallel = collect_observed_executions(program, [&](const DporConfig& config) {
+      ParallelVerifyOptions options;
+      options.max_workers = workers;
+      options.max_queued_tasks = max_queued_tasks;
+      return verify_parallel(config, options);
+    });
+
+    REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
+    REQUIRE(parallel.result.executions_explored == sequential.result.executions_explored);
+    REQUIRE(parallel.unique == sequential.unique);
+    REQUIRE(parallel.unique == oracle.signatures);
+    // No execution explored twice.
+    REQUIRE(parallel.unique.size() == parallel.observed.size());
+  }
 }
 
 struct RejectingEnqueueExecutor {
@@ -2620,6 +2804,180 @@ TEST_CASE("verify_parallel matches sequential and oracle execution sets on mixed
   REQUIRE(parallel.unique == sequential.unique);
   REQUIRE(parallel.unique == oracle.signatures);
   REQUIRE(parallel.unique.size() == parallel.observed.size());
+}
+
+TEST_CASE("verify_parallel matches sequential and oracle execution sets on pure ND branching",
+          "[algo][dpor][parallel]") {
+  require_parallel_matches_sequential_and_oracle(make_pure_nd_program(),
+                                                 {1, 2, 4, oversubscribed_worker_count()}, 16);
+}
+
+TEST_CASE("verify_parallel matches sequential and oracle execution sets on pure receive branching",
+          "[algo][dpor][parallel]") {
+  require_parallel_matches_sequential_and_oracle(make_pure_receive_program(),
+                                                 {1, 2, 4, oversubscribed_worker_count()}, 16);
+}
+
+TEST_CASE("verify_parallel matches sequential and oracle execution sets on nested mixed branching",
+          "[algo][dpor][parallel]") {
+  const auto program = make_nested_mixed_program();
+  const std::vector<std::size_t> worker_counts{1, 2, 4, oversubscribed_worker_count()};
+
+  SECTION("default queue budget") {
+    require_parallel_matches_sequential_and_oracle(program, worker_counts, 16);
+  }
+
+  // A one-slot queue forces most handoffs to fail and fall back to local
+  // exploration, so it exercises the ownership-restore path under contention.
+  SECTION("tiny queue budget") {
+    require_parallel_matches_sequential_and_oracle(program, worker_counts, 1);
+  }
+}
+
+TEST_CASE("verify_parallel matches sequential across worker counts on mixed branching",
+          "[algo][dpor][parallel]") {
+  require_parallel_matches_sequential_and_oracle(make_parallel_mixed_program(),
+                                                 {1, 2, 4, oversubscribed_worker_count()}, 16);
+}
+
+// Quiescence is signalled by exactly one broadcast, sent by whichever worker
+// happens to drain the last task. If that wake is ever missed, a worker stays
+// parked in queue_cv_.wait() and verify_parallel() hangs in join() rather than
+// failing an assertion -- so this test guards a hang, and it repeats to make an
+// intermittent miss likely to show up.
+TEST_CASE("verify_parallel reaches quiescence repeatedly without stranding workers",
+          "[algo][dpor][parallel]") {
+  const auto program = make_parallel_mixed_program();
+  const auto sequential =
+      collect_observed_executions(program, [](const DporConfig& config) { return verify(config); });
+  REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);
+
+  constexpr std::size_t kRepeats = 50;
+  for (std::size_t iteration = 0; iteration < kRepeats; ++iteration) {
+    CAPTURE(iteration);
+    const auto parallel = collect_observed_executions(program, [](const DporConfig& config) {
+      ParallelVerifyOptions options;
+      // More workers than the program can keep busy, and a queue too small to
+      // hold the backlog: most workers spend the run asleep and must still be
+      // woken exactly once at completion.
+      options.max_workers = 8;
+      options.max_queued_tasks = 1;
+      return verify_parallel(config, options);
+    });
+
+    REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
+    REQUIRE(parallel.unique == sequential.unique);
+    REQUIRE(parallel.result.executions_explored == sequential.result.executions_explored);
+  }
+}
+
+namespace {
+// The starvation split is opportunistic by construction: it only fires while a
+// peer is parked, so a single run can legitimately explore the whole tree
+// without ever offering an alternative. Correctness is asserted on every
+// attempt; activation only has to be observed once.
+struct SplitActivation {
+  std::size_t nd_splits{0};
+  std::size_t receive_splits{0};
+};
+
+SplitActivation run_until_split_observed(const Program& program, const bool want_nd_splits) {
+  const auto sequential =
+      collect_observed_executions(program, [](const DporConfig& config) { return verify(config); });
+  REQUIRE(sequential.result.kind == VerifyResultKind::AllExecutionsExplored);
+
+  SplitActivation seen;
+  for (int attempt = 0; attempt < 10; ++attempt) {
+    CAPTURE(attempt);
+    VerifyResult parallel_result{};
+    const auto parallel = collect_observed_executions(program, [&](const DporConfig& config) {
+      ParallelVerifyOptions options;
+      options.max_workers = 8;
+      options.max_queued_tasks = 32;
+      // Check the idle count on every branch: the batched default can skip
+      // right past a small program's entire branching surface.
+      options.split_poll_interval_steps = 1;
+      parallel_result = verify_parallel(config, options);
+      return parallel_result;
+    });
+
+    REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
+    REQUIRE(parallel.result.executions_explored == sequential.result.executions_explored);
+    REQUIRE(parallel.unique == sequential.unique);
+    REQUIRE(parallel.unique.size() == parallel.observed.size());
+
+    seen.nd_splits += parallel_result.nd_splits;
+    seen.receive_splits += parallel_result.receive_splits;
+    if (want_nd_splits ? seen.nd_splits > 0 : seen.receive_splits > 0) {
+      break;
+    }
+  }
+  return seen;
+}
+}  // namespace
+
+TEST_CASE("verify_parallel splits ND alternatives to idle workers", "[algo][dpor][parallel]") {
+  const auto seen = run_until_split_observed(make_wide_nd_program(), true);
+  // Assert on the counter, not on wall-clock: this is what proves the new
+  // spawn site actually engaged rather than merely not breaking anything.
+  REQUIRE(seen.nd_splits > 0);
+}
+
+TEST_CASE("verify_parallel splits receive alternatives to idle workers", "[algo][dpor][parallel]") {
+  const auto seen = run_until_split_observed(make_wide_receive_program(), false);
+  REQUIRE(seen.receive_splits > 0);
+}
+
+TEST_CASE("verify_parallel performs no splits with a single worker", "[algo][dpor][parallel]") {
+  const auto program = make_wide_nd_program();
+  const auto parallel = collect_observed_executions(program, [](const DporConfig& config) {
+    ParallelVerifyOptions options;
+    options.max_workers = 1;
+    options.split_poll_interval_steps = 1;
+    const auto result = verify_parallel(config, options);
+    REQUIRE(result.nd_splits == 0);
+    REQUIRE(result.receive_splits == 0);
+    return result;
+  });
+  REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
+}
+
+TEST_CASE("verify reports no parallel splits in sequential mode", "[algo][dpor]") {
+  DporConfig config;
+  config.program = make_wide_nd_program();
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExecutionsExplored);
+  REQUIRE(result.nd_splits == 0);
+  REQUIRE(result.receive_splits == 0);
+}
+
+TEST_CASE("verify_parallel matches sequential and oracle with splitting forced on",
+          "[algo][dpor][parallel]") {
+  // split_poll_interval_steps = 1 maximises how often the split path is taken,
+  // so these run the ownership-transfer path far harder than a default run.
+  const std::vector<std::size_t> worker_counts{2, 4, oversubscribed_worker_count()};
+  for (const auto workers : worker_counts) {
+    CAPTURE(workers);
+    for (const auto& program : {make_pure_nd_program(), make_pure_receive_program(),
+                                make_nested_mixed_program(), make_parallel_mixed_program()}) {
+      const auto oracle = dpor::test_support::collect_oracle_stats(program);
+      const auto sequential = collect_observed_executions(
+          program, [](const DporConfig& config) { return verify(config); });
+      const auto parallel = collect_observed_executions(program, [&](const DporConfig& config) {
+        ParallelVerifyOptions options;
+        options.max_workers = workers;
+        options.max_queued_tasks = 4;
+        options.split_poll_interval_steps = 1;
+        return verify_parallel(config, options);
+      });
+
+      REQUIRE(parallel.result.kind == VerifyResultKind::AllExecutionsExplored);
+      REQUIRE(parallel.result.executions_explored == sequential.result.executions_explored);
+      REQUIRE(parallel.unique == sequential.unique);
+      REQUIRE(parallel.unique == oracle.signatures);
+      REQUIRE(parallel.unique.size() == parallel.observed.size());
+    }
+  }
 }
 
 TEST_CASE("verify_parallel reports error terminals when sibling branches race to error",

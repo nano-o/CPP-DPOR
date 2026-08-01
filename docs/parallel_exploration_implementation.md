@@ -27,8 +27,8 @@ struct ParallelVerifyOptions {
   std::size_t max_workers{0};
   std::size_t max_queued_tasks{0};
   std::size_t spawn_depth_cutoff{0};
-  std::size_t min_fanout{2};
   std::size_t sync_steps{512};
+  std::size_t split_poll_interval_steps{1};
   std::size_t progress_counter_flush_interval{1024};
   std::size_t progress_poll_interval_steps{64};
 };
@@ -40,13 +40,15 @@ Current option semantics:
   back to `1` if the runtime reports `0`.
 - `max_queued_tasks == 0` derives to `max_workers * 2`.
 - `spawn_depth_cutoff == 0` means no DPOR tree-depth cutoff.
-- `min_fanout` is normalized to at least `1` and gates whether a branch is
-  considered for remote execution. The only current spawn site passes a fixed
-  fanout of `2`, so values above `2` disable remote spawning.
 - `sync_steps == 0` enables the strict result-publication path.
 - `sync_steps > 0` reduces synchronization overhead but weakens early-stop
   semantics after a callback requests stop.
 - the default is `sync_steps == 512`
+- `split_poll_interval_steps` controls how often an ND or receive frame
+  consults the idle-worker count before offering an alternative for remote
+  execution. `0` and `1` both mean check every branch, and that is the default:
+  batching measured slower on all three benchmark workloads. It only affects
+  when work is offered, never which executions are explored.
 - `progress_counter_flush_interval == 0` resolves to `1024`.
 - `progress_counter_flush_interval > 1` batches worker-local terminal counts
   before flushing them into shared progress counters.
@@ -72,45 +74,153 @@ The main thread participates as a worker. `verify_parallel()` seeds the queue
 with the empty graph, starts `max_workers - 1` helper threads, then runs the
 same `worker_loop()` on the calling thread.
 
+### Wake protocol
+
+Workers wait on `queue_cv_` with the predicate
+
+```
+stop_requested_ || search_complete_ || !task_queue_.empty()
+```
+
+Each disjunct has exactly one owner responsible for waking waiters, and nothing
+else broadcasts:
+
+| Disjunct becomes true | Woken by |
+|---|---|
+| `!task_queue_.empty()` | `try_enqueue()`, one `notify_one()` per successful push |
+| `stop_requested_` | `request_stop()` / `record_exception()`, `notify_all()` |
+| `search_complete_` | the worker that drains the last task, `notify_all()` |
+
+A queued task can therefore never strand a sleeping worker even though
+`notify_one()` is lost when no thread happens to be waiting. Any worker that
+finishes a task re-evaluates the predicate under `queue_mutex_` before it is
+able to block, so the last active worker either finds the queue non-empty and
+takes the task, or finds it empty and is by definition the one that sets
+`search_complete_`. Only that transition needs a broadcast.
+
+Completing a task used to broadcast unconditionally. That woke O(workers)
+threads per completed task against a fixed amount of useful work, so scheduling
+cost grew with worker count and the wake-ups were nearly all spurious: the
+predicate could not have newly become true for any of them. On a three-node SCP
+externalize workload that cost 46% of total CPU in the kernel at 32 workers and
+made 32 workers slower than one.
+
 ## Scheduling Policy
 
-The implemented strategy is work-first, with parallel spawning restricted to
-send backward-revisit branches:
+The implemented strategy is work-first. Send backward-revisit branches spawn
+unconditionally; ND and receive branches spawn only under worker starvation:
 
-1. ND and receive branches explore all children locally on one mutable graph
-   through rollback-based iterative frames.
-2. Send branches keep the forward continuation local. Backward-revisit children
+1. Send branches keep the forward continuation local. Backward-revisit children
    — which are materialized one at a time by
    `next_backward_revisit_child(...)` inside the iterative explorer — may be
    enqueued for remote execution if `can_spawn(...)` passes. If enqueue fails,
    they are explored locally instead.
+2. ND and receive branches explore their children locally on one mutable graph
+   through rollback-based iterative frames, *except* that a single alternative
+   may be handed to a parked worker when
+   `should_split_to_idle_worker(...)` passes. See "Starvation splitting" below.
 
-`can_spawn(child_dpor_tree_depth, fanout)` currently requires:
+`can_spawn(child_dpor_tree_depth)` currently requires:
 
 - `max_workers > 1`
 - stop not requested
-- `fanout >= min_fanout`
 - `child_dpor_tree_depth <= spawn_depth_cutoff` when a cutoff is configured
 
-At the sole call site, the `fanout` argument is the fixed value `2`; the
-implementation does not precompute the number of revisit children. Thus the
-default `min_fanout == 2` permits spawning, while any value above `2` forces
-all work to remain local.
+A `min_fanout` option used to add a fourth condition, `fanout >= min_fanout`.
+It was removed. The sole call site passed a literal `2` rather than the real
+number of revisit children, so the only reachable behaviours were "spawn at
+send revisits" (`min_fanout <= 2`) and "never spawn" (`> 2`) -- a boolean whose
+name implied a fanout-driven policy that did not exist. Feeding it the real
+count is not cheap, since `next_backward_revisit_child` filters candidates
+lazily and counting exactly would repeat most of the revisit work; and gating
+on the cheap upper bound `receives_in_destination(send_id).size()` would only
+lose parallelism, because a revisit branch with a single child is still worth
+handing off while the owning worker keeps the forward continuation. Use
+`max_workers = 1` for serial exploration.
 
 The queue is only a backlog buffer. Workers always prefer continuing local
 rollback-based exploration over waiting for queue space.
 
-### Why only send branches spawn
+### Why sends spawn freely and ND/receive branches do not
 
 ND and receive branches use in-place mutation with explicit checkpoints and
 iterative rollback-based frames to avoid graph copies. Enqueuing a sibling from
-these branches requires copying the parent graph, which is pure overhead. Send
-backward-revisit children, by contrast, are already fully materialized owned
-graphs, so enqueuing them costs no additional copy.
+these branches requires copying the parent graph. Send backward-revisit
+children, by contrast, are already fully materialized owned graphs, so enqueuing
+them costs no additional copy — which is why sends spawn whenever they can and
+ND/receive branches need a reason to pay.
 
-On the 4-participant no-crash 2PC timeout benchmark, restricting parallelism to
-send branches is neutral to ~8% faster across 1-20 workers compared to also
-enqueuing ND/receive siblings, with identical execution counts (7,262,928).
+### Starvation splitting
+
+ND and receive frames split at the point where the handler has already called
+`graph.rollback(frame.checkpoint)`, so the graph sits in the parent state.
+Applying one alternative to a copy reproduces exactly the child the local path
+would have built:
+
+| Alternative | Applied to the copy | Enqueued as |
+|---|---|---|
+| ND choice `i` | `add_event(thread_id, nd_label with value = choices[i])` | `Visit` |
+| Receive candidate `i` | `add_event` then `set_reads_from(recv, candidate[i])` | `VisitIfConsistent` |
+
+The modes match what the local handlers push, so the remote `Enter` frame runs
+the identical consistency check the local child would have. There is no new task
+variant and no resumable frame: `run()` builds the task's `Enter` frame and
+`handle_enter_frame` takes its own checkpoint. That matters, because
+`ExplorationGraphT`'s copy constructor deliberately does not copy the undo logs,
+so a copied graph could not be rolled back to an ancestor checkpoint anyway.
+
+Three rules keep this correct and cheap:
+
+- **The cursor advances only on a successful handoff.** If both sides claimed an
+  alternative the branch would run twice; if neither did it would be lost. Either
+  error can hide inside equal aggregate counts, which is why the tests compare
+  execution *sets*.
+- **The non-blocking bottom branch is never split.** It is always the last
+  alternative in a receive frame, so handing it off would leave the worker with
+  nothing, and keeping it local means `frame.flag` is consumed exactly once by
+  its owner — there is no split/local ownership race over it to get wrong. For
+  the same reason a split only happens while at least one further alternative
+  would remain local.
+- **The gate short-circuits before touching shared state.** The common
+  "nobody is idle" path is a plain member compare plus a thread-local
+  increment. `can_spawn()` is consulted only after the idle check passes,
+  because it calls `stop_requested()` and would otherwise advance the shared
+  stop-poll cadence on every branch.
+
+That last point is not a micro-optimization. An earlier version of this gate
+called `can_spawn()` first and cost ~7% on the 2PC benchmark even though
+splitting fired only ~1,000 times against 7,262,928 executions.
+
+### Measured effect
+
+Paired same-session medians against the identical engine with starvation
+splitting removed, on a 16-physical-core SMT2 host, `stellar-core`'s
+`scp-dpor-investigation`:
+
+| Workload | workers | send-only | with splitting |
+|---|---|---|---|
+| SCP, rf/ND-heavy (1,278,277 executions) | 8 | 8.16s | 4.97s |
+| | 16 | 6.78s | 3.03s |
+| | 32 | 6.83s | 2.58s |
+| SCP, send-heavy (5,600,446 executions) | 16 | 21.73s | 20.24s |
+| | 32 | 18.74s | 17.20s |
+
+The rf/ND-heavy workload is the one that starved: its queue sat empty with 4-20
+of 32 workers active, because rf-choice and ND subtrees produced no tasks. The
+send-heavy workload already kept its queue full, so it gains only a few percent.
+
+On the 4-participant no-crash 2PC timeout benchmark the difference is inside the
+measurement noise. At 8 workers, 11 alternated repetitions gave send-only 7619ms
+and splitting 7752ms (1.018x), while a *copy of the send-only binary measured
+against itself in the same session* came out at 0.966x — a larger deviation than
+the change being tested. Splitting was slower in 5 of 11 paired repetitions.
+Execution counts were identical (7,262,928) at every worker count.
+
+Two earlier prototypes that enqueued ND/receive siblings were rejected (below).
+Both were *eager*: they reserved and materialized siblings whether or not any
+worker was idle. Paying the copy only when a peer is actually parked is a
+different cost profile, and the earlier measurements were also taken against the
+pre-fix scheduler, whose cost grew with worker count.
 
 Earlier variants that enqueued ND/receive siblings used an `enqueue_budget`
 mechanism to limit graph copies by snapshotting queue occupancy at branch entry.
@@ -153,8 +263,10 @@ The implementation parallelizes only at existing DPOR branch points.
 
 ### ND Branches
 
-- All choices are explored locally by iterative rollback-based frames on the
-  parent graph.
+- Choices are explored locally by iterative rollback-based frames on the parent
+  graph.
+- While a peer is parked and a further choice would remain local, one choice may
+  instead be applied to a copy of the parent graph and enqueued as `Visit`.
 
 ### Receive Branches
 
@@ -162,6 +274,9 @@ The implementation parallelizes only at existing DPOR branch points.
   parent graph.
 - Each matching `(recv, send_id)` child and the non-blocking bottom branch are
   explored locally by iterative rollback-based frames.
+- While a peer is parked and further work would remain local, one
+  `(recv, send_id)` candidate may instead be applied to a copy and enqueued as
+  `VisitIfConsistent`. The bottom branch is never handed off.
 
 ### Send Branches
 
@@ -171,8 +286,9 @@ The implementation parallelizes only at existing DPOR branch points.
 - Each revisited graph may be enqueued for remote execution; if enqueue fails,
   it is explored locally as an owned child context.
 
-This is the sole parallel spawn point. Revisit children are already fully
-materialized owned graphs, so enqueuing them incurs no additional copy.
+Revisit children are already fully materialized owned graphs, so enqueuing them
+incurs no additional copy. This is the only spawn point that fires
+unconditionally; ND and receive frames spawn only under starvation.
 
 ### Block / Reschedule Paths
 
@@ -299,6 +415,10 @@ Current non-goals and limitations:
 - queue bounds only limit queued snapshots, not worker-local exploration state
 - revisit children are still materialized eagerly enough to pay graph-copy cost
 - `sync_steps > 0` deliberately weakens early-stop semantics
+- starvation splitting hands off one alternative per visit to the frame, so a
+  wide ND or receive frame is drained one copy at a time rather than in a range
+- the idle-worker signal is a hint: a stale read only means an opportunity is
+  taken or missed, never a change to the explored set
 
 ## Benchmark Surface
 
@@ -309,7 +429,6 @@ The benchmark CLIs currently expose the tuning knobs that map directly to
 - `--max-workers`
 - `--max-queued-tasks`
 - `--spawn-depth-cutoff`
-- `--min-fanout`
 - `--progress-counter-flush-interval`
 - `--progress-poll-interval-steps`
 

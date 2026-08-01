@@ -224,8 +224,8 @@ struct ParallelVerifyOptions {
   std::size_t max_workers{0};
   std::size_t max_queued_tasks{0};
   std::size_t spawn_depth_cutoff{0};
-  std::size_t min_fanout{2};
   std::size_t sync_steps{512};
+  std::size_t split_poll_interval_steps{1};
   std::size_t progress_counter_flush_interval{1024};
   std::size_t progress_poll_interval_steps{64};
 };
@@ -233,9 +233,20 @@ struct ParallelVerifyOptions {
 
 `spawn_depth_cutoff` uses the same DPOR tree-depth accounting as `max_depth`.
 The current implementation only offers remote work at send backward-revisit
-branches, where it passes a fixed fanout value of `2`. Consequently,
-`min_fanout <= 2` permits that spawn site and `min_fanout > 2` disables remote
-spawning; it is not currently a count of materialized revisit children.
+branches.
+
+There used to be a `min_fanout` option here. It was removed: the sole spawn
+site passed a literal fanout of `2`, so the option had exactly two reachable
+behaviours -- "spawn at send revisits" (`<= 2`) and "never spawn anywhere"
+(`> 2`) -- while its name implied a fanout-driven scheduling policy that did
+not exist. The true revisit fanout is not cheaply available, because
+`next_backward_revisit_child` filters candidates lazily by compatibility, PORF
+reachability, and the revisit condition, so counting exactly would cost most of
+the revisit work twice. Gating on the cheap upper bound
+(`receives_in_destination(send_id).size()`) was rejected as well: a send revisit
+with a single child is still worth handing off, since the owning worker keeps
+the forward continuation, so an upper-bound gate would only lose parallelism.
+Use `max_workers = 1` for serial exploration.
 
 `VerifyResult` reports:
 
@@ -249,6 +260,11 @@ and also carries:
 - `blocked_executions_explored`: number of blocked maximal executions
 - `error_executions_explored`: number of error executions
 - `depth_limit_executions_explored`: number of depth-limit executions
+- `nd_splits` / `receive_splits`: scheduler diagnostics counting alternatives
+  handed to an idle worker from an ND or receive frame. Always `0` in sequential
+  mode, and `0` in parallel mode when no worker ever starved, so a test can
+  assert that the starvation-splitting path actually engaged rather than
+  inferring it from wall-clock.
 
 If `on_terminal_execution` is set, DPOR calls it with each published terminal
 execution. Terminal executions are full executions, blocked maximal

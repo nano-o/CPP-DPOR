@@ -61,6 +61,12 @@ struct VerifyResult {
   std::size_t blocked_executions_explored{0};
   std::size_t error_executions_explored{0};
   std::size_t depth_limit_executions_explored{0};
+  // Diagnostics for the parallel scheduler; always zero in sequential mode.
+  // nd_splits/receive_splits count alternatives handed to an idle worker from
+  // an ND or receive frame, which only happens under worker starvation, so a
+  // zero here on a parallel run means the split path never activated.
+  std::size_t nd_splits{0};
+  std::size_t receive_splits{0};
 
   [[nodiscard]] bool all_explored() const noexcept { return kind == VerifyResultKind::AllExplored; }
 
@@ -242,10 +248,6 @@ struct ParallelVerifyOptions {
   std::size_t max_queued_tasks{0};
   // Uses the same DPOR tree-depth accounting as max_depth.
   std::size_t spawn_depth_cutoff{0};
-  // Spawn gate. The current sole spawn site (send backward revisits) supplies
-  // a fixed fanout of 2 rather than precomputing the number of revisit
-  // children. Values <= 2 permit spawning there; values > 2 disable it.
-  std::size_t min_fanout{2};
   // Workers read the shared stop flag only every sync_steps stop_requested()
   // calls. This reduces stop-check contention at the cost of weaker stop
   // semantics: workers may publish additional terminal executions after a
@@ -255,6 +257,15 @@ struct ParallelVerifyOptions {
   // so a terminal that already passed the stop check may still be published
   // before the stop request is committed.
   std::size_t sync_steps{512};
+  // How often ND and receive frames consult the idle-worker count before
+  // offering an alternative to a parked worker. Zero and one both mean check
+  // every branch, which is the default: batching was measured slower on all
+  // three benchmark workloads, because reacting promptly to starvation is
+  // worth more than the relaxed load costs, and the check short-circuits
+  // before touching anything else when no worker is idle. Larger values are
+  // an escape hatch for hardware where that load does turn out to be
+  // expensive. Only affects when work is offered, never what is explored.
+  std::size_t split_poll_interval_steps{1};
   // Flush thread-local terminal counters into shared progress counters after
   // this many local terminal publications. Smaller values improve live progress
   // accuracy; larger values reduce atomic-update overhead. A zero value uses a
@@ -1282,10 +1293,15 @@ class SequentialExecutor {
     notify_progress(config_, make_progress_snapshot(ProgressState::Running, now));
   }
 
-  [[nodiscard]] bool can_spawn(std::size_t /*dpor_tree_depth*/,
-                               std::size_t /*fanout*/) const noexcept {
+  [[nodiscard]] bool can_spawn(std::size_t /*dpor_tree_depth*/) const noexcept { return false; }
+
+  [[nodiscard]] bool should_split_to_idle_worker(std::size_t /*dpor_tree_depth*/) const noexcept {
     return false;
   }
+
+  void note_nd_split() const noexcept {}
+
+  void note_receive_split() const noexcept {}
 
   [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT>& /*task*/) const noexcept { return false; }
 
@@ -1358,8 +1374,8 @@ class ParallelExecutor {
         thread_ids_(std::move(thread_ids)),
         max_workers_(resolve_max_workers(options.max_workers)),
         max_queued_tasks_(resolve_max_queued_tasks(options.max_queued_tasks, max_workers_)),
-        min_fanout_(std::max<std::size_t>(1, options.min_fanout)),
         sync_steps_(options.sync_steps),
+        split_poll_interval_steps_(options.split_poll_interval_steps),
         progress_counter_flush_interval_(
             resolve_progress_counter_flush_interval(options.progress_counter_flush_interval)),
         progress_poll_interval_steps_(options.progress_poll_interval_steps),
@@ -1417,6 +1433,8 @@ class ParallelExecutor {
     result.executions_explored =
         result.full_executions_explored + result.blocked_executions_explored +
         result.error_executions_explored + result.depth_limit_executions_explored;
+    result.nd_splits = nd_splits_.load(std::memory_order_relaxed);
+    result.receive_splits = receive_splits_.load(std::memory_order_relaxed);
     if (stop_requested_.load(std::memory_order_relaxed)) {
       result.kind = VerifyResultKind::Stopped;
     }
@@ -1495,12 +1513,8 @@ class ParallelExecutor {
     return true;
   }
 
-  [[nodiscard]] bool can_spawn(const std::size_t child_dpor_tree_depth,
-                               const std::size_t fanout) noexcept {
+  [[nodiscard]] bool can_spawn(const std::size_t child_dpor_tree_depth) noexcept {
     if (max_workers_ <= 1 || stop_requested()) {
-      return false;
-    }
-    if (fanout < min_fanout_) {
       return false;
     }
     if (options_.spawn_depth_cutoff != 0 && child_dpor_tree_depth > options_.spawn_depth_cutoff) {
@@ -1508,6 +1522,41 @@ class ParallelExecutor {
     }
     return true;
   }
+
+  // Send backward revisits hand off graphs the explorer already materialized,
+  // so they spawn whenever they can. ND and receive alternatives are explored
+  // in place on one mutable graph, so offering one costs an extra graph copy.
+  // Two earlier engine prototypes that enqueued those siblings *eagerly* both
+  // regressed the 2PC benchmark; this gate only pays the copy when a peer is
+  // actually parked with nothing to do, which is a different cost profile.
+  //
+  // The ordering below is load-bearing, not stylistic. This runs at every ND
+  // and receive frame, so the "nobody is idle" path must stay off shared cache
+  // lines: a plain member compare plus a thread-local increment. In particular
+  // can_spawn() is consulted only after the idle check passes, because it calls
+  // stop_requested() and would otherwise advance the shared stop-poll cadence
+  // on every branch -- doing that cost ~7% on the 2PC benchmark even though
+  // splitting itself fired only ~1,000 times against 7.26M executions.
+  [[nodiscard]] bool should_split_to_idle_worker(const std::size_t child_dpor_tree_depth) noexcept {
+    if (max_workers_ <= 1) {
+      return false;
+    }
+    auto& state = worker_state();
+    if (split_poll_interval_steps_ > 1) {
+      if (++state.steps_since_split_poll < split_poll_interval_steps_) {
+        return state.cached_workers_idle && can_spawn(child_dpor_tree_depth);
+      }
+      state.steps_since_split_poll = 0;
+    }
+    // Relaxed: a stale read only decides whether work is offered, never what
+    // gets explored, so it cannot affect the result set.
+    state.cached_workers_idle = idle_workers_.load(std::memory_order_relaxed) != 0;
+    return state.cached_workers_idle && can_spawn(child_dpor_tree_depth);
+  }
+
+  void note_nd_split() noexcept { nd_splits_.fetch_add(1, std::memory_order_relaxed); }
+
+  void note_receive_split() noexcept { receive_splits_.fetch_add(1, std::memory_order_relaxed); }
 
   [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT>& task) {
     if (max_workers_ <= 1 || stop_requested()) {
@@ -1610,10 +1659,18 @@ class ParallelExecutor {
       std::optional<ExplorationTask<ValueT>> task;
       {
         std::unique_lock lock(queue_mutex_);
-        queue_cv_.wait(lock, [this]() {
+        const auto ready = [this]() {
           return stop_requested_.load(std::memory_order_acquire) || search_complete_ ||
                  !task_queue_.empty();
-        });
+        };
+        // Only count a worker as idle when it genuinely has to park, so that
+        // the split gate does not fire on workers that are merely between
+        // tasks.
+        if (!ready()) {
+          idle_workers_.fetch_add(1, std::memory_order_relaxed);
+          queue_cv_.wait(lock, ready);
+          idle_workers_.fetch_sub(1, std::memory_order_relaxed);
+        }
 
         if (stop_requested_.load(std::memory_order_acquire) || search_complete_) {
           flush_worker_state();
@@ -1631,15 +1688,28 @@ class ParallelExecutor {
         record_exception(std::current_exception());
       }
 
+      // Only the search_complete_ transition needs a broadcast. The other two
+      // wait-predicate disjuncts are already covered: try_enqueue() notifies on
+      // every successful push, and stop_requested_ is only ever set by
+      // request_stop()/record_exception(), which broadcast themselves. A task
+      // left in the queue with no waiter awake is also safe, because the last
+      // active worker re-evaluates the predicate under queue_mutex_ before it
+      // can block -- so it drains the queue rather than sleeping on it.
+      // Broadcasting here instead woke O(workers) threads per completed task,
+      // which is what made scheduling cost grow with worker count.
+      bool became_complete = false;
       {
         std::lock_guard lock(queue_mutex_);
         --active_workers_;
         if (!stop_requested_.load(std::memory_order_acquire) && task_queue_.empty() &&
             active_workers_ == 0) {
           search_complete_ = true;
+          became_complete = true;
         }
       }
-      queue_cv_.notify_all();
+      if (became_complete) {
+        queue_cv_.notify_all();
+      }
     }
   }
 
@@ -1665,7 +1735,9 @@ class ParallelExecutor {
     std::size_t pending_terminal_executions{0};
     std::size_t steps_since_sync{0};
     std::size_t steps_since_progress_poll{0};
+    std::size_t steps_since_split_poll{0};
     bool cached_stop{false};
+    bool cached_workers_idle{false};
   };
 
   WorkerState& worker_state() noexcept {
@@ -1701,7 +1773,9 @@ class ParallelExecutor {
     auto& state = worker_state();
     state.steps_since_sync = 0;
     state.steps_since_progress_poll = 0;
+    state.steps_since_split_poll = 0;
     state.cached_stop = false;
+    state.cached_workers_idle = false;
   }
 
   void flush_local_counts() { flush_local_counts(worker_state()); }
@@ -1796,8 +1870,8 @@ class ParallelExecutor {
   std::vector<model::ThreadId> thread_ids_;
   std::size_t max_workers_{1};
   std::size_t max_queued_tasks_{1};
-  std::size_t min_fanout_{1};
   std::size_t sync_steps_{0};
+  std::size_t split_poll_interval_steps_{1};
   std::size_t progress_counter_flush_interval_{1024};
   std::size_t progress_poll_interval_steps_{64};
   Clock::time_point start_time_;
@@ -1809,6 +1883,12 @@ class ParallelExecutor {
   std::atomic<std::size_t> blocked_executions_explored_{0};
   std::atomic<std::size_t> error_executions_explored_{0};
   std::atomic<std::size_t> depth_limit_executions_explored_{0};
+
+  // Workers parked in queue_cv_.wait(). Read with relaxed ordering off the hot
+  // path to decide whether an ND/receive alternative is worth handing off.
+  std::atomic<std::size_t> idle_workers_{0};
+  std::atomic<std::size_t> nd_splits_{0};
+  std::atomic<std::size_t> receive_splits_{0};
 
   mutable std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
@@ -2340,7 +2420,7 @@ class DepthFirstExplorer {
       frame.event_id = send_id;
       frame.label.reset();
       frame.candidate_event_ids = graph.receives_in_destination(send_id);
-      frame.flag = executor_.can_spawn(frame.dpor_tree_depth + 1U, 2);
+      frame.flag = executor_.can_spawn(frame.dpor_tree_depth + 1U);
       return;
     }
 
@@ -2375,10 +2455,38 @@ class DepthFirstExplorer {
       return;
     }
 
+    const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
+
+    // Starvation split. The graph is rolled back to the parent state here, so
+    // applying one alternative to a copy reproduces exactly the child the local
+    // path below would build, and the remote worker re-enters through a plain
+    // Enter frame that takes its own checkpoint. Only split while a further
+    // alternative would remain local -- handing away our last one just moves
+    // the idleness to this worker.
+    if (frame.cursor + 1U < nd->choices.size() &&
+        executor_.should_split_to_idle_worker(child_dpor_tree_depth)) {
+      auto child = graph;
+      auto split_label = *nd;
+      split_label.value = nd->choices[frame.cursor];
+      static_cast<void>(
+          child.add_event(frame.thread_id, model::EventLabelT<ValueT>{std::move(split_label)}));
+      if (try_enqueue_owned_task<ValueT>(executor_, child, child_dpor_tree_depth,
+                                         ExplorationTaskMode::Visit)) {
+        // Consume the alternative only once the handoff has succeeded: if both
+        // sides claimed it the branch would run twice, if neither did it would
+        // be lost, and either error can hide inside equal aggregate counts.
+        ++frame.cursor;
+        executor_.note_nd_split();
+        return;
+      }
+      // Handoff refused. try_enqueue_owned_task moved the graph back into
+      // `child`, which we drop; the cursor never moved, so the local path
+      // below still explores this alternative.
+    }
+
     auto nd_label = *nd;
     nd_label.value = nd->choices[frame.cursor];
     ++frame.cursor;
-    const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
     static_cast<void>(
         graph.add_event(frame.thread_id, model::EventLabelT<ValueT>{std::move(nd_label)}));
     context.frames.push_back(
@@ -2401,8 +2509,27 @@ class DepthFirstExplorer {
     }
 
     if (frame.cursor < frame.candidate_event_ids.size()) {
-      const auto send_id = frame.candidate_event_ids[frame.cursor++];
       const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
+
+      // Starvation split, as in the ND frame. The remote task keeps
+      // VisitIfConsistent, matching the local child, so an inconsistent graph
+      // is still never explored. "Work left over" counts the bottom branch,
+      // which is why the last candidate can be split when flag is set.
+      const bool keeps_local_work =
+          frame.cursor + 1U < frame.candidate_event_ids.size() || frame.flag;
+      if (keeps_local_work && executor_.should_split_to_idle_worker(child_dpor_tree_depth)) {
+        auto child = graph;
+        const auto split_recv_id = child.add_event(frame.thread_id, *frame.label);
+        child.set_reads_from(split_recv_id, frame.candidate_event_ids[frame.cursor]);
+        if (try_enqueue_owned_task<ValueT>(executor_, child, child_dpor_tree_depth,
+                                           ExplorationTaskMode::VisitIfConsistent)) {
+          ++frame.cursor;
+          executor_.note_receive_split();
+          return;
+        }
+      }
+
+      const auto send_id = frame.candidate_event_ids[frame.cursor++];
       const auto recv_id = graph.add_event(frame.thread_id, *frame.label);
       graph.set_reads_from(recv_id, send_id);
       context.frames.push_back(ExplorationFrame<ValueT>::enter(
@@ -2410,6 +2537,11 @@ class DepthFirstExplorer {
       return;
     }
 
+    // The non-blocking bottom branch is deliberately never split. It is always
+    // the last alternative in the frame, so handing it off would leave this
+    // worker with nothing, and keeping it local means `frame.flag` is consumed
+    // exactly once by the owning worker -- there is no split/local ownership
+    // race over it to get wrong.
     if (frame.flag) {
       frame.flag = false;
       const auto child_dpor_tree_depth = frame.dpor_tree_depth + 1U;
