@@ -48,10 +48,24 @@ enum class ProgressState : std::uint8_t { Running, Stopped, AllExplored };
 // least one thread waits forever on a blocking receive (its last event is a
 // Block event). Error: a thread produced an error label. DepthLimit: branch
 // truncated by max_depth; it keeps that kind even if some thread happens to be
-// blocked at the cutoff, since it is not a maximal execution. Note that a
-// blocked execution is not necessarily a bug: threads that legitimately end a
-// finite program waiting for further input (e.g., server loops) also count.
-enum class TerminalExecutionKind : std::uint8_t { Full, Blocked, Error, DepthLimit };
+// blocked at the cutoff, since it is not a maximal execution. ThreadEventLimit:
+// the engine declined to ask at least one nonterminated thread whether it had a
+// further event, because that thread sat at max_thread_events; like DepthLimit
+// it is not a maximal execution, and it keeps that kind even if some other
+// thread happens to be blocked at the cutoff. ThreadEventLimit is deliberately
+// conservative: a thread whose function would have returned nullopt at exactly
+// step == max_thread_events is indistinguishable from a genuinely truncated one
+// without asking, so the kind means "this execution may be truncated", not
+// "this execution was truncated". Note that a blocked execution is not
+// necessarily a bug: threads that legitimately end a finite program waiting for
+// further input (e.g., server loops) also count.
+enum class TerminalExecutionKind : std::uint8_t {
+  Full,
+  Blocked,
+  Error,
+  DepthLimit,
+  ThreadEventLimit,
+};
 enum class TerminalExecutionAction : std::uint8_t { Continue, Stop };
 
 struct VerifyResult {
@@ -61,6 +75,15 @@ struct VerifyResult {
   std::size_t blocked_executions_explored{0};
   std::size_t error_executions_explored{0};
   std::size_t depth_limit_executions_explored{0};
+  std::size_t thread_event_limit_executions_explored{0};
+  // Largest per-thread event count observed, maximized over the *published
+  // terminal executions* rather than over every transient exploration graph;
+  // under an early stop the two only coincide if exploration ran to completion.
+  // Engine-injected Block events count, so a thread that blocks at step
+  // max_thread_events - 1 also reports max_thread_events. The bound is
+  // therefore never exceeded: max_thread_event_depth_reached <=
+  // max_thread_events whenever the bound is set.
+  std::size_t max_thread_event_depth_reached{0};
   // Diagnostics for the parallel scheduler; always zero in sequential mode.
   // nd_splits/receive_splits count alternatives handed to an idle worker from
   // an ND or receive frame, which only happens under worker starvation, so a
@@ -85,6 +108,8 @@ struct ProgressSnapshot {
   std::size_t blocked_executions{0};
   std::size_t error_executions{0};
   std::size_t depth_limit_executions{0};
+  std::size_t thread_event_limit_executions{0};
+  std::size_t max_thread_event_depth{0};
   std::size_t active_workers{0};
   std::size_t max_workers{1};
   std::size_t queued_tasks{0};
@@ -118,14 +143,22 @@ struct TerminalExecutionT {
     return kind == TerminalExecutionKind::DepthLimit;
   }
 
+  // True when the engine declined to ask at least one thread for a further
+  // event because it sat at max_thread_events. Like a depth-limited execution
+  // this is not a maximal execution, so property checks over complete
+  // interleavings must exclude it.
+  [[nodiscard]] bool is_thread_event_limit_execution() const noexcept {
+    return kind == TerminalExecutionKind::ThreadEventLimit;
+  }
+
   operator const model::ExplorationGraphT<ValueT>&() const noexcept { return graph; }
 };
 
 template <typename ValueT>
 // Observers are called for every published terminal execution: full
-// executions, blocked executions, error executions, and branches truncated by
-// max_depth. Returning Stop requests early termination; void callbacks are
-// treated as Continue.
+// executions, blocked executions, error executions, branches truncated by
+// max_depth, and branches truncated by max_thread_events. Returning Stop
+// requests early termination; void callbacks are treated as Continue.
 class TerminalExecutionObserverT {
  public:
   using Execution = TerminalExecutionT<ValueT>;
@@ -218,6 +251,18 @@ struct DporConfigT {
   ProgramT<ValueT> program;
   // Bounds DPOR tree depth, not current graph size or implementation stack depth.
   std::size_t max_depth{1000};
+  // Bounds the events any single thread may contribute. Unlike max_depth this
+  // is a per-thread event-graph bound, not a search-tree bound: each thread is
+  // capped independently and reaching the cap on one thread does not truncate
+  // the others. 0 = unlimited.
+  //
+  // Exactly equivalent, in what gets explored, to wrapping every thread
+  // function as f'(trace, step) = step >= max_thread_events ? nullopt
+  // : f(trace, step) -- the engine simply skips the call instead of paying for
+  // it. The difference is the terminal classification: a branch the bound may
+  // have truncated is published as ThreadEventLimit rather than Full/Blocked,
+  // so it is not mistaken for a maximal execution.
+  std::size_t max_thread_events{0};
   model::CommunicationModel communication_model{model::CommunicationModel::Async};
   TerminalExecutionObserverT<ValueT> on_terminal_execution{};
   ProgressObserver on_progress{};
@@ -327,8 +372,12 @@ template <typename ValueT>
   return TerminalExecutionAction::Continue;
 }
 
-inline void increment_terminal_counts(VerifyResult& result, const TerminalExecutionKind kind) {
+inline void increment_terminal_counts(VerifyResult& result, const TerminalExecutionKind kind,
+                                      const std::size_t thread_event_depth) {
   ++result.executions_explored;
+  if (thread_event_depth > result.max_thread_event_depth_reached) {
+    result.max_thread_event_depth_reached = thread_event_depth;
+  }
   switch (kind) {
     case TerminalExecutionKind::Full:
       ++result.full_executions_explored;
@@ -341,6 +390,9 @@ inline void increment_terminal_counts(VerifyResult& result, const TerminalExecut
       break;
     case TerminalExecutionKind::DepthLimit:
       ++result.depth_limit_executions_explored;
+      break;
+    case TerminalExecutionKind::ThreadEventLimit:
+      ++result.thread_event_limit_executions_explored;
       break;
   }
 }
@@ -453,17 +505,60 @@ struct AllowMissingReadsForNonTargetT {
   }
 };
 
+// Largest per-thread event count in the graph. Engine-injected Block events
+// count, so a thread blocked at step N - 1 reports N. O(thread count) O(1)
+// loads; computed once per published terminal rather than maintained
+// incrementally, because the graph supports rollback, undo_last_event_append
+// and restrict_from_keep_mask, and a running maximum would have to be
+// recomputed on every removal (or silently degenerate into a high-water mark
+// that is wrong after a restrict) on a far hotter path.
+template <typename ValueT>
+[[nodiscard]] inline std::size_t compute_max_thread_event_depth(
+    const model::ExplorationGraphT<ValueT>& graph, const std::vector<model::ThreadId>& thread_ids) {
+  std::size_t depth = 0;
+  for (const auto tid : thread_ids) {
+    depth = std::max(depth, graph.thread_event_count(tid));
+  }
+  return depth;
+}
+
+template <typename ValueT>
+struct NextEventResultT {
+  std::optional<std::pair<model::ThreadId, model::EventLabelT<ValueT>>> next;
+  // True iff some nonterminated thread was skipped because it sat at
+  // max_thread_events, so the engine never asked whether it had a further
+  // event. Meaningful only when `next` is empty: a call that found a next event
+  // may have skipped a capped thread earlier in the scan, and that skip says
+  // nothing about the branch being truncated.
+  bool suppressed_by_thread_event_limit{false};
+};
+
 // Compute the next event to add to the graph, following Algorithm 1's next_P(G).
 // Iterates threads by ascending ThreadId, calls the thread function with the
-// current trace, skips blocked/done threads, and turns unsatisfied blocking
-// receives into internal Block events.
+// current trace, skips blocked/done threads and threads at max_thread_events,
+// and turns unsatisfied blocking receives into internal Block events.
 template <typename ValueT>
-[[nodiscard]] inline std::optional<std::pair<model::ThreadId, model::EventLabelT<ValueT>>>
-compute_next_event(const ProgramT<ValueT>& program, const model::ExplorationGraphT<ValueT>& graph,
-                   const std::vector<model::ThreadId>& thread_ids) {
+[[nodiscard]] inline NextEventResultT<ValueT> compute_next_event(
+    const ProgramT<ValueT>& program, const model::ExplorationGraphT<ValueT>& graph,
+    const std::vector<model::ThreadId>& thread_ids, const std::size_t max_thread_events) {
+  NextEventResultT<ValueT> result;
+
   for (const auto tid : thread_ids) {
     // Skip threads that have terminated (block or error).
     if (graph.thread_is_terminated(tid)) {
+      continue;
+    }
+
+    // Per-thread event bound. Deliberately checked *after* the terminated
+    // check: a thread whose max_thread_events-th event is an engine-injected
+    // Block is terminated, so it never sets the suppression flag and its
+    // execution classifies as Blocked rather than ThreadEventLimit. That Block
+    // also stays eligible for blocked-receive rescheduling, which re-asks at
+    // step = max_thread_events - 1 and so still fits under the bound. Skipping
+    // here, before thread_trace_into() and the thread-function call, is also
+    // what makes the bound a speedup rather than a cost.
+    if (max_thread_events != 0 && graph.thread_event_count(tid) >= max_thread_events) {
+      result.suppressed_by_thread_event_limit = true;
       continue;
     }
 
@@ -498,17 +593,19 @@ compute_next_event(const ProgramT<ValueT>& program, const model::ExplorationGrap
       if (recv->is_blocking() && !has_compatible_unread_send(graph, tid, *recv)) {
         // Must-style behavior: represent an unsatisfied blocking receive as a
         // Block event and continue with other threads.
-        return std::pair{
+        result.next = std::pair{
             tid,
             model::EventLabelT<ValueT>{model::BlockLabel{}},
         };
+        return result;
       }
     }
 
-    return std::pair{tid, label};
+    result.next = std::pair{tid, label};
+    return result;
   }
 
-  return std::nullopt;  // All threads blocked or done.
+  return result;  // All threads blocked, done, or at the per-thread bound.
 }
 
 // Compute the "Previous" set: {e' ∈ G.E | e' ≤_G e ∨ ⟨e', s⟩ ∈ G.porf}.
@@ -1306,8 +1403,9 @@ class SequentialExecutor {
   [[nodiscard]] bool try_enqueue(ExplorationTask<ValueT>& /*task*/) const noexcept { return false; }
 
   [[nodiscard]] bool publish_terminal_execution(const model::ExplorationGraphT<ValueT>& graph,
-                                                const TerminalExecutionKind kind) {
-    increment_terminal_counts(result_, kind);
+                                                const TerminalExecutionKind kind,
+                                                const std::size_t thread_event_depth) {
+    increment_terminal_counts(result_, kind, thread_event_depth);
     if (notify_terminal_execution(config_, graph, kind) == TerminalExecutionAction::Stop) {
       request_stop();
     }
@@ -1349,6 +1447,8 @@ class SequentialExecutor {
     snapshot.blocked_executions = result_.blocked_executions_explored;
     snapshot.error_executions = result_.error_executions_explored;
     snapshot.depth_limit_executions = result_.depth_limit_executions_explored;
+    snapshot.thread_event_limit_executions = result_.thread_event_limit_executions_explored;
+    snapshot.max_thread_event_depth = result_.max_thread_event_depth_reached;
     snapshot.active_workers = state == ProgressState::Running ? 1 : 0;
     return snapshot;
   }
@@ -1430,9 +1530,14 @@ class ParallelExecutor {
     result.error_executions_explored = error_executions_explored_.load(std::memory_order_relaxed);
     result.depth_limit_executions_explored =
         depth_limit_executions_explored_.load(std::memory_order_relaxed);
+    result.thread_event_limit_executions_explored =
+        thread_event_limit_executions_explored_.load(std::memory_order_relaxed);
+    result.max_thread_event_depth_reached =
+        max_thread_event_depth_reached_.load(std::memory_order_relaxed);
     result.executions_explored =
         result.full_executions_explored + result.blocked_executions_explored +
-        result.error_executions_explored + result.depth_limit_executions_explored;
+        result.error_executions_explored + result.depth_limit_executions_explored +
+        result.thread_event_limit_executions_explored;
     result.nd_splits = nd_splits_.load(std::memory_order_relaxed);
     result.receive_splits = receive_splits_.load(std::memory_order_relaxed);
     if (stop_requested_.load(std::memory_order_relaxed)) {
@@ -1492,19 +1597,20 @@ class ParallelExecutor {
   }
 
   [[nodiscard]] bool publish_terminal_execution(const model::ExplorationGraphT<ValueT>& graph,
-                                                const TerminalExecutionKind kind) {
+                                                const TerminalExecutionKind kind,
+                                                const std::size_t thread_event_depth) {
     if (sync_steps_ == 0) {
       // Serialise terminal-count updates with stop checks.
       std::lock_guard lock(publication_mutex_);
       if (stop_requested_.load(std::memory_order_acquire)) {
         return false;
       }
-      increment_local_terminal_counts(kind);
+      increment_local_terminal_counts(kind, thread_event_depth);
     } else {
       if (stop_requested()) {
         return false;
       }
-      increment_local_terminal_counts(kind);
+      increment_local_terminal_counts(kind, thread_event_depth);
     }
 
     if (notify_terminal_execution(config_, graph, kind) == TerminalExecutionAction::Stop) {
@@ -1732,6 +1838,11 @@ class ParallelExecutor {
     std::size_t local_blocked_executions{0};
     std::size_t local_error_executions{0};
     std::size_t local_depth_limit_executions{0};
+    std::size_t local_thread_event_limit_executions{0};
+    // Folded into the shared atomic only in flush_local_counts(): a
+    // compare_exchange per published terminal would put contended cross-core
+    // traffic on a path that currently has none.
+    std::size_t local_max_thread_event_depth{0};
     std::size_t pending_terminal_executions{0};
     std::size_t steps_since_sync{0};
     std::size_t steps_since_progress_poll{0};
@@ -1745,8 +1856,12 @@ class ParallelExecutor {
     return state;
   }
 
-  void increment_local_terminal_counts(const TerminalExecutionKind kind) {
+  void increment_local_terminal_counts(const TerminalExecutionKind kind,
+                                       const std::size_t thread_event_depth) {
     auto& state = worker_state();
+    if (thread_event_depth > state.local_max_thread_event_depth) {
+      state.local_max_thread_event_depth = thread_event_depth;
+    }
     switch (kind) {
       case TerminalExecutionKind::Full:
         ++state.local_full_executions;
@@ -1759,6 +1874,9 @@ class ParallelExecutor {
         break;
       case TerminalExecutionKind::DepthLimit:
         ++state.local_depth_limit_executions;
+        break;
+      case TerminalExecutionKind::ThreadEventLimit:
+        ++state.local_thread_event_limit_executions;
         break;
     }
     ++state.pending_terminal_executions;
@@ -1795,10 +1913,28 @@ class ParallelExecutor {
       depth_limit_executions_explored_.fetch_add(state.local_depth_limit_executions,
                                                  std::memory_order_relaxed);
     }
+    if (state.local_thread_event_limit_executions > 0) {
+      thread_event_limit_executions_explored_.fetch_add(state.local_thread_event_limit_executions,
+                                                        std::memory_order_relaxed);
+    }
+    // C++20 std::atomic has no fetch_max (that is C++26), so fold with a
+    // relaxed CAS loop. It effectively never spins: the maximum stabilises
+    // early, and this runs at roughly 1/progress_counter_flush_interval of the
+    // terminal rate, on cache lines this function already dirties.
+    if (state.local_max_thread_event_depth > 0) {
+      auto observed = max_thread_event_depth_reached_.load(std::memory_order_relaxed);
+      while (observed < state.local_max_thread_event_depth &&
+             !max_thread_event_depth_reached_.compare_exchange_weak(
+                 observed, state.local_max_thread_event_depth, std::memory_order_relaxed,
+                 std::memory_order_relaxed)) {
+      }
+    }
     state.local_full_executions = 0;
     state.local_blocked_executions = 0;
     state.local_error_executions = 0;
     state.local_depth_limit_executions = 0;
+    state.local_thread_event_limit_executions = 0;
+    state.local_max_thread_event_depth = 0;
     state.pending_terminal_executions = 0;
   }
 
@@ -1835,8 +1971,13 @@ class ParallelExecutor {
     snapshot.error_executions = error_executions_explored_.load(std::memory_order_relaxed);
     snapshot.depth_limit_executions =
         depth_limit_executions_explored_.load(std::memory_order_relaxed);
+    snapshot.thread_event_limit_executions =
+        thread_event_limit_executions_explored_.load(std::memory_order_relaxed);
+    snapshot.max_thread_event_depth =
+        max_thread_event_depth_reached_.load(std::memory_order_relaxed);
     snapshot.terminal_executions = snapshot.full_executions + snapshot.blocked_executions +
-                                   snapshot.error_executions + snapshot.depth_limit_executions;
+                                   snapshot.error_executions + snapshot.depth_limit_executions +
+                                   snapshot.thread_event_limit_executions;
     snapshot.max_workers = max_workers_;
     snapshot.max_queued_tasks = max_queued_tasks_;
     snapshot.counts_exact = counts_exact;
@@ -1883,6 +2024,8 @@ class ParallelExecutor {
   std::atomic<std::size_t> blocked_executions_explored_{0};
   std::atomic<std::size_t> error_executions_explored_{0};
   std::atomic<std::size_t> depth_limit_executions_explored_{0};
+  std::atomic<std::size_t> thread_event_limit_executions_explored_{0};
+  std::atomic<std::size_t> max_thread_event_depth_reached_{0};
 
   // Workers parked in queue_cv_.wait(). Read with relaxed ordering off the hot
   // path to decide whether an ND/receive alternative is worth handing off.
@@ -2309,6 +2452,14 @@ class DepthFirstExplorer {
     }
   }
 
+  // The per-execution thread-event maximum is computed here, where thread_ids_
+  // is available, and handed to the executor so it can be folded into the
+  // result without every executor needing the thread list.
+  void publish_terminal(const Graph& graph, const TerminalExecutionKind kind) {
+    static_cast<void>(executor_.publish_terminal_execution(
+        graph, kind, compute_max_thread_event_depth(graph, thread_ids_)));
+  }
+
   void handle_enter_frame() {
     auto& context = current_context();
     auto& graph = context.graph();
@@ -2334,15 +2485,16 @@ class DepthFirstExplorer {
       return;
     }
 
+    // Checked before compute_next_event, which is what makes DepthLimit win
+    // over every other kind when both apply.
     if (frame.dpor_tree_depth >= config_.max_depth) {
-      static_cast<void>(
-          executor_.publish_terminal_execution(graph, TerminalExecutionKind::DepthLimit));
+      publish_terminal(graph, TerminalExecutionKind::DepthLimit);
       pop_top_frame();
       return;
     }
 
-    auto next = compute_next_event(program_, graph, thread_ids_);
-    if (!next.has_value()) {
+    auto next = compute_next_event(program_, graph, thread_ids_, config_.max_thread_events);
+    if (!next.next.has_value()) {
       auto reschedule =
           find_blocked_receive_reschedule_child(program_, graph, executor_, config_, thread_ids_);
       if (reschedule.kind == BlockedReceiveRescheduleKind::StopRequested) {
@@ -2356,21 +2508,29 @@ class DepthFirstExplorer {
         return;
       }
 
-      // Maximal execution: Blocked when some thread still waits on a
-      // blocking receive that no reschedule can satisfy, Full otherwise.
-      const auto kind =
-          graph.has_blocked_thread() ? TerminalExecutionKind::Blocked : TerminalExecutionKind::Full;
-      static_cast<void>(executor_.publish_terminal_execution(graph, kind));
+      // ThreadEventLimit first: the engine declined to ask some thread whether
+      // it had a further event, so this is not known to be a maximal execution
+      // even if another thread happens to be blocked. Otherwise it is maximal:
+      // Blocked when some thread still waits on a blocking receive that no
+      // reschedule can satisfy, Full otherwise.
+      const auto kind = next.suppressed_by_thread_event_limit
+                            ? TerminalExecutionKind::ThreadEventLimit
+                        : graph.has_blocked_thread() ? TerminalExecutionKind::Blocked
+                                                     : TerminalExecutionKind::Full;
+      publish_terminal(graph, kind);
       pop_top_frame();
       return;
     }
 
-    auto [tid, label] = std::move(*next);
+    auto [tid, label] = std::move(*next.next);
 
+    // Published as soon as the label comes back, which is what makes Error win
+    // over ThreadEventLimit: the suppression flag is only consulted on the
+    // no-next-event path above.
     if (std::holds_alternative<model::ErrorLabel>(label)) {
       const auto checkpoint = graph.checkpoint();
       static_cast<void>(graph.add_event(tid, label));
-      static_cast<void>(executor_.publish_terminal_execution(graph, TerminalExecutionKind::Error));
+      publish_terminal(graph, TerminalExecutionKind::Error);
       graph.rollback(checkpoint);
       pop_top_frame();
       return;

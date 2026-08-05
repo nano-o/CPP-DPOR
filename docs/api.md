@@ -131,6 +131,7 @@ template <typename ValueT>
 struct DporConfigT {
   ProgramT<ValueT> program;
   std::size_t max_depth{1000};
+  std::size_t max_thread_events{0};
   model::CommunicationModel communication_model{model::CommunicationModel::Async};
   TerminalExecutionObserverT<ValueT> on_terminal_execution{};
   ProgressObserver on_progress{};
@@ -142,13 +143,29 @@ struct DporConfigT {
 
 `max_depth` bounds logical DPOR tree depth, not current graph size or
 implementation stack depth.
+
+`max_thread_events` bounds the events any single thread may contribute; `0`
+means unlimited. It is a per-thread event-graph bound rather than a search-tree
+bound: each thread is capped independently, and reaching the cap on one thread
+does not truncate the others. In what gets explored it is exactly equivalent to
+wrapping every thread function as
+`f'(trace, step) = step >= max_thread_events ? nullopt : f(trace, step)`; the
+engine skips the call instead of paying for it. The difference is the terminal
+classification described below.
+
 Set only one of `on_terminal_execution` and its legacy alias `on_execution`;
 setting both is a `dpor::precondition_error`.
 
 The observer receives:
 
 ```cpp
-enum class TerminalExecutionKind : std::uint8_t { Full, Blocked, Error, DepthLimit };
+enum class TerminalExecutionKind : std::uint8_t {
+  Full,
+  Blocked,
+  Error,
+  DepthLimit,
+  ThreadEventLimit,
+};
 
 template <typename ValueT>
 struct TerminalExecutionT {
@@ -166,6 +183,26 @@ of a blocked execution contains the internal `Block` events marking which
 threads are stuck (always as the last event of their thread). `DepthLimit`
 branches keep that kind even if some thread happens to be blocked at the
 cutoff, because a truncated branch is not a maximal execution.
+
+`ThreadEventLimit` says the engine declined to ask at least one nonterminated
+thread whether it had a further event, because that thread sat at
+`max_thread_events`. Like `DepthLimit` it is not a maximal execution and keeps
+that kind even if some other thread happens to be blocked at the cutoff. It is
+deliberately conservative: a thread whose function would have returned
+`nullopt` at exactly `step == max_thread_events` cannot be told apart from a
+genuinely truncated one without making the call the bound exists to avoid, so
+the kind means "this execution may be truncated", not "this execution was
+truncated". A thread whose `max_thread_events`-th event is an engine-injected
+`Block` is *not* in this category: it has terminated, so the engine never
+declines to ask it, the execution classifies as `Blocked`, and the `Block`
+stays eligible for blocked-receive rescheduling (which re-asks at
+`step == max_thread_events - 1`, still under the bound).
+
+Terminal-kind precedence is
+`DepthLimit > Error > ThreadEventLimit > Blocked > Full`. That order follows
+from the control flow -- `max_depth` is checked before `next_P(G)` is computed
+and an `Error` label is published as soon as it is returned, so the
+cap-suppression signal is only ever consulted on the no-next-event path.
 
 A blocked execution is not necessarily a bug. In request/response protocols a
 blocked terminal usually is one (a node waiting for a message that can never
@@ -198,6 +235,8 @@ struct ProgressSnapshot {
   std::size_t blocked_executions{0};
   std::size_t error_executions{0};
   std::size_t depth_limit_executions{0};
+  std::size_t thread_event_limit_executions{0};
+  std::size_t max_thread_event_depth{0};
   std::size_t active_workers{0};
   std::size_t max_workers{1};
   std::size_t queued_tasks{0};
@@ -260,6 +299,20 @@ and also carries:
 - `blocked_executions_explored`: number of blocked maximal executions
 - `error_executions_explored`: number of error executions
 - `depth_limit_executions_explored`: number of depth-limit executions
+- `thread_event_limit_executions_explored`: number of executions in which the
+  engine declined to ask at least one thread for a further event because it sat
+  at `max_thread_events`
+- `max_thread_event_depth_reached`: the largest per-thread event count, maximized
+  over the *published terminal executions* rather than over every transient
+  exploration graph -- under an early stop the two only coincide if exploration
+  ran to completion. Engine-injected `Block` events count toward it, so a thread
+  that blocks at step `max_thread_events - 1` also reports `max_thread_events`;
+  the bound itself is never exceeded. Reading it on an unbounded run is how to
+  choose a `max_thread_events` value. In parallel mode workers keep it
+  thread-local and fold it into the shared counter only when they flush, so the
+  live `ProgressSnapshot` value can lag by up to
+  `progress_counter_flush_interval` terminals per worker (the same caveat
+  `counts_exact` already signals); the final `VerifyResult` value is exact.
 - `nd_splits` / `receive_splits`: scheduler diagnostics counting alternatives
   handed to an idle worker from an ND or receive frame. Always `0` in sequential
   mode, and `0` in parallel mode when no worker ever starved, so a test can
@@ -268,9 +321,10 @@ and also carries:
 
 If `on_terminal_execution` is set, DPOR calls it with each published terminal
 execution. Terminal executions are full executions, blocked maximal
-executions, error executions, and branches truncated by the `max_depth` DPOR
-tree-depth limit. DPOR keeps exploring after error terminals unless the
-callback requests `Stop`.
+executions, error executions, branches truncated by the `max_depth` DPOR
+tree-depth limit, and branches truncated by the `max_thread_events` per-thread
+event bound. DPOR keeps exploring after error terminals unless the callback
+requests `Stop`.
 
 Note that `is_full_execution()` is false for blocked executions: observers
 that want every maximal execution must accept both `Full` and `Blocked`.

@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <mutex>
 #include <optional>
@@ -637,11 +638,12 @@ TEST_CASE("next-event converts an unsatisfied receive into an internal block",
   };
 
   const auto next = dpor::algo::detail::compute_next_event(
-      program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program));
-  REQUIRE(next.has_value());
-  REQUIRE(next->first == 1);  // NOLINT(bugprone-unchecked-optional-access)
+      program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program), 0);
+  REQUIRE(next.next.has_value());
+  REQUIRE(next.next->first == 1);  // NOLINT(bugprone-unchecked-optional-access)
   REQUIRE(std::holds_alternative<BlockLabel>(
-      next->second));  // NOLINT(bugprone-unchecked-optional-access)
+      next.next->second));  // NOLINT(bugprone-unchecked-optional-access)
+  REQUIRE_FALSE(next.suppressed_by_thread_event_limit);
 }
 
 TEST_CASE("next-event does not block an unsatisfied non-blocking receive",
@@ -655,12 +657,12 @@ TEST_CASE("next-event does not block an unsatisfied non-blocking receive",
   };
 
   const auto next = dpor::algo::detail::compute_next_event(
-      program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program));
-  REQUIRE(next.has_value());
-  REQUIRE(next->first == 1);  // NOLINT(bugprone-unchecked-optional-access)
+      program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program), 0);
+  REQUIRE(next.next.has_value());
+  REQUIRE(next.next->first == 1);  // NOLINT(bugprone-unchecked-optional-access)
   REQUIRE(std::holds_alternative<ReceiveLabel>(
-      next->second));                           // NOLINT(bugprone-unchecked-optional-access)
-  REQUIRE(std::get<ReceiveLabel>(next->second)  // NOLINT(bugprone-unchecked-optional-access)
+      next.next->second));                           // NOLINT(bugprone-unchecked-optional-access)
+  REQUIRE(std::get<ReceiveLabel>(next.next->second)  // NOLINT(bugprone-unchecked-optional-access)
               .is_nonblocking());
 }
 
@@ -1045,6 +1047,478 @@ TEST_CASE("max_depth limits exploration", "[algo][dpor]") {
   // With max_depth=2, it should stop early rather than looping forever.
 }
 
+// --- max_thread_events ---
+
+namespace {
+
+// The behavior max_thread_events is claimed to be exactly equivalent to: a
+// legal ThreadFunctionT that stops the thread once it has produced `bound`
+// events. The engine's version skips the call instead of making it.
+Program wrap_program_with_step_bound(const Program& program, const std::size_t bound) {
+  Program wrapped;
+  program.threads.for_each_assigned([&](const ThreadId tid, const ThreadFunction& thread_fn) {
+    wrapped.threads[tid] = [thread_fn, bound](const ThreadTrace& trace,
+                                              std::size_t step) -> std::optional<EventLabel> {
+      if (step >= bound) {
+        return std::nullopt;
+      }
+      return thread_fn(trace, step);
+    };
+  });
+  return wrapped;
+}
+
+// A receiver that keeps working after its first receive, with two senders
+// competing for that receive. The competition forces a backward revisit whose
+// restriction deletes the receiver's later events, dropping it back below a
+// small per-thread bound and re-enabling it. Both the receiver's first receive
+// and T4's receive also start out unsatisfiable, so blocked-receive
+// rescheduling runs too. Mirroring the simple max_depth tests would exercise
+// neither path, which is exactly where the equivalence could fail.
+Program make_revisit_and_block_program() {
+  Program program;
+
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return make_receive_label<Value>();
+    }
+    if (step == 1 && trace.size() == 1) {
+      return SendLabel{.destination = 4, .value = "echo-" + trace[0].value()};
+    }
+    if (step == 2) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+  program.threads[2] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "a"};
+    }
+    return std::nullopt;
+  };
+  program.threads[3] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 1, .value = "b"};
+    }
+    return std::nullopt;
+  };
+  program.threads[4] = [](const ThreadTrace&, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+  return program;
+}
+
+// Thread 1 keeps sending forever, so it is always available to be capped.
+Program make_unbounded_sender_program() {
+  Program program;
+  program.threads[1] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+    return SendLabel{.destination = 2, .value = "x"};
+  };
+  program.threads[2] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+    return std::nullopt;
+  };
+  return program;
+}
+
+ObservedRun run_bounded(const Program& program, const std::size_t max_thread_events,
+                        const std::optional<std::size_t> workers) {
+  ObservedRun run;
+  std::mutex observed_mutex;
+
+  DporConfig config;
+  config.program = program;
+  config.max_thread_events = max_thread_events;
+  config.on_terminal_execution = [&](const ExplorationGraph& graph) {
+    auto signature = graph_signature(graph);
+    std::lock_guard lock(observed_mutex);
+    run.observed.push_back(signature);
+    run.unique.insert(std::move(signature));
+  };
+
+  if (workers.has_value()) {
+    ParallelVerifyOptions options;
+    options.max_workers = *workers;
+    run.result = verify_parallel(config, options);
+  } else {
+    run.result = verify(config);
+  }
+  return run;
+}
+
+void require_bound_matches_wrapped_program(const Program& program, const std::size_t bound,
+                                           const std::optional<std::size_t> workers) {
+  CAPTURE(bound, workers.value_or(0));
+  const auto bounded = run_bounded(program, bound, workers);
+  const auto wrapped = run_bounded(wrap_program_with_step_bound(program, bound), 0, workers);
+
+  REQUIRE(bounded.result.kind == VerifyResultKind::AllExplored);
+  REQUIRE(wrapped.result.kind == VerifyResultKind::AllExplored);
+  // The terminal *kinds* deliberately differ -- that difference is the whole
+  // point of the bound -- but the explored graphs must not.
+  REQUIRE(bounded.unique == wrapped.unique);
+  REQUIRE(bounded.observed.size() == wrapped.observed.size());
+  REQUIRE(bounded.result.executions_explored == wrapped.result.executions_explored);
+  REQUIRE(wrapped.result.thread_event_limit_executions_explored == 0);
+  REQUIRE(bounded.result.max_thread_event_depth_reached <= bound);
+  REQUIRE(bounded.result.max_thread_event_depth_reached ==
+          wrapped.result.max_thread_event_depth_reached);
+}
+
+}  // namespace
+
+TEST_CASE("max_thread_events limits exploration", "[algo][dpor][thread_event_limit]") {
+  DporConfig config;
+  config.program = make_unbounded_sender_program();
+  config.max_thread_events = 3;
+
+  std::size_t observed_count = 0;
+  bool saw_thread_event_limit_execution = false;
+  config.on_terminal_execution = [&](const TerminalExecution& execution) {
+    ++observed_count;
+    saw_thread_event_limit_execution = execution.is_thread_event_limit_execution();
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.kind == VerifyResultKind::AllExplored);
+  REQUIRE(result.full_executions_explored == 0);
+  REQUIRE(result.blocked_executions_explored == 0);
+  REQUIRE(result.error_executions_explored == 0);
+  // The bound, not max_depth, is what stopped this.
+  REQUIRE(result.depth_limit_executions_explored == 0);
+  REQUIRE(result.thread_event_limit_executions_explored == 1);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(result.max_thread_event_depth_reached == 3);
+  REQUIRE(observed_count == 1);
+  REQUIRE(saw_thread_event_limit_execution);
+}
+
+TEST_CASE("max_thread_events caps each thread independently", "[algo][dpor][thread_event_limit]") {
+  // A max_depth-style check at frame entry would kill the whole branch as soon
+  // as the first thread reached the bound, leaving thread 2 with no events.
+  DporConfig config;
+  config.program.threads[1] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+    return SendLabel{.destination = 3, .value = "from-1"};
+  };
+  config.program.threads[2] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+    return SendLabel{.destination = 3, .value = "from-2"};
+  };
+  config.program.threads[3] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+    return std::nullopt;
+  };
+  config.max_thread_events = 2;
+
+  std::size_t observed_count = 0;
+  config.on_terminal_execution = [&](const TerminalExecution& execution) {
+    ++observed_count;
+    REQUIRE(execution.graph.thread_event_count(1) == 2);
+    REQUIRE(execution.graph.thread_event_count(2) == 2);
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.thread_event_limit_executions_explored == 1);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(result.max_thread_event_depth_reached == 2);
+  REQUIRE(observed_count == 1);
+}
+
+TEST_CASE("a block synthesized as the cap-th event stays blocked",
+          "[algo][dpor][thread_event_limit]") {
+  // The case that rules out classifying on thread_event_count >= cap: thread 1
+  // ends with thread_event_count == cap whose last event is an engine-injected
+  // Block, which is a genuinely maximal blocked execution, not a truncated one.
+  DporConfig config;
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 2, .value = "x"};
+    }
+    if (step == 1) {
+      return make_receive_label_from_values<Value>({"never-sent"});
+    }
+    return std::nullopt;
+  };
+  config.program.threads[2] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+    return std::nullopt;
+  };
+  config.max_thread_events = 2;
+
+  const auto result = verify(config);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(result.blocked_executions_explored == 1);
+  REQUIRE(result.thread_event_limit_executions_explored == 0);
+  REQUIRE(result.max_thread_event_depth_reached == 2);
+}
+
+TEST_CASE("a block created at the cap is still rescheduled once a send appears",
+          "[algo][dpor][thread_event_limit]") {
+  // Removing the trailing Block drops the thread to cap - 1, so the engine
+  // re-asks at a step still under the bound and the replacement receive fits.
+  DporConfig config;
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return SendLabel{.destination = 2, .value = "go"};
+    }
+    if (step == 1) {
+      return make_receive_label_from_values<Value>({"ack"});
+    }
+    return std::nullopt;
+  };
+  config.program.threads[2] = [](const ThreadTrace& trace,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return make_receive_label_from_values<Value>({"go"});
+    }
+    if (step == 1 && trace.size() == 1) {
+      return SendLabel{.destination = 1, .value = "ack"};
+    }
+    return std::nullopt;
+  };
+  config.max_thread_events = 2;
+
+  std::size_t observed_count = 0;
+  config.on_terminal_execution = [&](const TerminalExecution& execution) {
+    ++observed_count;
+    // The Block was replaced by the real receive, so nothing is blocked.
+    REQUIRE_FALSE(execution.graph.has_blocked_thread());
+    REQUIRE(execution.graph.thread_event_count(1) == 2);
+    REQUIRE(execution.graph.thread_event_count(2) == 2);
+  };
+
+  const auto result = verify(config);
+  REQUIRE(observed_count == 1);
+  REQUIRE(result.executions_explored == 1);
+  REQUIRE(result.blocked_executions_explored == 0);
+  REQUIRE(result.max_thread_event_depth_reached == 2);
+}
+
+TEST_CASE("a program completing in exactly cap events is still thread-event-limit",
+          "[algo][dpor][thread_event_limit]") {
+  // Pinned deliberately. ThreadEventLimit is conservative: it means the engine
+  // declined to *ask*, not that the bound truncated anything. Distinguishing
+  // this case from a genuine truncation would require making the very call the
+  // bound exists to avoid, so do not "fix" it into Full.
+  auto make_config = [](const std::size_t max_thread_events) {
+    DporConfig config;
+    config.program.threads[1] = [](const ThreadTrace&,
+                                   std::size_t step) -> std::optional<EventLabel> {
+      if (step < 2) {
+        return SendLabel{.destination = 2, .value = "x"};
+      }
+      return std::nullopt;
+    };
+    config.program.threads[2] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+      return std::nullopt;
+    };
+    config.max_thread_events = max_thread_events;
+    return config;
+  };
+
+  const auto at_cap = verify(make_config(2));
+  REQUIRE(at_cap.executions_explored == 1);
+  REQUIRE(at_cap.thread_event_limit_executions_explored == 1);
+  REQUIRE(at_cap.full_executions_explored == 0);
+
+  // One event of headroom is all it takes to see the thread finish.
+  const auto above_cap = verify(make_config(3));
+  REQUIRE(above_cap.executions_explored == 1);
+  REQUIRE(above_cap.thread_event_limit_executions_explored == 0);
+  REQUIRE(above_cap.full_executions_explored == 1);
+  REQUIRE(above_cap.max_thread_event_depth_reached == 2);
+}
+
+TEST_CASE("terminal-kind precedence is DepthLimit > Error > ThreadEventLimit > Blocked",
+          "[algo][dpor][thread_event_limit]") {
+  // Not a chosen ordering: max_depth is checked before compute_next_event and
+  // Error is published immediately after it returns, so the suppression signal
+  // is only ever consulted on the no-next-event path. Pinned so a refactor
+  // cannot silently reorder it.
+  SECTION("depth limit wins over the thread-event bound") {
+    DporConfig config;
+    config.program = make_unbounded_sender_program();
+    config.max_depth = 1;
+    config.max_thread_events = 1;
+
+    const auto result = verify(config);
+    REQUIRE(result.executions_explored == 1);
+    REQUIRE(result.depth_limit_executions_explored == 1);
+    REQUIRE(result.thread_event_limit_executions_explored == 0);
+  }
+
+  SECTION("an error wins over the thread-event bound") {
+    DporConfig config;
+    config.program.threads[1] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+      return SendLabel{.destination = 2, .value = "x"};
+    };
+    config.program.threads[2] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+      return ErrorLabel{};
+    };
+    config.max_thread_events = 1;
+
+    const auto result = verify(config);
+    REQUIRE(result.executions_explored == 1);
+    REQUIRE(result.error_executions_explored == 1);
+    REQUIRE(result.thread_event_limit_executions_explored == 0);
+  }
+
+  SECTION("the thread-event bound wins over a blocked thread") {
+    DporConfig config;
+    config.program.threads[1] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+      return SendLabel{.destination = 2, .value = "x"};
+    };
+    config.program.threads[2] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+      return make_receive_label_from_values<Value>({"never-sent"});
+    };
+    config.max_thread_events = 1;
+
+    std::size_t observed_count = 0;
+    config.on_terminal_execution = [&](const TerminalExecution& execution) {
+      ++observed_count;
+      // A thread really is blocked here; the kind still reports the bound,
+      // because the execution is not known to be maximal.
+      REQUIRE(execution.graph.has_blocked_thread());
+      REQUIRE(execution.is_thread_event_limit_execution());
+    };
+
+    const auto result = verify(config);
+    REQUIRE(observed_count == 1);
+    REQUIRE(result.executions_explored == 1);
+    REQUIRE(result.thread_event_limit_executions_explored == 1);
+    REQUIRE(result.blocked_executions_explored == 0);
+  }
+}
+
+TEST_CASE("max_thread_event_depth_reached reports the observed maximum when unbounded",
+          "[algo][dpor][thread_event_limit]") {
+  DporConfig config;
+  config.program.threads[1] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step < 3) {
+      return SendLabel{.destination = 2, .value = "x"};
+    }
+    return std::nullopt;
+  };
+  config.program.threads[2] = [](const ThreadTrace&,
+                                 std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0) {
+      return make_receive_label<Value>();
+    }
+    return std::nullopt;
+  };
+
+  const auto result = verify(config);
+  REQUIRE(result.thread_event_limit_executions_explored == 0);
+  REQUIRE(result.depth_limit_executions_explored == 0);
+  REQUIRE(result.max_thread_event_depth_reached == 3);
+}
+
+TEST_CASE("bounded exploration matches an explicitly wrapped program",
+          "[algo][dpor][thread_event_limit]") {
+  // The load-bearing equivalence claim: the engine-side skip computes the same
+  // next_P(G) as a thread function that returns nullopt past the bound.
+  const auto revisit_program = make_revisit_and_block_program();
+  const auto mixed_program = make_parallel_mixed_program();
+
+  for (const std::size_t bound : {1U, 2U, 3U, 4U}) {
+    require_bound_matches_wrapped_program(revisit_program, bound, std::nullopt);
+    require_bound_matches_wrapped_program(mixed_program, bound, std::nullopt);
+    require_bound_matches_wrapped_program(revisit_program, bound, std::optional<std::size_t>(4));
+    require_bound_matches_wrapped_program(mixed_program, bound, std::optional<std::size_t>(8));
+  }
+
+  // The wrapped programs are ordinary programs, so the exhaustive oracle can
+  // check the bounded exploration too.
+  for (const std::size_t bound : {2U, 3U}) {
+    require_dpor_matches_oracle(wrap_program_with_step_bound(revisit_program, bound),
+                                "revisit/block program wrapped at step " + std::to_string(bound));
+    require_dpor_matches_oracle(wrap_program_with_step_bound(mixed_program, bound),
+                                "mixed program wrapped at step " + std::to_string(bound));
+  }
+}
+
+TEST_CASE("verify_parallel reports thread-event-limit terminals",
+          "[algo][dpor][parallel][thread_event_limit]") {
+  Program program;
+  program.threads[1] = [](const ThreadTrace& trace, std::size_t step) -> std::optional<EventLabel> {
+    if (step == 0 && trace.empty()) {
+      return NondeterministicChoiceLabel{
+          .value = "done",
+          .choices = {"done", "loop"},
+      };
+    }
+    if (trace.size() != 1) {
+      return std::nullopt;
+    }
+    if (trace[0].value() == "done") {
+      return std::nullopt;
+    }
+    return SendLabel{.destination = 2, .value = "tick"};
+  };
+  program.threads[2] = [](const ThreadTrace&, std::size_t) -> std::optional<EventLabel> {
+    return std::nullopt;
+  };
+
+  std::size_t observed_count = 0;
+  std::size_t full_observed_count = 0;
+  std::size_t thread_event_limit_observed_count = 0;
+  std::mutex observed_mutex;
+
+  DporConfig config;
+  config.program = program;
+  config.max_thread_events = 2;
+  config.on_terminal_execution = [&](const TerminalExecution& execution) {
+    std::lock_guard lock(observed_mutex);
+    ++observed_count;
+    if (execution.is_full_execution()) {
+      ++full_observed_count;
+    }
+    if (execution.is_thread_event_limit_execution()) {
+      ++thread_event_limit_observed_count;
+    }
+  };
+
+  ParallelVerifyOptions options;
+  options.max_workers = 2;
+  options.max_queued_tasks = 4;
+  const auto result = verify_parallel(config, options);
+
+  REQUIRE(result.kind == VerifyResultKind::AllExplored);
+  REQUIRE(result.depth_limit_executions_explored == 0);
+  REQUIRE(result.full_executions_explored == 1);
+  REQUIRE(result.thread_event_limit_executions_explored == 1);
+  REQUIRE(result.executions_explored == 2);
+  REQUIRE(result.max_thread_event_depth_reached == 2);
+  REQUIRE(observed_count == 2);
+  REQUIRE(full_observed_count == 1);
+  REQUIRE(thread_event_limit_observed_count == 1);
+}
+
+TEST_CASE("progress snapshots carry the thread-event-limit counters",
+          "[algo][dpor][thread_event_limit]") {
+  DporConfig config;
+  config.program = make_unbounded_sender_program();
+  config.max_thread_events = 4;
+  config.progress_report_interval = std::chrono::milliseconds::zero();
+
+  std::optional<ProgressSnapshot> final_snapshot;
+  config.on_progress = [&](const ProgressSnapshot& snapshot) {
+    if (snapshot.state != ProgressState::Running) {
+      final_snapshot = snapshot;
+    }
+  };
+
+  const auto result = verify(config);
+  REQUIRE(final_snapshot.has_value());
+  REQUIRE(final_snapshot->thread_event_limit_executions ==  // NOLINT
+          result.thread_event_limit_executions_explored);
+  REQUIRE(final_snapshot->max_thread_event_depth ==  // NOLINT
+          result.max_thread_event_depth_reached);
+  REQUIRE(final_snapshot->terminal_executions == result.executions_explored);  // NOLINT
+}
+
 // --- Terminal execution observer ---
 
 TEST_CASE("terminal execution observer is called for each full execution", "[algo][dpor]") {
@@ -1348,11 +1822,11 @@ TEST_CASE("internal block suspends thread progress until receive is rescheduled"
 
   // At the empty graph, T1 has no compatible send and must be internally blocked.
   const auto first = dpor::algo::detail::compute_next_event(
-      program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program));
-  REQUIRE(first.has_value());
-  REQUIRE(first->first == 1);  // NOLINT(bugprone-unchecked-optional-access)
+      program, ExplorationGraph{}, dpor::algo::detail::sorted_thread_ids(program), 0);
+  REQUIRE(first.next.has_value());
+  REQUIRE(first.next->first == 1);  // NOLINT(bugprone-unchecked-optional-access)
   REQUIRE(std::holds_alternative<BlockLabel>(
-      first->second));  // NOLINT(bugprone-unchecked-optional-access)
+      first.next->second));  // NOLINT(bugprone-unchecked-optional-access)
 
   DporConfig config;
   config.program = program;
@@ -1452,20 +1926,20 @@ TEST_CASE("multiple blocked receives are both rescheduled when matching sends ap
   // At the beginning, both receiver threads should become internally blocked.
   ExplorationGraph partial;
   const auto first = dpor::algo::detail::compute_next_event(
-      program, partial, dpor::algo::detail::sorted_thread_ids(program));
-  REQUIRE(first.has_value());
-  REQUIRE(first->first == 1);  // NOLINT(bugprone-unchecked-optional-access)
+      program, partial, dpor::algo::detail::sorted_thread_ids(program), 0);
+  REQUIRE(first.next.has_value());
+  REQUIRE(first.next->first == 1);  // NOLINT(bugprone-unchecked-optional-access)
   REQUIRE(std::holds_alternative<BlockLabel>(
-      first->second));  // NOLINT(bugprone-unchecked-optional-access)
+      first.next->second));  // NOLINT(bugprone-unchecked-optional-access)
   static_cast<void>(partial.add_event(
-      first->first, first->second));  // NOLINT(bugprone-unchecked-optional-access)
+      first.next->first, first.next->second));  // NOLINT(bugprone-unchecked-optional-access)
 
   const auto second = dpor::algo::detail::compute_next_event(
-      program, partial, dpor::algo::detail::sorted_thread_ids(program));
-  REQUIRE(second.has_value());
-  REQUIRE(second->first == 2);  // NOLINT(bugprone-unchecked-optional-access)
+      program, partial, dpor::algo::detail::sorted_thread_ids(program), 0);
+  REQUIRE(second.next.has_value());
+  REQUIRE(second.next->first == 2);  // NOLINT(bugprone-unchecked-optional-access)
   REQUIRE(std::holds_alternative<BlockLabel>(
-      second->second));  // NOLINT(bugprone-unchecked-optional-access)
+      second.next->second));  // NOLINT(bugprone-unchecked-optional-access)
 
   DporConfig config;
   config.program = program;

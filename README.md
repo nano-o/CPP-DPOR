@@ -31,9 +31,11 @@ For a more realistic example, see the
 - Published terminal executions are exposed to observers as
   `dpor::algo::TerminalExecutionT<ValueT>`, which carries an
   `ExplorationGraphT<ValueT>` plus a terminal kind (`Full`, `Blocked`,
-  `Error`, or `DepthLimit`). `Blocked` marks maximal executions in which some
-  thread waits forever on a blocking receive; asserting
-  `blocked_executions_explored == 0` checks deadlock-freedom in that sense.
+  `Error`, `DepthLimit`, or `ThreadEventLimit`). `Blocked` marks maximal
+  executions in which some thread waits forever on a blocking receive;
+  asserting `blocked_executions_explored == 0` checks deadlock-freedom in that
+  sense. `DepthLimit` and `ThreadEventLimit` mark branches the engine may have
+  truncated, so properties about complete interleavings must exclude them.
 - Manual graph validation is available through
   `dpor::model::AsyncConsistencyCheckerT`, `FifoP2PConsistencyCheckerT`, and
   `ConsistencyCheckerT`.
@@ -56,10 +58,16 @@ Shared `DporConfigT<ValueT>` parameters:
   `dpor_tree_depth >= max_depth`, it publishes a `DepthLimit` terminal
   execution and does not explore that branch further. This bounds logical
   search-tree depth, not current graph size or implementation stack depth.
+- `max_thread_events{0}`: maximum events any single thread may contribute; `0`
+  means unlimited. Unlike `max_depth` this is a per-thread event-graph bound,
+  applied independently per thread, so reaching it on one thread does not
+  truncate the others. Branches it may have truncated are published as
+  `ThreadEventLimit` terminal executions.
 - `communication_model{Async}`: communication semantics for consistency
   checking and revisit generation. Supported values are `Async` and `FifoP2P`.
 - `on_terminal_execution{}`: optional callback invoked for each published
-  terminal execution (`Full`, `Blocked`, `Error`, or `DepthLimit`). The callback
+  terminal execution (`Full`, `Blocked`, `Error`, `DepthLimit`, or
+  `ThreadEventLimit`). The callback
   may return `TerminalExecutionAction::Continue` or `Stop`; `void` callbacks
   are treated as `Continue`.
 - `on_execution{}`: legacy alias for `on_terminal_execution`. Setting both
@@ -133,10 +141,16 @@ Result reporting:
 - `VerifyResult.kind` is `AllExplored` or `Stopped`.
 - `VerifyResult` also reports aggregate terminal counts via
   `executions_explored`, `full_executions_explored`,
-  `blocked_executions_explored`, `error_executions_explored`, and
-  `depth_limit_executions_explored`. Full and blocked counts partition the
+  `blocked_executions_explored`, `error_executions_explored`,
+  `depth_limit_executions_explored`, and
+  `thread_event_limit_executions_explored`; `executions_explored` is the sum of
+  the other five. Full and blocked counts partition the
   maximal executions; `full_executions_explored` alone does not cover
   executions in which a thread ended blocked on a receive.
+- `VerifyResult.max_thread_event_depth_reached` reports the largest per-thread
+  event count over the published terminal executions, whether or not
+  `max_thread_events` is set. Reading it on an unbounded run is how to choose a
+  bound.
 - Parallel callback order is unspecified across workers, and terminal
   observers may run concurrently. User callbacks and any state they capture
   must therefore be safe for concurrent use. Final `VerifyResult` counts are
@@ -170,7 +184,10 @@ against an independent exhaustive, model-aware oracle in
 `tests/support/oracle.hpp`.
 When `max_depth` truncates exploration, DPOR publishes depth-limit terminal
 executions and counts them in `VerifyResult::depth_limit_executions_explored`.
-`max_depth` is a DPOR tree-depth limit rather than a graph-size limit. The
+`max_depth` is a DPOR tree-depth limit rather than a graph-size limit; when a
+per-thread step budget is what you want, use `max_thread_events` instead, which
+publishes `ThreadEventLimit` terminals and counts them in
+`VerifyResult::thread_event_limit_executions_explored`. The
 current exploration core is iterative, so deep explorations no longer grow the
 process stack with search depth.
 
