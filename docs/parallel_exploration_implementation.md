@@ -363,13 +363,19 @@ What is preserved:
 `on_terminal_execution` may be invoked concurrently in parallel mode. Callback
 code and captured state must therefore be thread-safe.
 As in sequential mode, published terminal executions include full executions,
-blocked maximal executions, error executions, and branches cut off by the
-`max_depth` DPOR tree-depth limit.
+blocked maximal executions, error executions, branches cut off by the
+`max_depth` DPOR tree-depth limit, and branches the `max_thread_events`
+per-thread event bound may have truncated.
 
 `on_progress` may also be invoked from worker threads. Its snapshots report:
 
 - elapsed time since exploration start
-- total/full/blocked/error/depth-limit terminal counts
+- total/full/blocked/error/depth-limit/thread-event-limit terminal counts
+- `max_thread_event_depth`, the largest per-thread event count seen so far.
+  Workers keep it thread-local and fold it into the shared counter only when
+  they flush their batched terminal counts, so like the other live counts it
+  can lag by up to `progress_counter_flush_interval` terminals per worker; the
+  final `VerifyResult` value is exact
 - current `active_workers` and queued-task count
 - configured worker and queue capacities
 - whether the live counts are exact
@@ -398,6 +404,8 @@ currently checks:
   branches race to an error
 - best-effort early stop when a terminal observer returns `Stop`
 - depth-limit reporting
+- thread-event-limit reporting, including the shared
+  `max_thread_event_depth_reached` fold
 - blocked-terminal classification
 - serialized live progress reporting with exact final counts
 - callback exception propagation and fatal-trace reporting

@@ -108,8 +108,10 @@ exploration engine.
 
 - **`dpor.hpp`** implements the exploration algorithm inspired by Must
   Algorithm 1.
-- **`DporConfigT`** carries the program, DPOR tree-depth limit, whole-program
-  communication model, and optional observers: a terminal-execution observer
+- **`DporConfigT`** carries the program, the DPOR tree-depth limit
+  (`max_depth`), the per-thread event bound (`max_thread_events`, `0` =
+  unlimited), the whole-program communication model, and optional observers:
+  a terminal-execution observer
   (`on_terminal_execution`, with legacy alias `on_execution`; setting both
   throws), a throttled progress observer (`on_progress` plus
   `progress_report_interval`), and a fatal-error observer (`on_fatal_error`).
@@ -137,7 +139,11 @@ exploration engine.
 - Verification reports `AllExplored` or `Stopped`.
 - Optional terminal-execution observers receive `TerminalExecutionT<ValueT>`
   values for each full execution, blocked maximal execution, error execution,
-  and depth-limit execution.
+  depth-limit execution, and thread-event-limit execution. The last two mark
+  branches the engine may have truncated rather than maximal executions:
+  `DepthLimit` when the branch hit `max_depth`, `ThreadEventLimit` when the
+  engine declined to ask some nonterminated thread for a further event because
+  it sat at `max_thread_events`.
 - Observers may request early termination by returning `Stop`. In parallel
   mode stop is best-effort: workers batch stop checks (`sync_steps`), so
   additional terminal executions may be published after stop is requested.
@@ -149,7 +155,8 @@ exploration engine.
   (including the in-progress graph) before a fatal exception raised during
   active exploration propagates out of `verify()`/`verify_parallel()`.
 - `VerifyResult` tracks total published terminal executions plus a split count
-  for each terminal-execution kind.
+  for each terminal-execution kind, and `max_thread_event_depth_reached`, the
+  largest per-thread event count over the published terminals.
 
 ## 3. Public Entry Points
 

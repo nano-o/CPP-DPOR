@@ -133,12 +133,13 @@ benchmarks/ → standalone benchmark targets and perf helpers
 
 The engine in `include/dpor/algo/dpor.hpp` implements **Algorithm 1** from the Must paper:
 
-- `verify()` — sequential DFS entry point, returns `VerifyResult` (`AllExplored` / `Stopped`) plus counts for full, blocked, error, and depth-limit terminal executions (`Blocked` = maximal execution where some thread waits forever on a blocking receive; Must reports these separately from full executions)
+- `verify()` — sequential DFS entry point, returns `VerifyResult` (`AllExplored` / `Stopped`) plus counts for full, blocked, error, depth-limit, and thread-event-limit terminal executions (`Blocked` = maximal execution where some thread waits forever on a blocking receive; Must reports these separately from full executions). `DepthLimit` and `ThreadEventLimit` mark branches the engine may have truncated, so a property quantifying over maximal executions must exclude both. `VerifyResult` also carries `max_thread_event_depth_reached`, the largest per-thread event count over the published terminals, which is how to pick a `max_thread_events` value from an unbounded run
 - `verify_parallel()` — experimental parallel exploration with configurable worker threads
 - `visit()` — iterative exploration of consistent executions via the internal
   frame/context stack machine
 - `backward_revisit()` — identifies alternative interleavings or message matches
-- `DporConfigT` — configuration: program, max_depth, communication_model, terminal-execution observer callback (`on_terminal_execution`; legacy alias `on_execution`), optional progress reporting, and an optional fatal-error diagnostic observer
+- `DporConfigT` — configuration: program, max_depth, max_thread_events, communication_model, terminal-execution observer callback (`on_terminal_execution`; legacy alias `on_execution`), optional progress reporting, and an optional fatal-error diagnostic observer
+- The two bounds are different in kind: `max_depth` bounds logical DPOR search-tree depth, while `max_thread_events` (`0` = unlimited) bounds the events any *single* thread may contribute, applied independently per thread, so reaching it on one thread does not truncate the others. In what gets explored it is exactly equivalent to wrapping every thread function as `f'(trace, step) = step >= max_thread_events ? nullopt : f(trace, step)`; the engine just skips the call. The difference is classification: a branch the bound may have truncated is published as `ThreadEventLimit`. The kind is conservative — a thread that would have returned `nullopt` at exactly `step == max_thread_events` cannot be told apart from a truncated one without making the call the bound exists to avoid — so it means "may be truncated", not "was truncated". A thread whose cap-th event is an engine-injected `Block` has terminated, so it classifies as `Blocked` and stays eligible for blocked-receive rescheduling. Terminal-kind precedence is `DepthLimit > Error > ThreadEventLimit > Blocked > Full`
 - `ParallelVerifyOptions` — parallel tuning: `max_workers`, `max_queued_tasks`, `spawn_depth_cutoff`, `sync_steps`,
 `split_poll_interval_steps`, `progress_counter_flush_interval`, `progress_poll_interval_steps`
 
@@ -162,8 +163,10 @@ Thread-function traces use `ObservedValueT` entries rather than raw payloads.
 | `relation_test.cpp` | Relation concept, ExplicitRelation, ProgramOrderRelation, compose, transitive_closure |
 | `consistency_test.cpp` | Async and FIFO p2p consistency checking, including all ConsistencyIssueCodes |
 | `exploration_graph_test.cpp` | ExplorationGraphT operations (restrict, with_rf, porf_contains, etc.) |
-| `dpor_test.cpp` | DPOR algorithm end-to-end (paper examples, FIFO regressions, non-blocking receive coverage, oracle cross-checks, parallel coverage) |
+| `dpor_test.cpp` | DPOR algorithm end-to-end (paper examples, FIFO regressions, non-blocking receive coverage, `max_thread_events` bound and terminal-kind precedence, oracle cross-checks, parallel coverage) |
 | `dpor_stress_test.cpp` | Randomized stress tests with multiple seeds, including oracle-backed coverage |
+| `errors_test.cpp` | Exception taxonomy, user-callback error propagation, `on_fatal_error` diagnostics, `format_graph` rendering |
+| `benchmark_cli_test.cpp` | Benchmark CLI option parsing and communication-model forwarding |
 | `tests/support/oracle_core.hpp` | Core exhaustive model-aware oracle implementation shared by DPOR correctness tests |
 | `tests/support/oracle.hpp` | Catch2-facing model-aware oracle helpers built on top of `oracle_core.hpp` |
 | `examples/two_phase_commit_timeout/two_phase_commit_test.cpp` | 2PC protocol + timer behavior example |
